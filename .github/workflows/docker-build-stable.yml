@@ -1,0 +1,327 @@
+# ============================================================
+# 自动构建宝塔稳定版（Stable）镜像并推送到 DockerHub
+#
+# 自动维护流程（长期免维护）：
+#   每月 1 号 UTC 02:17 定时（或 push stable/** / 手动触发）：
+#     ↓
+#   scripts/detect_version.sh --mode stable 解析精确版本号（panel6_ltd_<major>.zip 取大版本，
+#   官方更新包 LinuxPanel-*.zip 探测小版本；脚本结构/更新包路径变更时 fail-closed 报错，
+#   绝不静默产出错误版本）
+#     ↓
+#   检查 DockerHub 镜像标签 bugseeker/baota:<版本> 是否已存在
+#     ↓
+#   不存在 → 构建双架构镜像 → 推送 DockerHub（仅精准版本标签，不带 latest）
+#   存在（但为每月定时刷新）→ 强制重建并重推同一 tag，拾取 debian/apt 安全补丁（pull:true）
+#   存在（push 触发，非刷新）→ 跳过
+#
+# 已构建判断：以 DockerHub 镜像标签为准（镜像只发布到 DockerHub，用标签存在性避免重复构建）。
+#
+# 可观测与自愈：
+#   - 每次构建在 Step Summary 输出：版本 / 架构 / 标签 / 是否强制刷新 / Trivy 摘要
+#   - 构建/冒烟失败：on-failure job 自动开 issue 并 @维护者（连续 3 次降级为仅告警）
+#   - Trivy 可修复 HIGH/CRITICAL：推送不阻断，但自动开 issue 跟踪
+#
+# 配置要求（GitHub 仓库 Settings -> Secrets and variables -> Actions）：
+#   DOCKERHUB_USERNAME : 你的 DockerHub 用户名
+#   DOCKERHUB_TOKEN    : DockerHub Access Token（不是登录密码，scoped access token）
+#
+# 推送到：DOCKERHUB_USERNAME/baota:<精确版本>（稳定版不带 latest）
+#         （latest 由正式版 release 持有）
+#
+# 安全机制：先单架构(amd64)构建并冒烟测试（面板存活 / 端口响应 / bt 命令 / SSH），
+#          通过后才推送双架构镜像；验证失败则不推送，避免坏镜像进入生产仓库。
+# ============================================================
+name: Build Baota Stable
+
+on:
+  # 每月 1 号 UTC 02:17 定时：既检测官方新稳定版，又强制重建同 tag 刷新安全补丁
+  # 稳定版更新频率低（数月/半年一次），每月一次足够；非整点(17分)避开 GitHub runner 整点拥堵
+  schedule:
+    - cron: "17 2 1 * *"
+  push:
+    branches: [main, master]
+    paths:
+      - 'stable/**'
+      - 'scripts/smoke.sh'
+      - 'scripts/detect_version.sh'
+      - '.github/workflows/docker-build-stable.yml'
+  # 手动触发：可传 inputs.version 强制指定版本（版本源失效时的手动覆盖方式，见 README）
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '强制指定构建版本（如 12.0.2）；留空则自动解析官方稳定版'
+        required: false
+        default: ''
+
+env:
+  # DockerHub 镜像仓库名（不含用户名）
+  REPO_NAME: baota
+  # 冒烟测试用的面板端口
+  SMOKE_PORT: "8888"
+  # 构建上下文目录
+  BUILD_DIR: stable
+
+# 避免定时 / push / 手动触发重叠
+concurrency:
+  group: build-baota-stable
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================
+  # 0) 下载安装脚本 → 解析精确版本号 → 检查 DockerHub 镜像标签是否已存在
+  # ==========================================================
+  check-version:
+    name: Resolve Stable Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+      force_refresh: ${{ steps.check.outputs.force_refresh }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve stable version (detect_version.sh, fail-closed)
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/detect_version.sh
+          FORCE_ARG=""
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            FORCE_ARG="--force-tag ${{ github.event.inputs.version }}"
+          fi
+          # shellcheck disable=SC2086
+          bash scripts/detect_version.sh --mode stable $FORCE_ARG --out "$GITHUB_OUTPUT" --verbose
+          echo "解析到稳定版精确版本：${{ steps.version.outputs.version }}"
+
+      - name: Check docker CLI version (auto-maintain ARG, Dependabot can't cover)
+        shell: bash
+        run: |
+          chmod +x scripts/check_docker_cli.sh
+          bash scripts/check_docker_cli.sh --dockerfile stable/Dockerfile --flavor stable || true
+
+      - name: Check if DockerHub image tag already exists
+        id: check
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # DockerHub v2 API：标签不存在返回 404 -> 需要构建；200 -> 已存在，跳过
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}/tags/$VERSION")
+
+          # 强制重建场景：手动触发 或 每月安全补丁刷新调度（cron "17 2 1 * *"）。
+          # 此时即使固定 tag 已存在也重建重推，拾取 debian/apt 安全补丁；其余触发按标签存在性跳过。
+          FORCE_REFRESH=false
+          case "${{ github.event.schedule }}" in
+            "17 2 1 * *") FORCE_REFRESH=true ;;
+          esac
+          echo "force_refresh=${FORCE_REFRESH}" >> "$GITHUB_OUTPUT"
+
+          if [ "$HTTP_CODE" = "200" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "$FORCE_REFRESH" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "镜像标签 $VERSION 已存在于 DockerHub，且非手动/每月刷新触发，跳过构建。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            if [ "$HTTP_CODE" = "200" ]; then
+              if [ "$FORCE_REFRESH" = "true" ]; then
+                echo "每月安全补丁刷新：镜像标签 $VERSION 已存在，强制重建并重推（拾取 debian/apt 补丁）。"
+              else
+                echo "镜像标签 $VERSION 已存在，但本次为手动触发，强制重新构建并验证。"
+              fi
+            else
+              echo "镜像标签 $VERSION 不存在，将构建并推送。"
+            fi
+          fi
+
+  # ==========================================================
+  # 1) 单架构构建 + 冒烟测试（仅当需要构建时执行）
+  # ==========================================================
+  build-smoke:
+    name: Build (amd64) & Smoke Test
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Pre-install sshpass (for SSH smoke test)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build (amd64, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.BUILD_DIR }}
+          file: ${{ env.BUILD_DIR }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: baota-smoke:latest
+          build-args: |
+            BT_VERSION=${{ needs.check-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke test (B-first with A fallback + SSH)
+        shell: bash
+        env:
+          SMOKE_PORT: ${{ env.SMOKE_PORT }}
+          EXPECT_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          chmod +x scripts/smoke.sh
+          bash scripts/smoke.sh baota-smoke:latest
+
+  # ==========================================================
+  # 2) 多架构构建并推送（冒烟测试通过后才执行）
+  # ==========================================================
+  push:
+    name: Build & Push to DockerHub (multi-arch)
+    needs: [check-version, build-smoke]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image tags
+        id: meta
+        run: |
+          IMG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}"
+          VER="${{ needs.check-version.outputs.version }}"
+          # 稳定版：仅打精确版本标签（不带 latest）
+          TAGS="$IMG:$VER"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.BUILD_DIR }}
+          file: ${{ env.BUILD_DIR }}/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          # pull:true：强制拉取最新基础镜像，保证强制重建拾取安全补丁（B1）
+          pull: true
+          build-args: |
+            BT_VERSION=${{ needs.check-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Trivy vulnerability scan (JSON for issue tracking)
+        id: trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          format: json
+          output: trivy-results.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+
+      - name: Print Trivy table summary
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Open issue for fixable HIGH/CRITICAL (B3, idempotent)
+        shell: bash
+        run: |
+          chmod +x scripts/open_trivy_issue.sh
+          bash scripts/open_trivy_issue.sh \
+            --trivy-json trivy-results.json \
+            --version "${{ needs.check-version.outputs.version }}" \
+            --flavor stable \
+            --out /tmp/trivy.out || true
+          cat /tmp/trivy.out 2>/dev/null || true
+
+      - name: Write build summary
+        shell: bash
+        run: |
+          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL") | select(.FixedVersion != null and .FixedVersion != "")] | length' trivy-results.json 2>/dev/null || echo 0)
+          FORCE="${{ needs.check-version.outputs.force_refresh }}"
+          FORCE_TXT="否"
+          [ "$FORCE" = "true" ] && FORCE_TXT="是（安全补丁强制重建）"
+          {
+            echo "## 🏗️ 宝塔稳定版构建完成（自动维护）"
+            echo ""
+            echo "- **版本**：\`${{ needs.check-version.outputs.version }}\`（解析自 installStable_12.sh，不带 latest）"
+            echo "- **架构**：linux/amd64 + linux/arm64"
+            echo "- **推送**：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}\`"
+            echo "- **标签**：\`${{ needs.check-version.outputs.version }}\`"
+            echo "- **强制刷新**：${FORCE_TXT}"
+            echo "- **可修复 HIGH/CRITICAL**：${VULN_COUNT} 个（>0 时已自动开 issue 跟踪）"
+            echo "- **提交**：\`${{ github.sha }}\`"
+            echo ""
+            echo "> 版本号由 scripts/detect_version.sh 解析（fail-closed）；冒烟测试通过后才推送；镜像标签已存在则跳过（DockerHub 为唯一真源）。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================
+  # 3) 失败自愈：构建/冒烟/推送失败时自动开 issue（连续 3 次降级为仅告警，见 D2）
+  # ==========================================================
+  on-failure:
+    name: Notify Failure (auto issue)
+    if: failure()
+    needs: [check-version, build-smoke, push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Open failure issue (idempotent + downgrade)
+        shell: bash
+        env:
+          MAINTAINER_HANDLE: ${{ vars.MAINTAINER_HANDLE }}
+        run: |
+          chmod +x scripts/open_failure_issue.sh
+          VERSION="${{ needs.check-version.outputs.version }}"
+          [ -n "$VERSION" ] || VERSION="unknown"
+          FAILED_JOB=""
+          [ "${{ needs.check-version.result }}" = "failure" ] && FAILED_JOB="check-version"
+          [ "${{ needs.build-smoke.result }}" = "failure" ] && FAILED_JOB="build-smoke"
+          [ "${{ needs.push.result }}" = "failure" ] && FAILED_JOB="push"
+          bash scripts/open_failure_issue.sh \
+            --workflow docker-build-stable \
+            --version "$VERSION" \
+            --flavor stable \
+            --failed-job "$FAILED_JOB" \
+            --out /tmp/fail.out || true
+          cat /tmp/fail.out 2>/dev/null || true
