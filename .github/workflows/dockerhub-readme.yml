@@ -14,9 +14,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # 检查 DockerHub 仓库是否存在，不存在则跳过（首次推送镜像时才会自动创建）
+      - name: Check if DockerHub repository exists
+        id: check-repo
+        shell: bash
+        run: |
+          REPO="${{ secrets.DOCKER_USERNAME }}/baota"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.DOCKER_TOKEN }}" \
+            "https://hub.docker.com/v2/repositories/${REPO}/")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "repo_exists=true" >> "$GITHUB_OUTPUT"
+            echo "DockerHub 仓库 $REPO 存在，将同步 README"
+          else
+            echo "repo_exists=false" >> "$GITHUB_OUTPUT"
+            echo "DockerHub 仓库 $REPO 不存在（HTTP $HTTP_CODE），跳过同步。"
+            echo "首次推送镜像时将自动创建仓库，之后 README 同步会正常工作。"
+          fi
+
+      # 仅当仓库存在时才同步（避免首次运行时失败）
       - name: Sync Docker Hub description
+        if: steps.check-repo.outputs.repo_exists == 'true'
         uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
           repository: ${{ secrets.DOCKER_USERNAME }}/baota
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "## 📦 DockerHub README 同步"
+            echo ""
+            if [ "${{ steps.check-repo.outputs.repo_exists }}" = "true" ]; then
+              echo "✅ **状态**：已成功同步 README 到 DockerHub"
+            else
+              echo "⏭️  **状态**：跳过同步（DockerHub 仓库尚未创建）"
+              echo ""
+              echo "首次推送镜像到 DockerHub 时会自动创建仓库。请先运行 **Build & Push** 工作流推送镜像。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
