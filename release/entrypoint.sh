@@ -167,6 +167,14 @@ if [ "${BT_APPLY_ENV:-auto}" = "true" ] || { [ "${BT_APPLY_ENV:-auto}" != "false
   mark 4_env_block_enter
   BASE_DATA="${PANEL_DIR:-/www/server/panel}/data"
 
+  # 4.0 面板密码兜底：未显式设置 BT_PASSWORD 时生成随机强密码
+  # 与真实服务器安装宝塔（安装后生成随机密码）体验一致，避免公开默认弱密码。
+  # 随机密码打印到容器日志（docker logs 可查）供首次登录使用；auto 模式仅首次生成。
+  if [ -z "${BT_PASSWORD:-}" ]; then
+    BT_PASSWORD="$(head -c 24 /dev/urandom | base64 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 16)"
+    log "[env] 未设置 BT_PASSWORD，已生成随机面板密码：${BT_PASSWORD}（请从 docker logs 查看并妥善保存）"
+  fi
+
   # 4.1 面板端口
   if [ -n "$BT_PANEL_PORT" ]; then
     echo "$BT_PANEL_PORT" > "$BASE_DATA/port.pl"
@@ -230,7 +238,7 @@ except Exception as e:
         log "写库结果: $result"
         case "$result" in
           ERR*|NO_TABLE)
-            warn "[/www 写库] 面板库结构可能已随版本变化，用户名注入未生效（$result）。请用 bt 命令或面板手动设置账号。" ;;
+            warn "[/www 写库] 面板库结构可能已随版本变化，用户名注入未生效（${result}）。请用 bt 命令或面板手动设置账号。" ;;
         esac
       fi
     fi
@@ -261,40 +269,6 @@ if [ -n "$CONTAINER_HOSTNAME" ]; then
   log "容器主机名 / 邮件域名 -> $CONTAINER_HOSTNAME"
 fi
 
-# ===== 7. 容器内 SSH（可选） =====
-# 行为矩阵：
-#   SSH_ENABLE != true                   -> 不启动 SSH
-#   SSH_ENABLE=true 且 SSH_PASSWORD 非空 -> 启动 SSH，root 用该密码登录（推荐）
-#   SSH_ENABLE=true 且 SSH_PASSWORD 为空：
-#       SSH_ALLOW_EMPTY=true   -> 允许 root 无密码登录（仅可信 / 内网环境）
-#       SSH_ALLOW_EMPTY!=true  -> 不启动 SSH 并告警（防止开启却无法登录的无效状态）
-log "[SSH] 决策输入：SSH_ENABLE=${SSH_ENABLE:-false}，SSH_PASSWORD 非空=$( [ -n "${SSH_PASSWORD:-}" ] && echo true || echo false )，SSH_ALLOW_EMPTY=${SSH_ALLOW_EMPTY:-false}"
-if [ "$SSH_ENABLE" = "true" ]; then
-  if [ -z "$SSH_PASSWORD" ] && [ "${SSH_ALLOW_EMPTY:-false}" != "true" ]; then
-    warn "[SSH] 走「拒绝启动」分支：SSH_ENABLE=true 但未设置 SSH_PASSWORD，且 SSH_ALLOW_EMPTY 不为 true：为安全起见不启动 SSH。"
-  else
-    ssh-keygen -A >/dev/null 2>&1 || true
-    if [ -n "$SSH_PASSWORD" ]; then
-      log "[SSH] 走「密码登录」分支：为 root 设置密码并启动 SSH。"
-      echo "root:$SSH_PASSWORD" | chpasswd 2>/dev/null || warn "[SSH] 设置 root 密码失败"
-    elif [ "${SSH_ALLOW_EMPTY:-false}" = "true" ]; then
-      log "[SSH] 走「无密码登录」分支：SSH_ALLOW_EMPTY=true。"
-      # 允许 root 无密码登录（仅可信环境）
-      sed -i 's/^#*PermitEmptyPasswords .*/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
-      # 确保 root 账户未被锁定（Debian 默认锁 root 密码）
-      passwd -u root >/dev/null 2>&1 || true
-      log "SSH 允许 root 无密码登录（SSH_ALLOW_EMPTY=true，请确保仅在内网 / 可信环境使用）。"
-    fi
-    # /run 为 tmpfs，新容器启动后 /run/sshd 可能不存在，sshd 需要它才能启动
-    mkdir -p /run/sshd && chmod 0755 /run/sshd
-    # sshd 启动失败不应因 set -e 终止整个入口（面板仍可正常提供服务）
-    /usr/sbin/sshd || warn "[SSH] sshd 启动失败，但面板不受影响"
-    log "[SSH] SSH 服务已启动"
-  fi
-else
-  log "[SSH] 走「不启动」分支：SSH_ENABLE=${SSH_ENABLE:-false} != true，跳过。"
-fi
-
 # ===== 8. 启动计划任务 =====
 if command -v cron >/dev/null 2>&1; then
   cron 2>/dev/null || true
@@ -319,6 +293,69 @@ sleep 2
 rsync_persist_to_system
 log "[persist] 系统环境已从持久卷恢复（/etc、/usr/local、/var/spool/cron）。"
 mark 3_system_dirs_done
+
+# ===== 9.0b 容器内 SSH（可选） =====
+# 行为矩阵：
+#   SSH_ENABLE != true                   -> 不启动 SSH
+#   SSH_ENABLE=true 且 SSH_PASSWORD 非空 -> 启动 SSH，root 用该密码登录（推荐）
+#   SSH_ENABLE=true 且 SSH_PASSWORD 为空：
+#       SSH_ALLOW_EMPTY=true   -> 允许 root 无密码登录（仅可信 / 内网环境）
+#       SSH_ALLOW_EMPTY!=true  -> 不启动 SSH 并告警（防止开启却无法登录的无效状态）
+log "[SSH] 决策输入：SSH_ENABLE=${SSH_ENABLE:-false}，SSH_PASSWORD 非空=$( [ -n "${SSH_PASSWORD:-}" ] && echo true || echo false )，SSH_ALLOW_EMPTY=${SSH_ALLOW_EMPTY:-false}"
+if [ "$SSH_ENABLE" = "true" ]; then
+  if [ -z "$SSH_PASSWORD" ] && [ "${SSH_ALLOW_EMPTY:-false}" != "true" ]; then
+    warn "[SSH] 走「拒绝启动」分支：SSH_ENABLE=true 但未设置 SSH_PASSWORD，且 SSH_ALLOW_EMPTY 不为 true：为安全起见不启动 SSH。"
+  else
+    ssh-keygen -A >/dev/null 2>&1 || true
+    if [ -n "$SSH_PASSWORD" ]; then
+      log "[SSH] 走「密码登录」分支：为 root 设置密码并启动 SSH。"
+      # 强制解锁 root 账号（某些容器权限下 chpasswd 或 passwd -u 可能失败）
+      # 直接修改 /etc/shadow 去除锁定标记 (! 或 *)
+      if grep -q '^root:' /etc/shadow 2>/dev/null; then
+        sed -i 's/^root:[!*]/root:/' /etc/shadow 2>/dev/null || true
+      fi
+      # 显式打印解锁后的状态
+      log "[SSH] 解锁后 shadow 状态: $(grep '^root:' /etc/shadow 2>/dev/null || echo UNKNOWN)"
+      echo "root:$SSH_PASSWORD" | chpasswd 2>&1 || warn "[SSH] 设置 root 密码失败"
+      # 显式打印 chpasswd 后的状态
+      log "[SSH] 设置密码后 shadow 状态: $(grep '^root:' /etc/shadow 2>/dev/null || echo UNKNOWN)"
+      # 再次尝试解锁，双重保险
+      passwd -u root >/dev/null 2>&1 || true
+      # 必须在密码设置完成后再启动 sshd，否则 sshd 会读取到旧的锁定状态
+      mkdir -p /run/sshd && chmod 0755 /run/sshd
+      if ! /usr/sbin/sshd; then
+        warn "[SSH] sshd 启动失败，但面板不受影响"
+        log "[SSH] 诊断：sshd -t 配置校验输出："
+        /usr/sbin/sshd -t 2>&1 || true
+        log "[SSH] 诊断：端口 22 监听状态："
+        (ss -tlnp 2>/dev/null | grep :22) || netstat -tln 2>/dev/null | grep :22 || log "[SSH] 诊断：端口 22 未监听"
+        log "[SSH] 诊断：root 账号状态：$(passwd -S root 2>/dev/null || echo UNKNOWN)"
+      else
+        log "[SSH] SSH 服务已启动"
+      fi
+    elif [ "${SSH_ALLOW_EMPTY:-false}" = "true" ]; then
+      log "[SSH] 走「无密码登录」分支：SSH_ALLOW_EMPTY=true。"
+      # 允许 root 无密码登录（仅可信环境）
+      sed -i 's/^#*PermitEmptyPasswords .*/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
+      # 确保 root 账户未被锁定（Debian 默认锁 root 密码）
+      passwd -u root >/dev/null 2>&1 || true
+      log "SSH 允许 root 无密码登录（SSH_ALLOW_EMPTY=true，请确保仅在内网 / 可信环境使用）。"
+      mkdir -p /run/sshd && chmod 0755 /run/sshd
+      if ! /usr/sbin/sshd; then
+        warn "[SSH] sshd 启动失败，但面板不受影响"
+        log "[SSH] 诊断：sshd -t 配置校验输出："
+        /usr/sbin/sshd -t 2>&1 || true
+        log "[SSH] 诊断：端口 22 监听状态："
+        (ss -tlnp 2>/dev/null | grep :22) || netstat -tln 2>/dev/null | grep :22 || log "[SSH] 诊断：端口 22 未监听"
+        log "[SSH] 诊断：root 账号状态：$(passwd -S root 2>/dev/null || echo UNKNOWN)"
+      else
+        log "[SSH] SSH 服务已启动"
+      fi
+    fi
+  fi
+else
+  log "[SSH] 走「不启动」分支：SSH_ENABLE=${SSH_ENABLE:-false} != true，跳过。"
+fi
 
 # ===== 9.1 应用面板密码（面板就绪后） =====
 # 用户名已在第 4.3 步（面板启动前）直写库；此处仅在面板就绪后应用密码。
@@ -384,6 +421,20 @@ for script in /etc/init.d/*; do
 done
 log "[services] 自启动扫描结束：尝试启动 $started 个，跳过系统/面板脚本 $skipped 个。"
 
+# ===== 10.5 周期性系统态写回（崩溃兜底） =====
+# 仅靠停机写回时，容器被强制杀死（kill -9 / 宿主机断电）会丢失自上次写回以来的
+# /etc、/usr/local、cron 改动；这里按 PERSIST_SYNC_INTERVAL 秒周期后台写回，
+# 把崩溃丢失窗口缩到 ≤ 间隔时间。默认 600s，可用环境变量调小。
+PERSIST_SYNC_INTERVAL="${PERSIST_SYNC_INTERVAL:-600}"
+(
+  while true; do
+    sleep "$PERSIST_SYNC_INTERVAL"
+    rsync_system_to_persist
+  done
+) &
+PERSIST_SYNC_PID=$!
+log "[persist] 周期性系统态写回已启动（每 ${PERSIST_SYNC_INTERVAL}s 一次，崩溃兜底）"
+
 # ===== 11. 输出访问信息 =====
 PORT="${BT_PANEL_PORT:-8888}"
 ENTRY="${BT_ENTRY_PATH:-}"
@@ -403,6 +454,8 @@ echo ""
 stop_all() {
   echo ""
   log "[signal] 收到停止信号，正在停止服务..."
+  # 先停周期性写回循环，避免与最终写回并发 rsync
+  [ -n "${PERSIST_SYNC_PID:-}" ] && kill "$PERSIST_SYNC_PID" 2>/dev/null || true
   log "[signal] 停止面板：/etc/init.d/bt stop"
   /etc/init.d/bt stop >/dev/null 2>&1 || true
   for script in /etc/init.d/mysqld /etc/init.d/nginx; do
@@ -429,10 +482,10 @@ if [ -n "${BT_IMAGE_VERSION:-}" ]; then
     _panel_ver=$(cd /www/server/panel && /www/server/panel/pyenv/bin/python3 -c 'import sys;sys.path.insert(0,"/www/server/panel");import tools;tools.get_panel_version()' 2>&1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
   fi
   if [ -n "$_panel_ver" ] && [ "$_panel_ver" != "$BT_IMAGE_VERSION" ]; then
-    warn "[version] /www 数据卷来自面板 $_panel_ver，镜像构建版本为 $BT_IMAGE_VERSION（不一致）。数据不会丢失；建议先在面板内完成升级，或拉取新版本镜像后重建容器。"
+    warn "[version] /www 数据卷来自面板 ${_panel_ver}，镜像构建版本为 ${BT_IMAGE_VERSION}（不一致）。数据不会丢失；建议先在面板内完成升级，或拉取新版本镜像后重建容器。"
     mark version_mismatch
   elif [ -n "$_panel_ver" ]; then
-    log "[version] 面板版本与镜像构建版本一致（$_panel_ver）。"
+    log "[version] 面板版本与镜像构建版本一致（${_panel_ver}）。"
   fi
 fi
 

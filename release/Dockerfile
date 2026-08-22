@@ -26,9 +26,17 @@ ARG BT_INSTALL_SH_URL="https://download.bt.cn/install/install_panel.sh"
 ARG BT_PANEL_PORT=8888
 ARG BT_PANEL_PATH="dockerbt"
 ARG TZ=Asia/Shanghai
+# 静态 docker CLI 版本（下载源见 DOCKER_CLI_BASE_URL，可按需升级）
+ARG DOCKER_CLI_VERSION="29.7.2"
+# docker CLI 静态包下载源：默认阿里云镜像（国内/CI 均可直连），
+# 亦可用官方源 https://download.docker.com/linux/static/stable 覆盖
+ARG DOCKER_CLI_BASE_URL="https://mirrors.aliyun.com/docker-ce/linux/static/stable"
+# buildx 多架构构建时自动注入的架构（amd64 / arm64），用于选取对应下载目录
+ARG TARGETARCH
 
 # ===== 运行时环境变量（compose 中可覆盖） =====
-# 注意：BT_PASSWORD/SSH_PASSWORD 默认值仅占位（避免镜像层泄密），生产务必在 compose 的 .env 设强密码覆盖。
+# 注意：BT_PASSWORD/SSH_PASSWORD 默认留空，未显式设置时 entrypoint 首次启动生成随机强密码
+# （避免镜像层泄密，也避免公开默认弱密码）；生产务必在 compose 的 .env 设强密码覆盖。
 # hadolint ignore=SecretsUsedInArgOrEnv
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
@@ -39,8 +47,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     BT_ENTRY_PATH=dockerbt \
     # 面板登录账号（运行时由 compose 环境变量覆盖）
     BT_USERNAME=admin \
-    # 面板默认密码占位（运行时由 compose 环境变量 BT_PASSWORD 覆盖；切勿依赖此默认值）
-    BT_PASSWORD=changeme_PleaseSetInEnv \
+    # 面板密码：留空时 entrypoint 首次启动生成随机强密码并打印到容器日志（docker logs 查看）
+    BT_PASSWORD= \
     # 是否开启容器内 SSH（true / false）
     SSH_ENABLE=false \
     # 容器内 root 的 SSH 密码（仅 SSH_ENABLE=true 时生效）
@@ -52,16 +60,29 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ENV BT_IMAGE_VERSION="$BT_VERSION"
 
 # ===== 第一阶段：基础系统 =====
+# 体积优化：docker.io 包体积大（含 dockerd/containerd/runc 全套守护进程，数百 MB）。
+# 容器内仅需 docker CLI（供宝塔 Docker 管理器经 DOCKER_HOST_SOCK 连接宿主机 daemon），
+# 故改为下载官方静态 docker CLI 单二进制（约 50MB），显著减小镜像体积。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget curl ca-certificates vim less net-tools procps \
         cron tzdata locales sqlite3 openssh-server rsync \
         apt-transport-https gnupg \
-        docker.io \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
     && locale-gen \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && echo "${TZ}" > /etc/timezone
+    && echo "${TZ}" > /etc/timezone \
+    # 静态 docker CLI：TARGETARCH 由 buildx 多架构构建自动注入，映射到下载目录
+    && case "${TARGETARCH}" in \
+         amd64) DOCKER_ARCH="x86_64" ;; \
+         arm64) DOCKER_ARCH="aarch64" ;; \
+         *) echo "不支持的架构: ${TARGETARCH}"; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/docker.tgz "${DOCKER_CLI_BASE_URL}/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && install -m 0755 /tmp/docker/docker /usr/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz \
+    && docker --version
 
 # ===== 第二阶段：安装宝塔面板 13.0.0 正式版 =====
 # 参数说明（install_panel.sh 支持）：

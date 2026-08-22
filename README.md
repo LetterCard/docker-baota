@@ -23,10 +23,13 @@
 
 - **数据不丢失**：业务数据持久化到 `/www`，系统环境双向同步到 `/persist` 卷；面板、站点、数据库、证书、已装环境、任务调度等，容器删除 / 重建 / 升级均不丢配置。
 - **双版本独立维护**：稳定版固定版本号（不带 `latest`）、正式版动态版本号 + `latest`，互不干扰。
-- **compose 变量化配置**：密码、端口、入口等通过环境变量声明式设置。
+- **compose 变量化配置**：密码、端口、入口等通过环境变量声明式设置；`bridge` 网络模式下容器内固定宝塔标准端口，宿主侧改端口映射即可规避占用。
 - **首次启动自动初始化**：镜像已预装面板，空数据卷自动恢复，无需手动安装。
+- **默认随机强密码**：未设置 `BT_PASSWORD` 时首次启动自动生成随机密码并打印日志，与真实服务器安装宝塔体验一致。
 - **重建自动拉起服务**：容器重建后自动恢复 nginx / mysql / php-fpm / redis 等服务。
 - **可选容器内 SSH**：`SSH_ENABLE=true` 开启，支持无密码登录开关。
+- **长期免维护 CI**：GitHub Actions 自动检测官方新版本；正式版每周、稳定版每月强制重建（`pull: true` 强制拉最新 base），持续拾取 debian/apt 安全补丁；构建/冒烟失败自动开 issue 跟踪。
+- **镜像体积优化**：仅内置静态 docker CLI（约 39MB）而非完整 docker.io 守护进程包，基础镜像体积显著减小。
 - **多架构支持**：amd64 / arm64。
 
 ## 公开的核心文件
@@ -99,14 +102,26 @@ BT_PANEL_PORT=8888
 BT_ENTRY_PATH=dockerbt
 # 面板登录账号
 BT_USERNAME=admin
-# 面板登录密码（强烈建议改为强密码）
-BT_PASSWORD=Admin@1000.run
+# 面板登录密码：留空时 entrypoint 首次启动会生成【随机强密码】并打印到容器日志
+# （docker logs baota 查看），避免公开默认弱密码，如同真实服务器安装宝塔。
+# 如需固定密码请在此设置强密码（推荐）。
+BT_PASSWORD=
 
 # 环境变量如何应用到面板（端口/入口/账号/密码）
 # auto  : 默认。仅【首次创建】（空数据卷）时应用，之后重建/重启保留面板内修改（推荐）
 # true  : 每次启动都强制应用，环境变量优先（会覆盖面板内修改）
 # false : 永远跳过，完全使用面板/数据卷内已有配置
 BT_APPLY_ENV=auto
+
+# ---------- 网络与端口映射 ----------
+# 容器使用 bridge 网络（compose 已显式 network_mode: bridge），容器内固定宝塔标准端口
+# （Web=80 / HTTPS=443 / DB=3306 / SSH=22 / FTP=21），与宿主机通过 ports 隔离。
+# 宿主机端口被占用时：直接编辑 docker-compose.yml 的 ports 左侧映射即可（如 "8080:80"）。
+# DB / SSH / FTP 端口在 docker-compose.yml 中默认注释，取消注释后才暴露到宿主机。
+
+# 系统态周期性写回间隔（秒）：容器被 kill -9 / 宿主机断电时，/etc、cron 等系统态的
+# 丢失窗口上限。默认 600（10 分钟）；对数据敏感可调小（如 60）。
+# PERSIST_SYNC_INTERVAL=600
 
 # ---------- 可选：容器内 SSH ----------
 # SSH_ENABLE=false        # true 开启容器内 SSH
@@ -140,7 +155,7 @@ BT_APPLY_ENV=auto
 | `BT_PANEL_PORT` | `8888` | 面板端口（同时影响宿主机端口映射） |
 | `BT_ENTRY_PATH` | `dockerbt` | 面板安全入口，访问路径 `http://IP:端口/入口` |
 | `BT_USERNAME` | `admin` | 面板登录账号 |
-| `BT_PASSWORD` | `Admin@1000.run` | 面板登录密码（务必修改） |
+| `BT_PASSWORD` | 空 | 面板登录密码；留空时 entrypoint 首次启动生成**随机强密码**并打印到容器日志（`docker logs baota`），如需固定密码请设置强密码 |
 | `BT_APPLY_ENV` | `auto` | 环境变量注入策略：`auto`=仅首次创建时应用（之后保留面板内修改，推荐）；`true`=每次启动强制应用（覆盖面板内修改）；`false`=永不应用，完全使用面板内配置 |
 | `SSH_ENABLE` | `false` | 是否开启容器内 SSH |
 | `SSH_PASSWORD` | 空 | 容器内 root 的 SSH 密码（推荐设置） |
@@ -148,8 +163,9 @@ BT_APPLY_ENV=auto
 | `TZ` | `Asia/Shanghai` | 时区 |
 | `CONTAINER_HOSTNAME` | 空 | 容器内主机名 / Postfix 邮件域名（可选） |
 | `PRIVILEGED` | `true` | 是否特权模式运行（宝塔管理需要） |
+| `PERSIST_SYNC_INTERVAL` | `600` | 系统态周期性写回间隔（秒），容器被 kill -9 / 断电时的数据丢失窗口上限 |
 
-> 端口映射与容器内端口均由 `BT_PANEL_PORT` 驱动：只改环境变量重启即生效。
+> 端口映射规则：**面板端口**由 `BT_PANEL_PORT` 驱动（容器内与宿主机两端同步）；**站点/数据库/SSH/FTP** 容器内固定宝塔标准端口（80/443/3306/22），宿主机侧直接编辑 `docker-compose.yml` 的 `ports` 左侧映射以规避占用（见 Q5/Q6）。
 
 ### 🖥 SSH 配置行为矩阵
 
@@ -222,9 +238,16 @@ bind mount 场景下入口脚本会自动修复 `/www/server/data` 的属主。�
 面板的软件安装、防火墙、系统服务管理依赖特权。仅用 Web 环境可设为 `false`，但部分功能会受限。
 
 **Q5：如何修改已部署容器的端口映射？**
-改 `BT_PANEL_PORT`（面板端口与宿主映射同步变化），然后重启容器。
+- **面板端口**：改 `.env` 的 `BT_PANEL_PORT`（面板端口与宿主映射两端同步变化），重启容器生效。
+- **站点/数据库/SSH/FTP**：直接编辑 `docker-compose.yml` 的 `ports` 左侧宿主机端口（容器内保持宝塔标准端口 80/443/3306/22 不变），例如改 `"8080:80"`，重启容器生效。数据库/SSH/FTP 端口默认注释，取消注释后才暴露到宿主机。
 
-**Q6：如何在宝塔面板里管理宿主机的 Docker（容器 / 镜像）？**
+**Q6：宿主机 80 / 443 / 22 等端口被占用怎么办？要不要用 host 网络？**
+不需要 host 网络。compose 已显式 `network_mode: bridge`，容器内固定宝塔标准端口，宿主机侧通过 `ports` 左侧映射规避占用：
+- 站点被占 80 → 把 `"80:80"` 改为 `"8080:80"`，站点经 `http://IP:8080` 访问（容器内 nginx 仍是 80，宝塔站点配置、证书签发不受影响）
+- 数据库 / SSH 同理改对应映射行（默认注释，取消注释后生效）
+- **不建议 `network_mode: host`**：host 模式下容器服务直接绑定宿主端口，宿主端口被占时**无法通过映射规避**（nginx/mysqld 会直接启动失败），且 macOS（OrbStack/Colima）下 host 网络为模拟实现、行为不一致。
+
+**Q7：如何在宝塔面板里管理宿主机的 Docker（容器 / 镜像）？**
 默认**不挂载**宿主机 Docker。如需启用，设置 `DOCKER_HOST_SOCK=/run/docker.sock` 后重启容器，面板「Docker 管理器」即可管理宿主机容器。注意：
 - 该挂载会使容器获得宿主机 Docker 的**完全控制权**，仅在可信主机启用
 - 容器内已内置 `docker` CLI，只需挂载 socket 即可跨平台通用，无需挂载宿主机二进制
@@ -233,10 +256,10 @@ bind mount 场景下入口脚本会自动修复 `/www/server/data` 的属主。�
 
 ## 安全提示
 
-- 部署后请立即修改面板默认密码，并建议同时修改安全入口
+- 未设置 `BT_PASSWORD` 时，entrypoint 首次启动会生成**随机强密码**并打印到容器日志（`docker logs baota`），与真实服务器安装宝塔一致，避免公开默认弱密码；建议登录后立即在面板内修改密码并设置安全入口
 - 不要在公网直接暴露 `3306`、`22` 等端口；如需暴露，请配合安全组 / 防火墙
 - `privileged: true` 会放大容器权限，请在可信主机上使用
-- 镜像内置的占位密码为 `changeme_PleaseSetInEnv`（镜像 ENV 层）；compose / `.env.example` 默认部署时会覆盖为 `Admin@1000.run`。**两者都仅作占位，切勿依赖**；部署后务必设置强 `BT_PASSWORD` 并立即修改
+- 镜像层 `BT_PASSWORD` 默认**留空**，未显式设置时由 entrypoint 首次启动生成随机强密码；任何启动方式（compose 或裸 `docker run`）都不会落到公开默认弱密码。**切勿依赖任何占位密码**
 
 ## ⚖️ 与宝塔官方镜像（btpanel/baota）的差异
 

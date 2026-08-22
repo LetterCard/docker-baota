@@ -36,25 +36,35 @@ services:
     # 内存限制（可选）：防止面板/业务异常占用过多内存导致宿主机 OOM
     # mem_limit: 2G
 
+    # bridge 网络模式（Docker 默认即 bridge，此处显式声明以明确隔离语义）：
+    # 容器内固定使用宝塔标准端口（80/443/3306/22 等），与宿主机通过下方 ports 映射隔离；
+    # 与 host 网络不同，bridge 下若宿主机端口被占用，直接改下方左侧端口即可规避。
+    network_mode: bridge
+
     ports:
-      # 面板端口（改 .env 中 BT_PANEL_PORT 后两边自动同步）
+      # 面板端口（容器内与宿主机两端同步，由 BT_PANEL_PORT 驱动，改 .env 重启即生效）
       - "${BT_PANEL_PORT:-8888}:${BT_PANEL_PORT:-8888}"
-      # Web / 数据库 / SSH / FTP（按需取消注释）
+      # 站点 Web / HTTPS：容器内固定 80/443（宝塔站点配置/证书签发依赖标准端口），
+      # 宿主机侧被占用时，直接修改本行左侧端口（如 "8080:80"）即可规避
       - "80:80"
       - "443:443"
+      # 数据库 / 容器内 SSH / FTP（默认关闭，按需取消注释；同样直接改左侧端口规避占用）
       # - "3306:3306"
       # - "22:22"
-      # - "20:20"
       # - "21:21"
+      # - "20:20"
 
     environment:
       # 面板端口（容器内生效，与上方端口映射保持一致）
       BT_PANEL_PORT: "${BT_PANEL_PORT:-8888}"
       # 面板安全入口：http://IP:端口/入口
       BT_ENTRY_PATH: "${BT_ENTRY_PATH:-dockerbt}"
-      # 面板登录账号 / 密码（强烈建议修改为强密码）
+      # 面板登录账号 / 密码
+      # BT_PASSWORD 留空（默认）时，entrypoint 会在首次启动生成随机强密码并打印到容器日志
+      # （docker logs baota 可查看），避免使用公开默认弱密码——如同真实服务器安装宝塔；
+      # 如需固定密码，请务必在 .env 中设置强密码
       BT_USERNAME: "${BT_USERNAME:-admin}"
-      BT_PASSWORD: "${BT_PASSWORD:-Admin@1000.run}"
+      BT_PASSWORD: "${BT_PASSWORD:-}"
       # 是否每次启动都应用上面的环境变量到面板
       # auto（默认）：仅首次创建（空数据卷）时应用，之后保留面板内修改；
       # true：每次强制覆盖面板内修改；false：永不应用，完全使用面板内配置
@@ -68,6 +78,8 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
       # 容器主机名 / Postfix 邮件域名（可选，留空则用默认）
       CONTAINER_HOSTNAME: "${CONTAINER_HOSTNAME:-}"
+      # 系统态周期性写回间隔（秒）：容器被 kill -9 / 宿主机断电时的数据丢失窗口，默认 600（可调小）
+      PERSIST_SYNC_INTERVAL: "${PERSIST_SYNC_INTERVAL:-600}"
 
     volumes:
       # 核心：业务数据（面板配置、站点、数据库、证书、日志）
