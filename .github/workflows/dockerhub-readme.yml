@@ -17,6 +17,6 @@ jobs:
       - name: Sync Docker Hub description
         uses: peter-evans/dockerhub-description@v5
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ secrets.DOCKERHUB_USERNAME }}/baota
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+          repository: ${{ secrets.DOCKER_USERNAME }}/baota
