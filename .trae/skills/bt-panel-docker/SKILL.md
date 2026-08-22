@@ -82,7 +82,7 @@ description: "维护宝塔面板(baota) Docker 镜像项目：管理 release/sta
    **系统态标记的写入时机**：crontab 注释 + `/etc/smoke-verify/` 探针必须在「优雅停机前一刻」写入（4 段开头）。面板(BT-Task)运行期会重写 root crontab 并清理 /etc 陌生文件（原生宝塔同此行为），早期写入（原 1.x 段）会在 1~2 分钟内被面板清掉。停机写回是否生效以**直接读 /persist 卷**为准（4.0 段，面板无法触及）；重建恢复以**面板就绪前轮询**捕获（4.0b 段，面板启动后会再次清理）。
    **服务自启动断言仅限方案 B**：面板装的 LNMP 在 /www/server（随卷保留），重建后 entrypoint 服务扫描应拉起；方案 A 的 apt redis 装在容器可写层（/usr/bin），重建即失（Docker 语义，非缺陷），仅验证「装服务->启动」链路，不验证重建。
    **注意**：本地复现/验证 SSH 问题时建议不加 `--privileged` 以模拟真实 CI 环境。`smoke.sh` 的 SSH 验证环节内置了自动修复逻辑：若首次登录失败，会在容器内解锁 root 并重启 sshd 后重试（作为最终兜底）。
-4. **改动 CI workflow / 发布触发**：workflow 依赖 push 到 main/master 触发（`paths` 白名单内文件或自身 workflow）。上线前置：目录是 git 仓库且已关联 GitHub 远端，Secrets 配好 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`。改 README 会触发 dockerhub-readme.yml 自动同步 DockerHub 描述。
+4. **改动 CI workflow / 发布触发**：workflow 依赖 push 到 main/master 触发（`paths` 白名单内文件或自身 workflow）。上线前置：目录是 git 仓库且已关联 GitHub 远端，Secrets 配好 `DOCKER_USERNAME` / `DOCKER_TOKEN`。改 README 会触发 dockerhub-readme.yml 自动同步 DockerHub 描述。
 5. **Actions 版本**：由 Dependabot 每周自动升版（`github-actions`，见 `.github/dependabot.yml`），不要手动追最新 major；升版后跑上方 `grep 'uses:'` 核对 Node 24 兼容（GitHub 已弃用 Node 20 actions）。
 6. **强制发布 / 安全补丁刷新**：DockerHub 标签已存在时，非 `workflow_dispatch` 的 push 会跳过构建；但**定时刷新会强制重建**——release 每周一（cron `17 3 * * 1`）、stable 每月 1 号（cron `17 2 1 * *`）即使 tag 已存在也重建重推，拾取 debian/apt 安全补丁。逻辑在 `check-version` 步骤按 `github.event.schedule` 判定（release 的月度 cron `17 3 1 * *` 仅新版本才构建）。手动 `workflow_dispatch` 亦强制构建。改 cron 时必须同步更新对应 `case` 匹配串与 workflow 头部注释。
 7. **多架构**：release/stable 均支持 amd64/arm64，CI 用 buildx + gha cache；本地可用 OrbStack。
