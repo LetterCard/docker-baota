@@ -1,3 +1,6 @@
+# GitHub 官方推荐：Dependabot 自动维护 Actions 版本
+# 每周自动检查并合并升版 PR，避免手动跟踪上游版本变更
+# 参考：https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -12,7 +15,7 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
- 
+
   # 基础镜像依赖：跟踪 release/stable 两个 Dockerfile 的 FROM debian:12（apt 安全补丁
   # 由定时强制重建拾取；此处覆盖基础镜像本身的 patch 升级建议）。
   # 注意：Dockerfile 内的 ARG DOCKER_CLI_VERSION 静态 docker CLI 版本 Dependabot 无法覆盖，
@@ -21,8 +24,6 @@ updates:
     directory: "/release"
     schedule:
       interval: "weekly"
-    ignore:
-      - dependency-name: "debian"
     commit-message:
       prefix: "docker"
       include: "scope"
@@ -30,8 +31,6 @@ updates:
     directory: "/stable"
     schedule:
       interval: "weekly"
-    ignore:
-      - dependency-name: "debian"
     commit-message:
       prefix: "docker"
       include: "scope"
