@@ -26,9 +26,9 @@ ARG BT_PANEL_PATH="dockerbt"
 ARG TZ=Asia/Shanghai
 # 静态 docker CLI 版本（下载源见 DOCKER_CLI_BASE_URL，可按需升级）
 ARG DOCKER_CLI_VERSION="29.7.2"
-# docker CLI 静态包下载源：默认阿里云镜像（国内/CI 均可直连），
+# docker CLI 静态包下载源：默认阿里云镜像 https://mirrors.aliyun.com/docker-ce/linux/static/stable（国内/CI 均可直连），
 # 亦可用官方源 https://download.docker.com/linux/static/stable 覆盖
-ARG DOCKER_CLI_BASE_URL="https://mirrors.aliyun.com/docker-ce/linux/static/stable"
+ARG DOCKER_CLI_BASE_URL="https://download.docker.com/linux/static/stable"
 # buildx 多架构构建时自动注入的架构（amd64 / arm64），用于选取对应下载目录
 ARG TARGETARCH
 
