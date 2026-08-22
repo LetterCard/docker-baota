@@ -1,4 +1,5 @@
 # ============================================================
+# syntax=docker/dockerfile:1.6
 # 宝塔面板 13.0.0 (Debian 12) Docker 镜像
 # 基础系统：Debian 12 (bookworm)
 #
@@ -28,16 +29,18 @@ ARG BT_PANEL_PATH="dockerbt"
 ARG TZ=Asia/Shanghai
 # 静态 docker CLI 版本（下载源见 DOCKER_CLI_BASE_URL，可按需升级）
 ARG DOCKER_CLI_VERSION="29.7.2"
-# docker CLI 静态包下载源：默认阿里云镜像 https://mirrors.aliyun.com/docker-ce/linux/static/stable（国内/CI 均可直连），
-# 亦可用官方源 https://download.docker.com/linux/static/stable 覆盖
+# docker CLI 静态包下载源：默认官方源（GitHub Actions 在美国，官方源更快），
+# 国内本地开发时可通过 --build-arg 覆盖为阿里云镜像
 ARG DOCKER_CLI_BASE_URL="https://download.docker.com/linux/static/stable"
+# 阿里云镜像作为 fallback（官方源失败时自动回退，保障国内环境可用性）
+ARG DOCKER_CLI_FALLBACK_URL="https://mirrors.aliyun.com/docker-ce/linux/static/stable"
 # buildx 多架构构建时自动注入的架构（amd64 / arm64），用于选取对应下载目录
 ARG TARGETARCH
 
 # ===== 运行时环境变量（compose 中可覆盖） =====
 # 注意：BT_PASSWORD/SSH_PASSWORD 默认留空，未显式设置时 entrypoint 首次启动生成随机强密码
 # （避免镜像层泄密，也避免公开默认弱密码）；生产务必在 compose 的 .env 设强密码覆盖。
-# hadolint ignore=SecretsUsedInArgOrEnv
+# check=skip=SecretsUsedInArgOrEnv
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
@@ -63,7 +66,10 @@ ENV BT_IMAGE_VERSION="$BT_VERSION"
 # 体积优化：docker.io 包体积大（含 dockerd/containerd/runc 全套守护进程，数百 MB）。
 # 容器内仅需 docker CLI（供宝塔 Docker 管理器经 DOCKER_HOST_SOCK 连接宿主机 daemon），
 # 故改为下载官方静态 docker CLI 单二进制（约 50MB），显著减小镜像体积。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 使用 BuildKit cache 加速 apt-get（跨构建复用包缓存）
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         wget curl ca-certificates vim less net-tools procps \
         cron tzdata locales sqlite3 openssh-server rsync \
         apt-transport-https gnupg \
@@ -73,12 +79,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo "${TZ}" > /etc/timezone \
     # 静态 docker CLI：TARGETARCH 由 buildx 多架构构建自动注入，映射到下载目录
+    # 下载逻辑：优先官方源（超时 15s），失败自动回退阿里云镜像（保障国内环境）
     && case "${TARGETARCH}" in \
          amd64) DOCKER_ARCH="x86_64" ;; \
          arm64) DOCKER_ARCH="aarch64" ;; \
          *) echo "不支持的架构: ${TARGETARCH}"; exit 1 ;; \
        esac \
-    && curl -fsSL -o /tmp/docker.tgz "${DOCKER_CLI_BASE_URL}/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+    && echo "尝试从 ${DOCKER_CLI_BASE_URL} 下载..." \
+    && (curl -fsSL --max-time 15 -o /tmp/docker.tgz "${DOCKER_CLI_BASE_URL}/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      || (echo "官方源失败，尝试阿里云镜像..." \
+        && curl -fsSL --max-time 30 -o /tmp/docker.tgz "${DOCKER_CLI_FALLBACK_URL}/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz")) \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && install -m 0755 /tmp/docker/docker /usr/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz \

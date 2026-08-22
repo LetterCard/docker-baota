@@ -41,10 +41,14 @@ CUR=$(grep -oE 'ARG DOCKER_CLI_VERSION="[0-9.]+"' "$DOCKERFILE" 2>/dev/null | gr
 [ -n "$CUR" ] || { warn "无法从 $DOCKERFILE 读取 DOCKER_CLI_VERSION"; exit 0; }
 log "当前固定 docker CLI 版本: $CUR"
 
-# ---- 查询官方最新稳定版（GitHub docker/docker-ce latest release）----
-LATEST=$(curl -s --max-time 15 https://api.github.com/repos/docker/docker-ce/releases/latest 2>/dev/null \
-  | jq -r '.tag_name' 2>/dev/null | sed 's/^v//')
-[ -n "$LATEST" ] || { warn "查询官方最新版本失败（网络/API 变更），跳过本次检查"; exit 0; }
+# ---- 查询官方最新稳定版（从下载目录解析最新版本）----
+# 使用 Docker 官方静态二进制下载目录，按版本号排序获取最新
+LATEST=$(curl -s --max-time 15 "https://download.docker.com/linux/static/stable/x86_64/" 2>/dev/null \
+  | grep -oE 'docker-[0-9]+\.[0-9]+\.[0-9]+\.tgz' \
+  | sed 's/docker-//;s/.tgz//' \
+  | sort -V \
+  | tail -1)
+[ -n "$LATEST" ] || { warn "查询官方最新版本失败（网络/页面变更），跳过本次检查"; exit 0; }
 log "官方最新稳定版: $LATEST"
 [ -n "$OUT_FILE" ] && echo "latest_docker_cli=$LATEST" >> "$OUT_FILE"
 
@@ -77,7 +81,13 @@ fi
 
 BODY="\`${FLAVOR}\` 镜像内静态 docker CLI 固定版本 \`${CUR}\` 落后于官方最新 \`${LATEST}\`（Dependabot 的 docker ecosystem 无法覆盖 Dockerfile 中 ARG 值）。
 
-升级步骤：编辑 \`${FLAVOR}/Dockerfile\` 将 \`ARG DOCKER_CLI_VERSION\` 改为 \`${LATEST}\`，确认阿里云镜像 \`mirrors.aliyun.com/docker-ce/linux/static/stable/\` 下 x86_64/aarch64 均存在该版本，然后重建并跑冒烟。
+升级步骤：
+1. 编辑 \`${FLAVOR}/Dockerfile\` 将 \`ARG DOCKER_CLI_VERSION\` 改为 \`${LATEST}\`
+2. 确认下载源存在该版本：
+   - 官方源：\`https://download.docker.com/linux/static/stable/\`（默认，GitHub Actions 优先）
+   - 阿里云镜像：\`https://mirrors.aliyun.com/docker-ce/linux/static/stable/\`（国内回退）
+3. 确认 x86_64/aarch64 两架构目录下均存在该版本
+4. 重建镜像并跑冒烟测试验证
 
 _由 [SKILL:check_docker_cli_version] 自动创建；升级后同版本标题自动匹配即不再重复。_"
 PAYLOAD=$(jq -n --arg t "$TITLE" --arg b "$BODY" '{title:$t, body:$b, labels:["auto","dependency"]}')
