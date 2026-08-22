@@ -1,4 +1,4 @@
-# 宝塔面板 (Debian 12) Docker 镜像
+# 宝塔面板 (Debian 12) Docker 镜像 
 
 基于 **Debian 12** 构建的宝塔面板 Docker 镜像，**双版本独立维护，自动构建并推送到 DockerHub**。
 
