@@ -1,0 +1,116 @@
+# ============================================================
+# 宝塔面板 13.0.0 (Debian 12) Docker Compose 示例
+#
+# 使用方式：
+#   1. 复制 .env.example 为 .env 并按需修改
+#      cp .env.example .env
+#   2. 启动
+#      docker compose up -d
+#   3. 访问 http://<服务器IP>:${BT_PANEL_PORT}/${BT_ENTRY_PATH}
+#
+# 多目录持久化（容器销毁/重建/迁移均不丢失）：
+#   baota_data    -> /www        面板/站点/数据库/证书/日志（业务数据，卷始终持有）
+#   baota_persist -> /persist    /etc、/usr/local、/var/spool/cron 系统态
+#                                 运行期由 entrypoint 双向同步：开机恢复、停机写回，
+#                                 （含面板计划任务 cron 调度、自装软件）删建/重建/升级均保留
+# 备份只需备份这两个卷，或整个目录。
+# ============================================================
+services:
+  baota:
+    # 镜像已推送 DockerHub，默认使用 bugseeker/baota；如需自定义镜像可设 IMAGE 变量
+    image: ${IMAGE:-bugseeker/baota:13.0.0}
+    # 说明：本 compose 与 stable/ 的 compose 共用全局卷名(baota_data/baota_persist)与容器名，
+    #       因此【同一台宿主机只部署一套】；切勿同机同时拉起 stable 与 release（两者数据会互相接管）。
+    #       如需同机多开，请自行改 container_name 与底部 volumes 的 name 使其唯一。
+    container_name: baota
+    restart: always
+
+    # 优雅停机：给 bt / mysqld / nginx 足够时间落盘再被停，避免停止瞬间数据库脏写
+    stop_grace_period: 60s
+
+    # 宝塔面板需要管理容器内系统服务/防火墙，一般需要特权模式；
+    # 若仅使用 Web 环境（nginx/mysql/php）且不接受提权，可设为 false
+    privileged: ${PRIVILEGED:-true}
+
+    # 内存限制（可选）：防止面板/业务异常占用过多内存导致宿主机 OOM
+    # mem_limit: 2G
+
+    ports:
+      # 面板端口（改 .env 中 BT_PANEL_PORT 后两边自动同步）
+      - "${BT_PANEL_PORT:-8888}:${BT_PANEL_PORT:-8888}"
+      # Web / 数据库 / SSH / FTP（按需取消注释）
+      - "80:80"
+      - "443:443"
+      # - "3306:3306"
+      # - "22:22"
+      # - "20:20"
+      # - "21:21"
+
+    environment:
+      # 面板端口（容器内生效，与上方端口映射保持一致）
+      BT_PANEL_PORT: "${BT_PANEL_PORT:-8888}"
+      # 面板安全入口：http://IP:端口/入口
+      BT_ENTRY_PATH: "${BT_ENTRY_PATH:-dockerbt}"
+      # 面板登录账号 / 密码（强烈建议修改为强密码）
+      BT_USERNAME: "${BT_USERNAME:-admin}"
+      BT_PASSWORD: "${BT_PASSWORD:-Admin@1000.run}"
+      # 是否每次启动都应用上面的环境变量到面板
+      # auto（默认）：仅首次创建（空数据卷）时应用，之后保留面板内修改；
+      # true：每次强制覆盖面板内修改；false：永不应用，完全使用面板内配置
+      BT_APPLY_ENV: "${BT_APPLY_ENV:-auto}"
+      # 可选：容器内 SSH
+      SSH_ENABLE: "${SSH_ENABLE:-false}"
+      SSH_PASSWORD: "${SSH_PASSWORD:-}"
+      # 当 SSH_ENABLE=true 且 SSH_PASSWORD 为空时：true 允许 root 无密码登录（仅可信环境）
+      SSH_ALLOW_EMPTY: "${SSH_ALLOW_EMPTY:-false}"
+      # 时区
+      TZ: "${TZ:-Asia/Shanghai}"
+      # 容器主机名 / Postfix 邮件域名（可选，留空则用默认）
+      CONTAINER_HOSTNAME: "${CONTAINER_HOSTNAME:-}"
+
+    volumes:
+      # 核心：业务数据（面板配置、站点、数据库、证书、日志）
+      - baota_data:/www
+      # 系统态双向同步（/etc、/usr/local、/var/spool/cron）——开机恢复/停机写回
+      - baota_persist:/persist
+      # 如需在宿主机直接看到/备份业务数据，改用 bind mount：
+      # - ./www:/www
+      #
+      # ⚠️ 数据安全（重要）：
+      #   - 纯 `docker compose down` / `docker compose up --force-recreate` 会保留数据卷，**数据不丢**；
+      #   - 但 `docker compose down -v` 或 `docker volume rm baota_data baota_persist` 会【永久删除数据】；
+      #   - 建议定期备份两个卷，例如：
+      #       docker run --rm -v baota_data:/src -v "$(pwd)"/backup:/dst alpine tar czf /dst/baota_data.tar.gz -C /src .
+      #       docker run --rm -v baota_persist:/src -v "$(pwd)"/backup:/dst alpine tar czf /dst/baota_persist.tar.gz -C /src .
+      #   （恢复时把上面 czf 改成 -xzf，并把 /src /dst 对调即可）
+
+      # ---------- 管理宿主机 Docker（宝塔 Docker 管理器，可选，默认关闭） ----------
+      # 用途：把宿主机的 Docker 套接字挂进容器，让宝塔面板的「Docker 管理器」能管理宿主机容器。
+      # ⚠️ 风险提示：容器将获得宿主机 Docker 的完全控制权（等同 root），仅在可信环境启用。
+      # ⚠️ 与飞牛 fnOS 等自带容器管理 UI 的系统共存时，两套管理器操作同一 daemon 易冲突，一般无需开启。
+      #
+      # 路径说明：
+      #   - socket：标准路径为 /run/docker.sock（飞牛 fnOS 实测亦为此路径，/var/run 为其软链）。
+      #   - docker 二进制：飞牛/各发行版路径不固定（/usr/bin 或 /usr/local/bin），故【不挂载二进制】，
+      #     改为在镜像内置 docker CLI（见 Dockerfile/entrypoint），仅靠 socket 连通宿主机 daemon，跨平台通用。
+      #
+      # 启用方式：在 .env 中设置 DOCKER_HOST_SOCK=/run/docker.sock 即启用；
+      # 未设置/留空时，本行兜底把宿主 /dev/null 挂到容器 /var/run/docker.sock，
+      # 使容器内 docker CLI 无法连到任何 daemon（效果等同关闭，但并非"不挂载"）。
+      - "${DOCKER_HOST_SOCK:-/dev/null}:/var/run/docker.sock"
+
+    # 健康检查：面板主进程存活
+    # 注意：必须用 CMD-SHELL（走 shell），否则 exec 形式下 `||` 会被当成 pgrep 参数，
+    #       且模式 "pgrep" 会匹配到 pgrep 自身，面板挂了也会误报 healthy。
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f BT-Panel >/dev/null 2>&1 || pgrep -f panel/main.py >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+volumes:
+  baota_data:
+    name: baota_data
+  baota_persist:
+    name: baota_persist
