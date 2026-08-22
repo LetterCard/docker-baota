@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Resolve latest version (detect_version.sh)
         id: version
@@ -151,7 +151,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Pre-install sshpass (for SSH smoke test)
         run: |
@@ -307,7 +307,7 @@ jobs:
       issues: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Open failure issue (idempotent + downgrade)
         shell: bash
