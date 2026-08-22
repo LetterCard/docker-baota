@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # 检查 DockerHub 仓库是否存在，不存在则跳过（首次推送镜像时才会自动创建）
       - name: Check if DockerHub repository exists
