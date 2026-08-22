@@ -19,10 +19,10 @@
 #   - Trivy 可修复 HIGH/CRITICAL：推送不阻断，但自动开 issue 跟踪
 #
 # 配置要求（GitHub 仓库 Settings -> Secrets and variables -> Actions）：
-#   DOCKERHUB_USERNAME : 你的 DockerHub 用户名
-#   DOCKERHUB_TOKEN    : DockerHub Access Token（不是登录密码，scoped access token）
+#   DOCKER_USERNAME : 你的 DockerHub 用户名
+#   DOCKER_TOKEN    : DockerHub Access Token（不是登录密码，scoped access token）
 #
-# 推送到：DOCKERHUB_USERNAME/baota:<动态版本> 与 :latest
+# 推送到：DOCKER_USERNAME/baota:<动态版本> 与 :latest
 #         （latest 由正式版持有；稳定版不带 latest）
 #
 # 安全机制：先以单架构(amd64)构建并启动容器做冒烟测试（面板存活 / 端口响应 / bt 命令可用 / SSH），
@@ -111,7 +111,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           # DockerHub v2 API：标签不存在返回 404 -> 需要构建；200 -> 已存在，跳过
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}/tags/$VERSION")
+            "https://hub.docker.com/v2/repositories/${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}/tags/$VERSION")
 
           # 强制重建场景：手动触发 或 每周一安全补丁刷新调度（cron "17 3 * * 1"）。
           # 此时即使镜像标签已存在也重建重推，拾取 debian/apt 安全补丁；其余调度按标签存在性跳过。
@@ -212,13 +212,13 @@ jobs:
       - name: Login to DockerHub
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Generate image tags
         id: meta
         run: |
-          IMG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}"
+          IMG="${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}"
           VER="${{ needs.check-version.outputs.version }}"
           # 正式版：打动态版本标签 + latest（latest 由本版本持有）
           TAGS="$IMG:$VER,$IMG:latest"
@@ -245,7 +245,7 @@ jobs:
         id: trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
           format: json
           output: trivy-results.json
           severity: HIGH,CRITICAL
@@ -255,7 +255,7 @@ jobs:
       - name: Print Trivy table summary
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -284,7 +284,7 @@ jobs:
             echo ""
             echo "- **版本**：\`${{ needs.check-version.outputs.version }}\`（官方最新正式版，持有 latest 标签）"
             echo "- **架构**：linux/amd64 + linux/arm64"
-            echo "- **推送**：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}\`"
+            echo "- **推送**：\`${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}\`"
             echo "- **标签**：\`${{ needs.check-version.outputs.version }}\`、\`latest\`"
             echo "- **强制刷新**：${FORCE_TXT}"
             echo "- **可修复 HIGH/CRITICAL**：${VULN_COUNT} 个（>0 时已自动开 issue 跟踪）"
