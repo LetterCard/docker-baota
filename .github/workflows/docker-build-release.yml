@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Resolve latest version (detect_version.sh)
         id: version
@@ -151,7 +151,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Pre-install sshpass (for SSH smoke test)
         run: |
@@ -203,7 +203,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -241,7 +241,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -273,7 +273,7 @@ jobs:
   # ==========================================================
   merge-manifest:
     name: Merge manifests + Trivy scan
-    needs: [push-amd64, push-arm64]
+    needs: [check-version, push-amd64, push-arm64]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -282,7 +282,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -350,7 +350,7 @@ jobs:
       issues: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
 
       - name: Open failure issue (idempotent + downgrade)
         shell: bash
