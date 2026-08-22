@@ -11,7 +11,7 @@
 # 推送标签：13.0.0 + latest
 # 维护目录：release/（与 stable 稳定版互不干扰）
 # ============================================================
-FROM debian:12
+FROM debian:13
 
 # BT_VERSION 由 CI 动态传入（取自官方接口 .version），默认 13.0.0 兜底
 ARG BT_VERSION="13.0.0"
