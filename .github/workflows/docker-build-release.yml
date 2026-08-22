@@ -1,0 +1,242 @@
+# ============================================================
+# 自动构建宝塔正式版（Latest release）镜像并推送到 DockerHub
+#
+# 版本自动维护流程：
+#   取版本：官方接口动态获取最新正式版版本号
+#     curl -s https://www.bt.cn/api/panel/updateLinux | jq -r '.version'
+#   已构建判断：检查 DockerHub 镜像标签 bugseeker/baota:<版本> 是否已存在
+#   不存在 → 构建双架构镜像 → 推送 DockerHub（<版本> + latest）
+#   存在   → 跳过
+#
+# 说明：镜像只发布到 DockerHub，故以 DockerHub 镜像标签存在性作为"是否已构建"的唯一真源，避免重复构建。
+#
+# 触发方式：
+#   - 定时：每月 1 号 UTC 03:17 自动检测新版本（与稳定版 02:17 错开 1 小时）
+#   - push 到 main / master 分支
+#   - 手动触发（Actions 页面点 Run workflow）
+#
+# 配置要求（GitHub 仓库 Settings -> Secrets and variables -> Actions）：
+#   DOCKERHUB_USERNAME : 你的 DockerHub 用户名
+#   DOCKERHUB_TOKEN    : DockerHub Access Token（不是登录密码，
+#                        Hub 页面 Account Settings -> Security -> New Access Token）
+#
+# 推送到：DOCKERHUB_USERNAME/baota:<动态版本> 与 :latest
+#         （latest 由正式版持有；12.0.0 稳定版不带 latest）
+#
+# 安全机制：先以单架构(amd64)构建并启动容器做冒烟测试（面板存活 / 端口响应 / bt 命令可用 / SSH），
+#          验证通过后才推送多架构镜像。验证失败则 push job 不执行，避免坏镜像进入生产仓库。
+# ============================================================
+name: Build Baota Latest Release
+
+on:
+  # 每月 1 号 UTC 03:17 自动检测官方新版本（与稳定版 02:17 错开 1 小时避免同时跑）
+  # 正式版更新频率低（大版本迭代以月/年计），每月检测一次足够
+  schedule:
+    - cron: "17 3 1 * *"
+  push:
+    branches: [main, master]
+    paths:
+      - 'release/**'
+      - 'scripts/smoke.sh'
+      - '.github/workflows/docker-build-release.yml'
+  workflow_dispatch:
+
+env:
+  # DockerHub 镜像仓库名（不含用户名，仓库自动创建为公开库）
+  REPO_NAME: baota
+  # 冒烟测试用的面板端口（与环境变量默认值一致）
+  SMOKE_PORT: "8888"
+  # 构建上下文目录（本套独立维护）
+  BUILD_DIR: release
+
+# 避免定时 / push / 手动触发重叠（与各版本独立分组）
+concurrency:
+  group: build-baota-release
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================
+  # 0) 动态获取官方最新正式版版本号，并判断是否需要构建
+  # ==========================================================
+  check-version:
+    name: Check Latest Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+
+    steps:
+      - name: Get latest stable version from bt.cn
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 主源：updateLinux（HTTPS，JSON 结构，社区验证过）
+          VER=$(curl -s --max-time 8 https://www.bt.cn/api/panel/updateLinux | jq -r '.version' 2>/dev/null)
+
+          # 兜底1：get_version（HTTP 轻量接口）
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VER=$(curl -s --max-time 5 http://www.bt.cn/api/panel/get_version 2>/dev/null)
+          fi
+
+          # 兜底2：官网下载页（尽量抓完整 x.y.z；若只能拿 x.y，将由下方格式校验 fail-closed 报错退出）
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VER=$(curl -s --max-time 10 https://bt.cn/new/download | grep -oP '正式版:\K[0-9]+\.[0-9]+(?:\.[0-9]+)?' | head -1)
+          fi
+
+          # 格式校验
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::All sources failed to provide a valid version"
+            exit 1
+          fi
+
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "检测到官方最新正式版：$VER"
+
+      - name: Check if DockerHub image tag already exists
+        id: check
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # DockerHub v2 API：标签不存在返回 404 -> 需要构建；200 -> 已存在，跳过
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}/tags/$VERSION")
+
+          # 手动触发（workflow_dispatch）时强制构建，确保最新源码/脚本一定被验证，不被标签存在性跳过。
+          if [ "$HTTP_CODE" = "200" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "镜像标签 $VERSION 已存在于 DockerHub，且非手动触发，跳过构建。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "镜像标签 $VERSION 已存在，但本次为手动触发，强制重新构建并验证。"
+            else
+              echo "镜像标签 $VERSION 不存在，将构建并推送。"
+            fi
+          fi
+
+  # ==========================================================
+  # 1) 单架构构建 + 冒烟测试（仅当需要构建时执行）
+  # ==========================================================
+  build-smoke:
+    name: Build (amd64) & Smoke Test
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Pre-install sshpass (for SSH smoke test)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build (amd64, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.BUILD_DIR }}
+          file: ${{ env.BUILD_DIR }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: baota-smoke:latest
+          build-args: |
+            BT_VERSION=${{ needs.check-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke test (B-first with A fallback + SSH)
+        shell: bash
+        env:
+          SMOKE_PORT: ${{ env.SMOKE_PORT }}
+          EXPECT_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          chmod +x scripts/smoke.sh
+          bash scripts/smoke.sh baota-smoke:latest
+
+  # ==========================================================
+  # 2) 多架构构建并推送（冒烟测试通过后才执行）
+  # ==========================================================
+  push:
+    name: Build & Push to DockerHub (multi-arch)
+    needs: [check-version, build-smoke]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image tags
+        id: meta
+        run: |
+          IMG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}"
+          VER="${{ needs.check-version.outputs.version }}"
+          # 正式版：打动态版本标签 + latest（latest 由本版本持有）
+          TAGS="$IMG:$VER,$IMG:latest"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.BUILD_DIR }}
+          file: ${{ env.BUILD_DIR }}/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            BT_VERSION=${{ needs.check-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Write build summary
+        shell: bash
+        run: |
+          {
+            echo "## 🏗️ 宝塔正式版构建完成（自动维护）"
+            echo ""
+            echo "- **版本**：\`${{ needs.check-version.outputs.version }}\`（官方最新正式版，持有 latest 标签）"
+            echo "- **架构**：linux/amd64 + linux/arm64"
+            echo "- **推送**：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}\`"
+            echo "- **标签**：\`${{ needs.check-version.outputs.version }}\`、\`latest\`"
+            echo "- **提交**：\`${{ github.sha }}\`"
+            echo ""
+            echo "> 版本号由官方接口动态获取；冒烟测试（面板存活 + 端口响应 + bt 命令 + SSH，含版本一致性校验）已通过后才推送；漏洞扫描见上方 Trivy 步骤日志。"
+          } >> "$GITHUB_STEP_SUMMARY"
