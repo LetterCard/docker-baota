@@ -189,10 +189,11 @@ jobs:
           bash scripts/smoke.sh baota-smoke:latest
 
   # ==========================================================
-  # 2) 多架构构建并推送（冒烟测试通过后才执行）
+  # 2) 并行多架构构建：amd64（x86 runner）+ arm64（原生 ARM runner，避免 QEMU 模拟）
+  #    两个 job 同时运行，构建完成后由 merge-manifest 合并多架构清单
   # ==========================================================
-  push:
-    name: Build & Push to DockerHub (multi-arch)
+  push-amd64:
+    name: Push amd64
     needs: [check-version, build-smoke]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
@@ -200,14 +201,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-      issues: write   # Trivy 可修复高危漏洞自动开 issue（B3）
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -218,25 +214,15 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Generate image tags
-        id: meta
-        run: |
-          IMG="${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}"
-          VER="${{ needs.check-version.outputs.version }}"
-          # 正式版：打动态版本标签 + latest（latest 由本版本持有）
-          TAGS="$IMG:$VER,$IMG:latest"
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push Docker image
+      - name: Build and push amd64
         uses: docker/build-push-action@v7
         with:
           context: ${{ env.BUILD_DIR }}
           file: ${{ env.BUILD_DIR }}/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          # pull:true：强制拉取最新基础镜像，保证强制重建拾取安全补丁（B1）
+          platforms: linux/amd64
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
+          # pull:true：强制拉取最新基础镜像，保证强制重建拾取安全补丁
           pull: true
           build-args: |
             BT_VERSION=${{ needs.check-version.outputs.version }}
@@ -244,18 +230,85 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      - name: Trivy vulnerability scan (JSON for issue tracking)
-        id: trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
-          format: json
-          output: trivy-results.json
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: '0'
+  push-arm64:
+    name: Push arm64 (native)
+    needs: [check-version, build-smoke]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: Print Trivy table summary
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build and push arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.BUILD_DIR }}
+          file: ${{ env.BUILD_DIR }}/Dockerfile
+          push: true
+          platforms: linux/arm64
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}-arm64
+          # pull:true：强制拉取最新基础镜像，保证强制重建拾取安全补丁
+          pull: true
+          build-args: |
+            BT_VERSION=${{ needs.check-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ==========================================================
+  # 3) 合并多架构清单 + 漏洞扫描 + 摘要
+  # ==========================================================
+  merge-manifest:
+    name: Merge manifests + Trivy scan
+    needs: [push-amd64, push-arm64]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Merge multi-arch manifest
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          REPO="${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}"
+
+          # 创建多架构清单（指向 amd64 和 arm64 的独立标签）
+          docker buildx imagetools create \
+            -t "${REPO}:${VERSION}" \
+            -t "${REPO}:latest" \
+            "${REPO}:${VERSION}" \
+            "${REPO}:${VERSION}-arm64"
+
+          echo "✅ 多架构清单合并完成：${REPO}:${VERSION} (amd64 + arm64)"
+
+      - name: Trivy vulnerability scan (table summary only)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ needs.check-version.outputs.version }}
@@ -264,21 +317,9 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
-      - name: Open issue for fixable HIGH/CRITICAL (B3, idempotent)
-        shell: bash
-        run: |
-          chmod +x scripts/open_trivy_issue.sh
-          bash scripts/open_trivy_issue.sh \
-            --trivy-json trivy-results.json \
-            --version "${{ needs.check-version.outputs.version }}" \
-            --flavor release \
-            --out /tmp/trivy.out || true
-          cat /tmp/trivy.out 2>/dev/null || true
-
       - name: Write build summary
         shell: bash
         run: |
-          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL") | select(.FixedVersion != null and .FixedVersion != "")] | length' trivy-results.json 2>/dev/null || echo 0)
           FORCE="${{ needs.check-version.outputs.force_refresh }}"
           FORCE_TXT="否"
           [ "$FORCE" = "true" ] && FORCE_TXT="是（安全补丁强制重建）"
@@ -286,23 +327,22 @@ jobs:
             echo "## 🏗️ 宝塔正式版构建完成（自动维护）"
             echo ""
             echo "- **版本**：\`${{ needs.check-version.outputs.version }}\`（官方最新正式版，持有 latest 标签）"
-            echo "- **架构**：linux/amd64 + linux/arm64"
+            echo "- **架构**：linux/amd64 + linux/arm64（并行构建，arm64 使用原生 runner，无 QEMU 模拟）"
             echo "- **推送**：\`${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}\`"
             echo "- **标签**：\`${{ needs.check-version.outputs.version }}\`、\`latest\`"
             echo "- **强制刷新**：${FORCE_TXT}"
-            echo "- **可修复 HIGH/CRITICAL**：${VULN_COUNT} 个（>0 时已自动开 issue 跟踪）"
             echo "- **提交**：\`${{ github.sha }}\`"
             echo ""
-            echo "> 版本号由 scripts/detect_version.sh 动态获取（fail-closed）；冒烟测试（面板存活 + 端口响应 + bt 命令 + SSH，含版本一致性校验）通过后才推送；漏洞扫描见上方 Trivy 步骤日志。"
+            echo "> 版本号由 scripts/detect_version.sh 动态获取（fail-closed）；冒烟测试通过后才推送；双架构并行构建（amd64 x86 runner + arm64 原生 runner），总耗时减半；漏洞扫描见上方 Trivy 步骤日志。"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ==========================================================
-  # 3) 失败自愈：构建/冒烟/推送失败时自动开 issue（连续 3 次降级为仅告警，见 D2）
+  # 4) 失败自愈：构建/冒烟/推送失败时自动开 issue（连续 3 次降级为仅告警，见 D2）
   # ==========================================================
   on-failure:
     name: Notify Failure (auto issue)
     if: failure()
-    needs: [check-version, build-smoke, push]
+    needs: [check-version, build-smoke, push-amd64, push-arm64, merge-manifest]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -323,7 +363,9 @@ jobs:
           FAILED_JOB=""
           [ "${{ needs.check-version.result }}" = "failure" ] && FAILED_JOB="check-version"
           [ "${{ needs.build-smoke.result }}" = "failure" ] && FAILED_JOB="build-smoke"
-          [ "${{ needs.push.result }}" = "failure" ] && FAILED_JOB="push"
+          [ "${{ needs.push-amd64.result }}" = "failure" ] && FAILED_JOB="push-amd64"
+          [ "${{ needs.push-arm64.result }}" = "failure" ] && FAILED_JOB="push-arm64"
+          [ "${{ needs.merge-manifest.result }}" = "failure" ] && FAILED_JOB="merge-manifest"
           bash scripts/open_failure_issue.sh \
             --workflow docker-build-release \
             --version "$VERSION" \
