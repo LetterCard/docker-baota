@@ -1,274 +1,378 @@
-# 宝塔面板 (Debian 12) Docker 镜像
+# 宝塔 Linux 面板 12.x 容器化
 
-基于 **Debian 12** 构建的宝塔面板 Docker 镜像，**双版本独立维护，自动构建并推送到 DockerHub**。
+用官方安装脚本在容器里安装宝塔面板，目标是：**容器销毁、重建、换镜像、改配置，业务与系统数据都不丢**，同时尽可能接近装在真机上的体验。
 
-| 版本 | 推送标签 | 适用 |
-|------|----------|------|
-| **Stable release（稳定版）** | 固定版本号，如 `12.0.0`（**不带 `latest`**） | 生产稳定环境 |
-| **Latest release（正式版）** | `<动态版本号>` + `latest`（随官方新版本自动构建） | 追新 / 测试新特性 |
+镜像内容完全来自官方脚本，不做二次打包：
 
-镜像地址（DockerHub）：
+```
+wget -O install.sh https://download.bt.cn/install/installStable_12.sh && bash install.sh
+```
 
-- 稳定版：`docker pull bugseeker/baota:12.0.0`
-- 正式版：`docker pull bugseeker/baota:latest`
+---
 
-| 资源 | 地址 |
-|------|------|
-| 🛠 维护仓库（源码 / Issue） | https://github.com/LetterCard/baota |
-| 🐳 DockerHub | https://hub.docker.com/r/bugseeker/baota |
+## 目录
 
-## ✨ 特性
+- [快速开始](#快速开始)
+- [目录规划（实测）](#目录规划实测)
+- [持久化是怎么做的](#持久化是怎么做的)
+- [备份与迁移](#备份与迁移)
+- [镜像升级](#镜像升级)
+- [跟随上游更新](#跟随上游更新)
+- [首次登录凭据](#首次登录凭据)
+- [常见问题](#常见问题)
+- [构建与发布](#构建与发布)
 
-一键部署即得：面板开箱即用、数据删除重建不丢、随官方版本自动更新。
-
-- **数据不丢失**：业务数据持久化到 `/www`，系统环境双向同步到 `/persist` 卷；面板、站点、数据库、证书、已装环境、任务调度等，容器删除 / 重建 / 升级均不丢配置。
-- **双版本独立维护**：稳定版固定版本号（不带 `latest`）、正式版动态版本号 + `latest`，互不干扰。
-- **compose 变量化配置**：密码、端口、入口等通过环境变量声明式设置；`bridge` 网络模式下容器内固定宝塔标准端口，宿主侧改端口映射即可规避占用。
-- **首次启动自动初始化**：镜像已预装面板，空数据卷自动恢复，无需手动安装。
-- **默认随机强密码**：未设置 `BT_PASSWORD` 时首次启动自动生成随机密码并打印日志，与真实服务器安装宝塔体验一致。
-- **重建自动拉起服务**：容器重建后自动恢复 nginx / mysql / php-fpm / redis 等服务。
-- **可选容器内 SSH**：`SSH_ENABLE=true` 开启，支持无密码登录开关。
-- **长期免维护 CI**：GitHub Actions 自动检测官方新版本；正式版每周、稳定版每月强制重建（`pull: true` 强制拉最新 base），持续拾取 debian/apt 安全补丁；构建/冒烟失败自动开 issue 跟踪。
-- **镜像体积优化**：仅内置静态 docker CLI（约 39MB）而非完整 docker.io 守护进程包，基础镜像体积显著减小。
-- **多架构支持**：amd64 / arm64。
-
-## 公开的核心文件
-
-本仓库对外开放以下文件，供自行构建 / 审计：
-
-- `Dockerfile` —— 镜像构建定义（Debian 12 + 宝塔面板）
-- `entrypoint.sh` —— 容器入口（初始化 / 持久化 / 环境变量注入 / 服务拉起）
-- `.env.example` —— 环境变量模板（见下方「环境变量示例」）
-
-> 其余 CI / 构建相关配置不在本 README 详述，欢迎到维护仓库查看。
+---
 
 ## 快速开始
 
-```bash
-# 1. 拉取镜像（以稳定版为例）
-docker pull bugseeker/baota:12.0.0
+### 飞牛 NAS（fnOS）
 
-# 2. 准备环境变量（复制模板并修改 BT_PASSWORD）
-cp .env.example .env
+1. 打开「Docker」→「项目」→「新建项目」
+2. 项目名填 `baota`，把 `stable/docker-compose.yml` 的内容粘贴进去
+3. 把 `image:` 改成你自己的镜像名
+4. 点「立即构建」
+5. 查看首次登录信息：「容器」→ `baota` →「日志」，或命令行 `docker compose logs -f baota`
 
-# 3. 启动容器
-docker run -d \
-  --name baota \
-  --privileged \
-  --restart unless-stopped \
-  -p 8888:8888 \
-  -e BT_PANEL_PORT=8888 \
-  -e BT_ENTRY_PATH=dockerbt \
-  -e BT_USERNAME=admin \
-  -e BT_PASSWORD=你的强密码 \
-  -v baota_data:/www \
-  -v baota_persist:/persist \
-  bugseeker/baota:12.0.0
-```
+数据会存放在 `docker-compose.yml` 同级的 `data/` 目录里，可以直接用飞牛的「文件管理」查看和备份。
 
-打开浏览器访问：`http://<服务器IP>:8888/dockerbt`
-
-- 登录账号：`admin`
-- 登录密码：启动时设置的 `BT_PASSWORD`
-
-> 首次启动会自动初始化面板，约需 **1-3 分钟**（视磁盘 / 网络）。看到日志出现 `宝塔面板已就绪` 即可访问。
-
-## 环境变量示例
-
-仓库内 `.env.example` 内容如下，可直接复制使用：
+### 其它 Linux 服务器
 
 ```bash
-# ============================================================
-# 宝塔面板 环境变量配置示例
-# 复制为 .env 后修改：cp .env.example .env
-# ============================================================
-
-# 镜像地址
-# 默认使用 docker-compose.yml 内置的 bugseeker/baota:12.0.0，无需修改。
-# 仅当你想改用【自己的私有仓库】或其他镜像时才需要启用本行：
-#   1) 删掉行首的 # 取消注释
-#   2) 把地址改成你的，例如 IMAGE=registry.example.com/baota:12.0.0
-# （12.0.0 是稳定版的固定版本号；稳定版只有此类固定标签，不带 latest。）
-# 👉 绝大多数用户保持本行注释即可，无需任何改动。
-# IMAGE=bugseeker/baota:12.0.0
-
-# 是否使用特权模式（宝塔管理需要，默认 true）
-# PRIVILEGED=true
-
-# ---------- 面板配置（端口/入口/账号/密码，应用策略见下方 BT_APPLY_ENV） ----------
-# 面板端口（同时用于宿主机端口映射）
-BT_PANEL_PORT=8888
-# 面板安全入口：http://IP:端口/入口
-BT_ENTRY_PATH=dockerbt
-# 面板登录账号
-BT_USERNAME=admin
-# 面板登录密码：留空时 entrypoint 首次启动会生成【随机强密码】并打印到容器日志
-# （docker logs baota 查看），避免公开默认弱密码，如同真实服务器安装宝塔。
-# 如需固定密码请在此设置强密码（推荐）。
-BT_PASSWORD=
-
-# 环境变量如何应用到面板（端口/入口/账号/密码）
-# auto  : 默认。仅【首次创建】（空数据卷）时应用，之后重建/重启保留面板内修改（推荐）
-# true  : 每次启动都强制应用，环境变量优先（会覆盖面板内修改）
-# false : 永远跳过，完全使用面板/数据卷内已有配置
-BT_APPLY_ENV=auto
-
-# ---------- 网络与端口映射 ----------
-# 容器使用 bridge 网络（compose 已显式 network_mode: bridge），容器内固定宝塔标准端口
-# （Web=80 / HTTPS=443 / DB=3306 / SSH=22 / FTP=21），与宿主机通过 ports 隔离。
-# 宿主机端口被占用时：直接编辑 docker-compose.yml 的 ports 左侧映射即可（如 "8080:80"）。
-# DB / SSH / FTP 端口在 docker-compose.yml 中默认注释，取消注释后才暴露到宿主机。
-
-# 系统态周期性写回间隔（秒）：容器被 kill -9 / 宿主机断电时，/etc、cron 等系统态的
-# 丢失窗口上限。默认 600（10 分钟）；对数据敏感可调小（如 60）。
-# PERSIST_SYNC_INTERVAL=600
-
-# ---------- 可选：容器内 SSH ----------
-# SSH_ENABLE=false        # true 开启容器内 SSH
-# SSH_PASSWORD=           # root 的 SSH 登录密码（推荐设置）
-# SSH_ALLOW_EMPTY=false   # 当 SSH_ENABLE=true 且 SSH_PASSWORD 为空时：
-#                         #   false -> 出于安全不启动 SSH（默认，避免"开了却登不上"）
-#                         #   true  -> 允许 root 无密码登录（仅内网/可信环境）
-
-
-# ---------- 时区 ----------
-# TZ=Asia/Shanghai
-
-# ---------- 容器主机名 / Postfix 邮件域名（可选，留空则用默认） ----------
-# CONTAINER_HOSTNAME=1000.run
-
-# ---------- 内存限制（可选） ----------
-# 如需限制容器最大内存，编辑 docker-compose.yml，取消 mem_limit 行注释并设值，例如 2G
-
-# ---------- 管理宿主机 Docker（可选，默认关闭） ----------
-# 把宿主机 docker socket 路径设给 DOCKER_HOST_SOCK，即可启用宝塔「Docker 管理器」来管理宿主机容器。
-# ⚠️ 注意：容器将获得宿主机 Docker 的完全控制权，仅在可信环境开启。
-# 飞牛 fnOS / 标准 Linux 实测均位于 /run/docker.sock。
-# 未设置/留空时，compose 会兜底把宿主 /dev/null 挂到容器 /var/run/docker.sock（效果等同关闭，但并非"不挂载"）。
-# DOCKER_HOST_SOCK=/run/docker.sock
+cd stable
+# 改好 docker-compose.yml 里的 image 后
+docker compose up -d
+docker compose logs -f baota
 ```
 
-## 🔧 环境变量说明
+### 端口说明（飞牛必看）
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `BT_PANEL_PORT` | `8888` | 面板端口（同时影响宿主机端口映射） |
-| `BT_ENTRY_PATH` | `dockerbt` | 面板安全入口，访问路径 `http://IP:端口/入口` |
-| `BT_USERNAME` | `admin` | 面板登录账号 |
-| `BT_PASSWORD` | 空 | 面板登录密码；留空时 entrypoint 首次启动生成**随机强密码**并打印到容器日志（`docker logs baota`），如需固定密码请设置强密码 |
-| `BT_APPLY_ENV` | `auto` | 环境变量注入策略：`auto`=仅首次创建时应用（之后保留面板内修改，推荐）；`true`=每次启动强制应用（覆盖面板内修改）；`false`=永不应用，完全使用面板内配置 |
-| `SSH_ENABLE` | `false` | 是否开启容器内 SSH |
-| `SSH_PASSWORD` | 空 | 容器内 root 的 SSH 密码（推荐设置） |
-| `SSH_ALLOW_EMPTY` | `false` | 当 `SSH_ENABLE=true` 且 `SSH_PASSWORD` 为空时：`false`=出于安全不启动 SSH；`true`=允许 root 无密码登录（仅内网 / 可信环境） |
-| `TZ` | `Asia/Shanghai` | 时区 |
-| `CONTAINER_HOSTNAME` | 空 | 容器内主机名 / Postfix 邮件域名（可选） |
-| `PRIVILEGED` | `true` | 是否特权模式运行（宝塔管理需要） |
-| `PERSIST_SYNC_INTERVAL` | `600` | 系统态周期性写回间隔（秒），容器被 kill -9 / 断电时的数据丢失窗口上限 |
+fnOS 自身会占用这些端口，所以 compose 里做了避让：
 
-> 端口映射规则：**面板端口**由 `BT_PANEL_PORT` 驱动（容器内与宿主机两端同步）；**站点/数据库/SSH/FTP** 容器内固定宝塔标准端口（80/443/3306/22），宿主机侧直接编辑 `docker-compose.yml` 的 `ports` 左侧映射以规避占用（见 Q5/Q6）。
+| 服务 | 容器内 | 宿主机（默认） | 说明 |
+|---|---|---|---|
+| 面板 | 8888 | 8888 | |
+| phpMyAdmin | 888 | 888 | |
+| 站点 HTTP | 80 | **8080** | 宿主机 80 被 fnOS 占用 |
+| 站点 HTTPS | 443 | **8443** | 宿主机 443 被 fnOS 占用 |
+| SSH | 22 | **2222** | 宿主机 22 通常是 sshd |
+| MySQL | 3306 | 3306 | |
 
-### 🖥 SSH 配置行为矩阵
+fnOS 的 Web 管理端口是 **5666 / 5667**，且「设置 → 安全性」默认开启了**重定向 80 与 443 端口**。
 
-容器内 SSH 的启动与登录方式由 `SSH_ENABLE`、`SSH_PASSWORD`、`SSH_ALLOW_EMPTY` 三者共同决定：
+如果站点确实需要用宿主机的 80/443（例如签发 Let's Encrypt 证书），先到 fnOS 关闭那个重定向，再把映射改回 `"80:80"` 和 `"443:443"`。
 
-| `SSH_ENABLE` | `SSH_PASSWORD` | `SSH_ALLOW_EMPTY` | 行为 |
-|--------------|----------------|-------------------|------|
-| ≠ `true` | — | — | 不启动 SSH |
-| `true` | 非空 | — | 启动 SSH，root 用该密码登录（推荐） |
-| `true` | 空 | `false`（默认） | 不启动 SSH 并告警（避免"开了却登不上"的摆设） |
-| `true` | 空 | `true` | 启动 SSH，允许 root 无密码登录（仅内网 / 可信环境） |
+---
 
-## 数据持久化（多目录，删建/重建/升级不丢失）
+## 目录规划（实测）
 
-只持久化 `/www` 是不够的——宝塔面板的服务脚本（`/etc/init.d/bt`）、计划任务调度（cron）、已装软件等分布在 `/etc`、`/usr/local`、`/var/spool/cron`，仅依赖单目录重建容易丢失。本方案把业务数据与系统态都写入持久化数据卷，实现删除容器 / 重建 / 升级后数据完整保留：
+在干净的 Debian 12 容器里执行官方安装脚本，对比安装前后的完整文件系统（排除 `/proc /sys /dev /run /tmp`），结果是：
 
-| 数据卷 | 容器路径 | 保存内容 |
-|--------|---------|---------|
-| `baota_data` | `/www` | 面板配置（账号 / 端口 / 入口）、站点、数据库、证书、日志、已装环境二进制、面板内计划任务列表 |
-| `baota_persist` | `/persist` | 系统态：`/etc`、`/usr/local`、`/var/spool/cron`（init.d 服务脚本、cron 调度、自装软件） |
+| 顶层目录 | 新增文件数 | 内容 |
+|---|---:|---|
+| `www` | 31623 | 宝塔全部数据 |
+| `usr` | 19646 | apt 与源码安装的软件 |
+| `root` | 1781 | `.pip`、`.cache`、`.config` |
+| `var` | 1092 | 计划任务、日志、dpkg 数据库、systemd 状态 |
+| `etc` | 345 | 系统与服务配置 |
 
-入口脚本（entrypoint）对系统态做**双向同步**，保证删建/重建/面板内升级均无损：
-1. **首启空卷**：以镜像层当前系统态为种子初始化 `baota_persist`。
-2. **开机**：从持久卷把上次写入的 `/etc`、`/usr/local`、`/var/spool/cron` 恢复回容器。
-3. **停机**：把运行期间对系统目录的改动（含面板计划任务 cron 调度、自装软件）写回持久卷。
-4. `/www` 有数据则直接复用（业务数据卷始终持有），为空则从镜像内置备份恢复。
+**安装后唯一新增的顶层目录是 `/www`**，其余都是往已有目录里加内容。没有任何写入落到这 5 个目录之外。
 
-如需在宿主机直接看到业务数据，可将 `baota_data:/www` 改为 `./www:/www`（bind mount）。空目录时首次启动同样自动完成初始化。
+因此持久化的 8 个目录是完备的：
 
-### 📦 备份与迁移
+```
+etc    系统配置、systemd unit、sshd、apt 源、计划任务、ufw 规则
+usr    apt / 源码安装的软件、/usr/local
+var    计划任务 /var/spool/cron、日志、dpkg 数据库、/var/bt_setupPath.conf
+www    宝塔全部数据（面板、站点、数据库、备份、证书）
+root   root 家目录：.ssh/authorized_keys、.bashrc、pip 配置
+opt    第三方软件
+home   用户数据
+srv    服务数据
+```
 
-定期备份两个卷即可保证数据不丢；迁移就是把备份恢复到相同卷名。
+### `/www` 的真实结构
+
+```
+/www/server/panel          面板本体、配置、面板数据库
+/www/server/panel/pyenv    Python 运行环境（3.7.16）
+/www/server/data           MySQL 数据（装了 MySQL 之后出现）
+/www/wwwroot               站点文件
+/www/backup                备份
+/www/wwwlogs               站点日志
+```
+
+### `data/` 的结构
+
+每个持久化目录在 `data/` 下有两个子目录：
+
+```
+data/<目录>/upper   可写层，所有新增/修改都落在这里（备份只需要它）
+data/<目录>/work    overlay 工作目录，可以删，启动时自动重建
+```
+
+例如站点文件实际存放在 `data/www/upper/wwwroot/`。
+
+---
+
+## 持久化是怎么做的
+
+不用 `VOLUME ["/etc", "/usr", "/www"]` 这种朴素做法，原因有两个：
+
+1. bind mount 到宿主机空目录时，Docker **不会**复制镜像内容，容器直接起不来
+2. 镜像升级后，旧卷会把新镜像内容整个屏蔽掉
+
+这里用的是 overlay 分层：
+
+```
+lowerdir = 镜像内的同名目录（随镜像升级而更新）
+upperdir = /data/<目录>/upper（持久化层，容器销毁不丢）
+workdir  = /data/<目录>/work
+```
+
+容器内看到的仍然是原路径，读写完全无感知。upper 为空时等价于镜像内容，零复制、零膨胀。
+
+### 为什么换镜像后数据不会丢
+
+关键在于 **upper 层只记录「被创建或被修改」的文件**。实测（把 lower 从 v1 换成 v2，upper 保持不变）：
+
+| 文件 | 结果 |
+|---|---|
+| 用户改过的 `app.conf` | 保留用户版本 |
+| 用户新建的 `my-site.conf` | 保留 |
+| v2 新增的 `only-in-v2` | 可见、生效 |
+| v2 删掉的 `only-in-v1` | 不再出现 |
+
+也就是说：你从没动过的文件，升级后自动用新镜像的版本（新版面板代码、新版启动脚本会自动生效）；你改过的文件，永远以你的为准。和真机升级的语义一致。
+
+### 两道自检护栏
+
+上游一旦改了数据落点，数据会静默丢失。为此每次启动会做两项**只读**检查（不阻断启动，只告警）：
+
+1. 读取 `/var/bt_setupPath.conf`（宝塔自己记录的安装路径），确认它在持久化范围内
+2. 比对顶层目录与镜像基线 `/opt/baota/baseline-dirs.txt`，发现新目录就告警
+
+基线文件运行期从不被写入，所以按 overlay 语义它始终跟随当前镜像——换镜像即自动换基线，不需要维护。
+
+### 硬约束
+
+**`/data` 必须落在宿主机的 ext4 / btrfs / xfs 上。**
+
+放到 SMB / NFS 网络共享、exFAT / NTFS 移动盘、或 macOS / Windows 的宿主机目录上，overlay 会「挂载成功但降级为只读」，之后所有写入静默失败。容器启动时会实测写入并明确告警。
+
+另外 overlay 的 upperdir 不能位于 overlay 之上，所以 `/data` 不能放在容器可写层里——必须用 bind mount 或命名卷。
+
+---
+
+## 备份与迁移
+
+所有状态都在 `data/` 里，且不含宿主机绝对路径，所以：
+
+### 备份
 
 ```bash
-# ---- 备份 ----
-# 业务数据
-docker run --rm -v baota_data:/www -v $(pwd):/backup \
-  alpine tar czf /backup/baota_data.tar.gz -C / www
-# 系统环境旁路
-docker run --rm -v baota_persist:/persist -v $(pwd):/backup \
-  alpine tar czf /backup/baota_persist.tar.gz -C / persist
-
-# ---- 迁移（新机器：建同名卷后恢复）----
-docker volume create baota_data && docker volume create baota_persist
-docker run --rm -v baota_data:/www -v $(pwd):/backup \
-  alpine tar xzf /backup/baota_data.tar.gz -C /
-docker run --rm -v baota_persist:/persist -v $(pwd):/backup \
-  alpine tar xzf /backup/baota_persist.tar.gz -C /
+# 停机后打包（推荐，保证一致性），只需要 upper
+tar czf baota-backup.tgz -C data . --exclude='*/work'
 ```
 
-**注意**：
-- 备份前请先在面板停止 MySQL，避免数据文件不一致
-- **删除容器用 `docker compose down`（不要加 `-v`）**，加 `-v` 会把命名卷一并删掉，导致数据全丢
-- 如需彻底重置（删除卷），用 `docker compose down -v`，但**务必先备份**
-- **同一台宿主机只部署一套**：stable 与 release 的 compose 共用全局卷名 `baota_data`/`baota_persist` 与容器名 `baota`，同时拉起两套会互相接管数据。如需同机多开，请把 compose 里的 `container_name` 与底部 `volumes` 的 `name` 改为唯一
-- compose 内置 `stop_grace_period: 60s`：停止容器时给 MySQL / nginx / 面板足够时间落盘，避免停机瞬间数据库脏写，请勿改小
+`work` 是临时目录，可以排除，启动时会自动重建。
+
+### 迁移到新机器
+
+```bash
+# 1. 老机器上打包
+tar czf baota-data.tgz -C data .
+
+# 2. 新机器上，同一目录放好 docker-compose.yml 后解压
+tar xzf baota-data.tgz -C data
+
+# 3. 启动
+docker compose up -d
+```
+
+迁移后**面板地址、用户名、口令都不变**（它们都在 `data/www/upper` 里）。自动适配的部分：
+
+- `data/etc/upper/` 下的 `hosts`、`resolv.conf`、`hostname` 会在启动时被新宿主机的 Docker 注入值覆盖
+- SSH 主机密钥跟着走，客户端不会报密钥变更
+
+需要你确认的一点：新机器的端口映射要和 `data/www/upper/server/panel/data/port.pl` 里的面板端口对得上。
+
+---
+
+## 镜像升级
+
+镜像标签即宝塔版本号，**没有 `latest`**（避免「我到底跑的是哪个版本」变得不确定）。
+
+升级步骤：
+
+```bash
+# 1. 改 docker-compose.yml 里的 image 标签，例如 12.0.0 → 12.1.0
+# 2. 拉新镜像并重建容器
+docker compose pull
+docker compose up -d
+```
+
+`data/` 原样保留，面板代码等「你没改过的文件」自动换成新版。
+
+### 面板内更新必须关闭
+
+镜像里已经做了处理：把面板自带的升级脚本替换成「拒绝执行」的 stub，并关闭自动更新。
+
+原因：一旦在面板里点了更新，新版文件会写进 `data/www/upper`，反过来**永久屏蔽镜像层**——之后无论怎么重建镜像都不再生效，版本彻底失控。
+
+> 注意区分：**面板内更新要禁止，镜像升级要鼓励**。两者目的相反，前者会污染持久化层，后者才是干净的升级路径。
+
+如果上游改名或删除了这些升级入口，构建时会直接失败并提示，不会静默失效。
+
+---
+
+## 跟随上游更新
+
+上游发新版时，`installStable_12.sh` 这个 URL 不变，所以 Dockerfile 不需要改；但仓库里的 `stable/VERSION` 必须同步，否则构建会因版本校验失败。
+
+为此提供了手动探测工作流：
+
+1. GitHub 仓库页面 → **Actions** → **Check Upstream Baota Version** → **Run workflow**
+2. 分支选 `main`，输入上游脚本地址（默认已填好）
+3. 点「运行工作流」
+
+工作流会下载脚本、从安装横幅里提取版本号、与 `stable/VERSION` 比对，发现新版就**自动修改 VERSION 并开一个 PR**。
+
+PR 里会自动跑完整的构建与发布前健康检查，你确认通过后再点合并——**它不会自动合并，也不会直接推送镜像**。合并后 `build-docker.yml` 才会推送新镜像。
+
+> 版本号只从安装横幅提取（`| 您正在安装宝塔面板 12.0.0 稳定版`）。脚本其它位置也有版本号（例如内部 API 用的 9.3.9），不限定范围会误判成降级。
+
+需要的仓库权限：Settings → Actions → General → Workflow permissions 勾选 **Read and write permissions**。
+
+---
+
+## 首次登录凭据
+
+镜像里**不含任何固定口令**：root 是锁定状态，面板口令只是构建期的随机占位。真正的凭据在容器首次启动时才确定。
+
+| 变量 | 不写 / 留空的效果 |
+|---|---|
+| `PANEL_USER` | 固定为 `baota`（不会随机） |
+| `PANEL_PASSWORD` | 随机 12 位，见首次启动日志 |
+| `PANEL_SAFE_PATH` | 随机 8 位，见面板地址 |
+| `ROOT_PASSWORD` | 随机 12 位，见首次启动日志 |
+
+想自己指定就在 `docker-compose.yml` 的 `environment` 里取消注释填写。注意这个文件是要提交到 Git 的，口令写在这里等于公开；既要固定又要保密，请改用同目录的 `.env` 文件。
+
+**这些只在首次启动（`data/` 为空）时生效。** 之后再改不会有任何效果，那时请用：
+
+```bash
+docker exec -it baota bt 5      # 改面板口令
+docker exec baota passwd root   # 改 root 口令
+```
+
+这是故意的：否则重启一次容器就会把你在面板里设的东西覆盖掉。
+
+---
 
 ## 常见问题
 
-**Q1：修改了环境变量但面板配置没变？**
-默认 `BT_APPLY_ENV=auto`，仅在首次创建（空数据卷）时应用环境变量。如果数据卷已有配置（重建 / 重启后），改动不会生效。如需强制应用，可临时把 `BT_APPLY_ENV` 设为 `true` 重启一次，或直接进面板修改（推荐）。
+### 站点目录里的 `.user.ini` 删不掉
 
-**Q2：在面板里改了密码，重启容器后又变回环境变量的值？**
-默认 `auto` 模式下不会——只有首次创建时应用，之后重启保留面板内修改。若出现了"被打回"的情况，说明 `BT_APPLY_ENV` 被设成了 `true`（每次启动强制覆盖面板内修改），改为 `auto` 或 `false` 即可。
+宝塔建站时会 `chattr +i` 锁住 `.user.ini` 防止跨站。这是 Linux 的**不可变属性**，连 root 都删不掉，**与文件权限、属主无关**——所以改权限是没用的。
 
-**Q3：MySQL 无法启动 / 权限错误？**
-bind mount 场景下入口脚本会自动修复 `/www/server/data` 的属主。若仍有问题，可在容器内执行 `chown -R mysql:mysql /www/server/data`。
+在容器里解禁即可：
 
-**Q4：要不要 `privileged: true`？**
-面板的软件安装、防火墙、系统服务管理依赖特权。仅用 Web 环境可设为 `false`，但部分功能会受限。
+```bash
+docker exec baota chattr -i /www/wwwroot/<站点>/.user.ini
+docker exec baota rm -f /www/wwwroot/<站点>/.user.ini
+```
 
-**Q5：如何修改已部署容器的端口映射？**
-- **面板端口**：改 `.env` 的 `BT_PANEL_PORT`（面板端口与宿主映射两端同步变化），重启容器生效。
-- **站点/数据库/SSH/FTP**：直接编辑 `docker-compose.yml` 的 `ports` 左侧宿主机端口（容器内保持宝塔标准端口 80/443/3306/22 不变），例如改 `"8080:80"`，重启容器生效。数据库/SSH/FTP 端口默认注释，取消注释后才暴露到宿主机。
+如果在飞牛的「文件管理」里删不掉，可能是另一回事：站点目录属主是 `root:www`、权限 `755`，飞牛的文件管理不是 root，对目录没有写权限。这种情况下建议把站点目录通过 SMB 挂到电脑上操作，而不是给宿主机开全权。
 
-**Q6：宿主机 80 / 443 / 22 等端口被占用怎么办？要不要用 host 网络？**
-不需要 host 网络。compose 已显式 `network_mode: bridge`，容器内固定宝塔标准端口，宿主机侧通过 `ports` 左侧映射规避占用：
-- 站点被占 80 → 把 `"80:80"` 改为 `"8080:80"`，站点经 `http://IP:8080` 访问（容器内 nginx 仍是 80，宝塔站点配置、证书签发不受影响）
-- 数据库 / SSH 同理改对应映射行（默认注释，取消注释后生效）
-- **不建议 `network_mode: host`**：host 模式下容器服务直接绑定宿主端口，宿主端口被占时**无法通过映射规避**（nginx/mysqld 会直接启动失败），且 macOS（OrbStack/Colima）下 host 网络为模拟实现、行为不一致。
+### 面板端口被改过之后健康检查失败
 
-**Q7：如何在宝塔面板里管理宿主机的 Docker（容器 / 镜像）？**
-默认**不挂载**宿主机 Docker。如需启用，设置 `DOCKER_HOST_SOCK=/run/docker.sock` 后重启容器，面板「Docker 管理器」即可管理宿主机容器。注意：
-- 该挂载会使容器获得宿主机 Docker 的**完全控制权**，仅在可信主机启用
-- 容器内已内置 `docker` CLI，只需挂载 socket 即可跨平台通用，无需挂载宿主机二进制
-- macOS（OrbStack/Colima）与 Windows 的宿主机 socket 路径不同，需把 `DOCKER_HOST_SOCK` 改为对应路径（如 OrbStack：`~/.orbstack/run/docker.sock`）
-- 若不需要此功能，保持 `DOCKER_HOST_SOCK` 注释 / 留空即可（未设置时 compose 会兜底把宿主 `/dev/null` 挂到容器 `/var/run/docker.sock`，效果等同关闭，但并非"不挂载"）
+健康检查会从 `data/port.pl` 现读端口，不会写死 8888。
 
-## 安全提示
+### 忘记面板口令
 
-- 未设置 `BT_PASSWORD` 时，entrypoint 首次启动会生成**随机强密码**并打印到容器日志（`docker logs baota`），与真实服务器安装宝塔一致，避免公开默认弱密码；建议登录后立即在面板内修改密码并设置安全入口
-- 不要在公网直接暴露 `3306`、`22` 等端口；如需暴露，请配合安全组 / 防火墙
-- `privileged: true` 会放大容器权限，请在可信主机上使用
-- 镜像层 `BT_PASSWORD` 默认**留空**，未显式设置时由 entrypoint 首次启动生成随机强密码；任何启动方式（compose 或裸 `docker run`）都不会落到公开默认弱密码。**切勿依赖任何占位密码**
+```bash
+docker exec -it baota bt default   # 查看面板账号信息
+docker exec -it baota bt 5         # 重置面板口令
+```
 
-## ⚖️ 与宝塔官方镜像（btpanel/baota）的差异
+### 持久化层变成只读
 
-官网镜像只持久化单一目录 `/www`。位于 `/www` 之外的面板服务脚本、系统配置等，容器销毁重建后容易丢失，需要重新安装环境。本方案针对性改进：
+日志里出现「持久化层挂载成功但不可写」时，说明 `/data` 落在了不支持的文件系统上（SMB / NFS / exFAT / NTFS / macOS 宿主机目录）。把它挪到 ext4 / btrfs / xfs 上即可。
 
-| 维度 | 官方镜像 `btpanel/baota` | 本方案 |
-|------|------------------------|--------|
-| 持久化目录 | 仅 `/www` | `/www` + `/persist`（系统态双向同步） |
-| 持久化实现 | 单目录挂载 | 双向同步（开机恢复 `/persist` → 系统，停机写回系统 → `/persist`） |
-| 重建后面板 / 环境 | 可能丢失（系统配置在 `/www` 外） | 重启 / 重建 / 升级均不丢失 |
-| 环境变量配置 | 不支持 | `BT_USERNAME` / `BT_PASSWORD` / `BT_PANEL_PORT` / `BT_ENTRY_PATH` 声明式配置 |
-| 多架构 | amd64 / arm64 | amd64 / arm64 |
+### 想彻底重来
+
+删掉 `data/` 目录再启动，等于全新安装（凭据会重新生成）。
+
+---
+
+## 构建与发布
+
+### 本地构建
+
+```bash
+cd stable
+docker build -t baota:dev .
+```
+
+### 架构支持
+
+**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前健康检查（17 项，含容器重建后的持久化验证）。拉取时 Docker 会自动选择匹配的架构，无需指定。
+
+| 架构 | Python 运行环境 | 说明 |
+|---|---|---|
+| amd64 | 官方预编译包 | 构建快 |
+| arm64 | 源码编译 3.7.16 | 官方无 aarch64 预编译包（实测 404），构建较慢但功能一致 |
+
+因为两个架构都已发布，compose 里的 `platform: linux/amd64` 在 ARM 机型上**应该注释掉**，否则会跑在 QEMU 模拟下、性能损耗明显。
+
+### 镜像纯净度
+
+生产镜像不含任何构建期或测试期产物。以下清理项都经过实测确认：
+
+| 清理项 | 说明 |
+|---|---|
+| `/var/lib/apt/lists/*` | 19M。官方脚本自己跑过 `apt-get update` 重新生成 |
+| `/www/server/panel/logs/*.pid` | 构建期启动面板留下的 PID，运行期读到是隐患 |
+| `/www/server/panel/logs/*.log` | 构建期的面板日志 |
+| `/var/log/*.log` | apt / dpkg 构建记录 |
+| `/root/.wget-hsts` | 下载安装脚本留下的 HSTS 缓存 |
+| `/tmp`、`/var/tmp` | 构建期临时文件 |
+
+CI 专用的 `scripts/health-check.sh` 通过 `.dockerignore` 排除，不会进入镜像。
+
+有两类文件**故意保留**，它们不是垃圾：
+
+- `/www/reserve_space.pl`（11M）—— 宝塔的磁盘保留空间占位文件，属于功能设计
+- `__pycache__` / `.pyc`（约 17M）—— 删掉后会在用户的 `data/` 里重新生成，反而占用持久化空间且拖慢首启
+
+> 一个容易踩的坑：Docker 分层的特性是，**在后续 RUN 里删除前面层产生的文件，镜像体积不会减小**（旧层仍在，只是被 whiteout 遮住）。所以清理必须写在产生垃圾的那一层内。本项目实测清理效果：1644.7 MB → 1622.8 MB。
+
+### 自动发布
+
+推送到 `main` 且 `stable/VERSION` 变更时，`.github/workflows/build-docker.yml` 会自动执行**并行多架构构建**：
+
+```
+        ┌─ amd64（ubuntu-latest）───── 构建 → 健康检查 → 按 digest 推送 ─┐
+读版本 ─┤                                                                ├─ 合并 manifest → :版本
+        └─ arm64（ubuntu-24.04-arm）── 构建 → 健康检查 → 按 digest 推送 ─┘
+
+        DockerHub 上只会有一个标签 :版本，不会留下 -amd64 / -arm64 之类的中间产物
+```
+
+两个架构各自跑在**原生** runner 上、同时进行，总耗时约等于较慢的那一个，而不是两者相加。用原生 runner 而非 QEMU 是必须的：arm64 要源码编译 Python，模拟下慢到不实用。
+
+任一架构的健康检查失败，该 job 就终止；`manifest` 合并依赖两个 job 都成功，所以坏镜像不会出现在多架构标签里。
+
+> ⚠️ `ubuntu-24.04-arm` 目前**只对公开仓库免费**，私有仓库使用该标签会直接失败。如果本仓库要转为私有，请删掉构建矩阵里的 arm64 那一项。
+
+健康检查失败会终止整个 job，登录与推送步骤根本不会执行，坏镜像不可能进入 DockerHub。
+
+需要的仓库 Secrets：
+
+| Secret | 说明 |
+|---|---|
+| `DOCKERHUB_USERNAME` | DockerHub 用户名 |
+| `DOCKERHUB_TOKEN` | DockerHub Access Token（不要用登录密码） |
+
+健康检查覆盖：systemd 就绪、overlay 持久化可写、宝塔关键路径、面板与任务双进程、带安全入口的登录页、版本号、首启随机凭据、写入落盘、开机自启、禁用更新补丁、防火墙默认关闭、SSH 与 bt 命令，以及**销毁容器后用同一数据卷重建、校验数据不丢且不会二次初始化**。

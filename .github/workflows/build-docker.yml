@@ -1,0 +1,234 @@
+name: Build and Push to DockerHub
+
+# ==============================================================================
+#  发布策略
+#    镜像版本由 stable/VERSION 决定（文件内容即宝塔版本号）。
+#    该文件变更时自动发布；需要按同一版本重新发布时，在页面手动触发。
+#
+#  并行多架构
+#    amd64 和 arm64 两个 job 各自跑在「原生」runner 上，同时进行，
+#    总耗时约等于较慢的那一个，而不是两者相加。
+#
+#    为什么必须用原生 runner：
+#      官方没有提供 aarch64 的预编译 Python 环境（实测 404），arm64 会走
+#      源码编译 Python 3.7。这个过程在 QEMU 模拟下极慢，用原生 arm 机器
+#      才有实用价值。
+#
+#  只发布一个标签
+#    每个架构推送时都「按 digest 推送」，不产生任何标签；最后由 manifest
+#    合并成唯一的 repo:版本。DockerHub 上只会有 12.0.0 这一个标签，
+#    不会留下 12.0.0-amd64 / 12.0.0-arm64 之类的中间产物。
+#
+#    为此每个架构要构建两次，原因见 build job 里的注释。
+#
+#    实现上有两个坑，都已实测确认，改动时别踩回去：
+#      a) build-push-action v7 没有 push-by-digest 这个输入，必须写成
+#         outputs: type=image,name=...,push=true,push-by-digest=true
+#         （outputs 是原样传给 buildx 的，不会与 tags 合并）
+#      b) push-by-digest 不被 docker driver 支持，必须依赖 setup-buildx-action
+#         默认创建的 docker-container driver builder
+#
+#  安全底线
+#    每个架构都是：本地构建 → 跑完整健康检查 → 才推送。
+#    健康检查失败会终止该 job，manifest 合并依赖两个 job 都成功，
+#    因此任一架构有问题，repo:版本 这个标签就不会生成。
+#
+#  ⚠ arm64 runner 的限制
+#    ubuntu-24.04-arm 目前只对「公开仓库」免费；私有仓库使用该标签会直接失败。
+#    如果本仓库要转为私有，请把 build 矩阵里的 arm64 那一项删掉。
+#
+#  需要的仓库 Secrets
+#    DOCKERHUB_USERNAME  DockerHub 用户名
+#    DOCKERHUB_TOKEN     DockerHub Access Token（不要用登录密码）
+# ==============================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'stable/VERSION'
+  workflow_dispatch:
+
+env:
+  # 必须与 stable/docker-compose.yml 里的 image 保持一致
+  IMAGE_NAME: baota
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 读版本号。两个构建 job 都要用，抽出来只读一次，避免不一致。
+  # ---------------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.read.outputs.value }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 读取宝塔版本号
+        id: read
+        run: |
+          VER=$(tr -d '[:space:]' < stable/VERSION)
+          if [ -z "$VER" ]; then
+            echo "::error::stable/VERSION 为空"
+            exit 1
+          fi
+          if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::版本号应为 x.y.z 格式，当前为 ${VER}"
+            exit 1
+          fi
+          echo "value=${VER}" >> "$GITHUB_OUTPUT"
+          echo "宝塔版本：${VER}"
+
+  # ---------------------------------------------------------------------------
+  # 并行构建：两个架构同时在各自的原生 runner 上跑
+  # ---------------------------------------------------------------------------
+  build:
+    needs: version
+    strategy:
+      # 不要 fail-fast：让两个架构都跑完，一次就能看到各自的问题
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            # 原生 ARM runner，避免 QEMU 模拟下编译 Python 的漫长等待
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 确认 runner 架构与目标一致
+        run: |
+          echo "runner 架构：$(uname -m)"
+          echo "目标架构：${{ matrix.arch }}"
+          case "${{ matrix.arch }}-$(uname -m)" in
+            amd64-x86_64|arm64-aarch64) echo "原生构建，无需模拟" ;;
+            *) echo "::error::runner 架构与目标不匹配，会退化为 QEMU 模拟"; exit 1 ;;
+          esac
+
+      - name: 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # ---- 第一次构建：只加载到本机，供健康检查使用 ----
+      # 它同时把构建缓存写进 GitHub Actions 缓存，供第二次构建复用。
+      - name: 构建镜像（仅加载到本地，不推送）
+        uses: docker/build-push-action@v7
+        with:
+          context: ./stable
+          file: ./stable/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          # v6 起默认生成 provenance 证明，部分旧客户端拉取时会显示
+          # unknown/unknown 平台。关掉以保证最大兼容性。
+          provenance: false
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.version.outputs.value }}
+          tags: baota:candidate
+          # 按架构分开缓存，避免两个 job 互相覆盖
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: 发布前健康检查（未通过则不推送）
+        run: bash stable/scripts/health-check.sh "baota:candidate" "${{ needs.version.outputs.value }}"
+
+      - name: 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---- 第二次构建：按 digest 推送，不产生任何标签 ----
+      #
+      # 为什么要构建两次（这是个取舍，不是技术限制）：
+      #   buildx 支持一次调用里同时输出多种类型，实测下面这样是可行的：
+      #     --output type=image,push=true,push-by-digest=true
+      #     --output type=docker,dest=/tmp/img.tar
+      #   但那样「推送」会发生在「健康检查」之前 —— 镜像万一有问题，
+      #   它已经进 DockerHub 了（虽然没标签、拉不到，但确实在那儿）。
+      #
+      #   所以这里选择先构建并 load 到本机、健康检查通过后再推送，宁可多跑一次。
+      #   第二次构建会命中上一次刚写入的 gha 缓存，几乎不会重新编译任何东西，
+      #   代价很小；换来的是「坏镜像根本不会被推送」这个强保证。
+      #
+      #   如果你更在意构建时间、能接受坏镜像以无标签形式留在仓库里，
+      #   可以把两次合并成上面那种单次多输出，并去掉健康检查后的推送步骤。
+      - name: 按 digest 推送（不产生标签）
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./stable
+          file: ./stable/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 只推 manifest，不打任何标签；标签统一在 manifest job 里创建。
+          #
+          # 两个已实测确认的注意点：
+          #  1) name 必须写在 outputs 里。本 action 的 outputs 是原样传给
+          #     buildx 的，不会与 tags 合并；v7 也没有 push-by-digest 这个输入。
+          #  2) push-by-digest 不被 docker driver 支持，必须依赖
+          #     setup-buildx-action 默认创建的 docker-container driver builder。
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},push=true,push-by-digest=true
+          provenance: false
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.version.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+      # 矩阵 job 的 outputs 会被各实例互相覆盖，所以改用产物文件传递 digest
+      - name: 保存 digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.push.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "${{ matrix.arch }} digest: ${{ steps.push.outputs.digest }}"
+
+      - name: 上传 digest 产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 合并成唯一的多架构标签 repo:版本
+  # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步。
+  # ---------------------------------------------------------------------------
+  manifest:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载各架构的 digest
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 合并为唯一标签
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          VER="${{ needs.version.outputs.value }}"
+
+          AMD64=$(tr -d '[:space:]' < /tmp/digests/amd64)
+          ARM64=$(tr -d '[:space:]' < /tmp/digests/arm64)
+          echo "amd64: ${AMD64}"
+          echo "arm64: ${ARM64}"
+          [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少某个架构的 digest"; exit 1; }
+
+          docker buildx imagetools create -t "${REPO}:${VER}" \
+            "${REPO}@${AMD64}" \
+            "${REPO}@${ARM64}"
+
+          echo "已发布 ${REPO}:${VER}"
+          docker buildx imagetools inspect "${REPO}:${VER}"
+          echo "本工作流不推送 latest 标签，compose 里请使用精确版本标签"

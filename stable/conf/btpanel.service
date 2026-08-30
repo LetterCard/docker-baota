@@ -1,0 +1,32 @@
+# 宝塔面板服务。
+#
+# 为什么自建 unit，而不用 systemd-sysv-generator 自动生成的 bt.service：
+#   bt7.init 自带完整 LSB 头，generator 本可自动生成 unit；
+#   但自建可以把启动参数显式固化下来，不依赖 generator 的运行时行为。
+#   Dockerfile 中另会清掉 rc?.d 链接，避免两套机制重复拉起面板。
+#
+# Type=forking + RemainAfterExit：bt7.init 会 fork 出后台进程后退出，
+#   两者组合可确保 systemd 不会误判服务已停止而杀掉面板进程。
+#
+# 绝不能配 PIDFile：bt7.init 只 rm 不写 panel.pid，配了必然等待超时后失败。
+
+[Unit]
+Description=BT Panel (Baota Linux Panel)
+Documentation=https://www.bt.cn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+RemainAfterExit=yes
+GuessMainPID=no
+KillMode=process
+WorkingDirectory=/www/server/panel
+ExecStart=/etc/init.d/bt start
+ExecStop=/etc/init.d/bt stop
+ExecReload=/etc/init.d/bt restart
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

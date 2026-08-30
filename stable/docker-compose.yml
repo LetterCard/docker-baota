@@ -1,129 +1,161 @@
-# ============================================================
-# 宝塔面板 12.0.0 (Debian 12) Docker Compose 示例
+# ==============================================================================
+#  宝塔 Linux 面板 12.x —— 容器编排（已按飞牛 NAS / fnOS 适配）
 #
-# 使用方式：
-#   1. 复制 .env.example 为 .env 并按需修改
-#      cp .env.example .env
-#   2. 启动
-#      docker compose up -d
-#   3. 访问 http://<服务器IP>:${BT_PANEL_PORT}/${BT_ENTRY_PATH}
+#  【飞牛 NAS 部署步骤】
+#    1. 打开「Docker」→「项目」→「新建项目」
+#    2. 项目名填 baota，把本文件内容粘贴进「compose 配置」
+#    3. 把下面的 image 改成自己 DockerHub 上的镜像名
+#    4. 点「立即构建」，等镜像拉取完成并启动
+#    5. 看日志拿首次登录信息：「容器」→ baota →「日志」
+#       （或命令行 docker compose logs -f baota）
 #
-# 多目录持久化（容器销毁/重建/迁移均不丢失）：
-#   baota_data    -> /www        面板/站点/数据库/证书/日志（业务数据，卷始终持有）
-#   baota_persist -> /persist    /etc、/usr/local、/var/spool/cron 系统态
-#                                 运行期由 entrypoint 双向同步：开机恢复、停机写回，
-#                                 （含面板计划任务 cron 调度、自装软件）删建/重建/升级均保留
-# 备份只需备份这两个卷，或整个目录。
-# ============================================================
+#    所有数据会存到本文件同级的 data 目录里。飞牛新建的项目就落在存储池上，
+#    直接用默认的 ./data 即可；要放到别的盘，把它改成绝对路径（如 /vol2/baota/data）。
+#
+#  【为什么端口是这样映射的】
+#    fnOS 自身占用：5666 / 5667（Web 管理），且「设置 → 安全性」里
+#    默认开启了「重定向 80 与 443 端口」，也就是宿主机的 80、443 已被占用；
+#    另外 22 通常被宿主机 sshd 占用。
+#    所以这里把 80/443/22 分别挪到 8080/8443/2222，开箱即可 up 成功。
+#    如果确实需要宿主机的 80/443（例如给站点签 Let's Encrypt 证书），
+#    先到 fnOS「设置 → 安全性」关闭「重定向 80 与 443 端口」，
+#    再把下面的映射改回 "80:80" 与 "443:443"。
+#
+#  【非飞牛环境】
+#    普通 x86_64 Linux 服务器可直接使用本文件；
+#    需要本地构建镜像时：cd stable && docker build -t baota:dev .
+# ==============================================================================
+name: baota
+
 services:
   baota:
-    # 稳定版 tag 由 CI 按官方解析的精确版本发布（如 12.0.0 / 12.0.2，不带 latest）；
-    # 下方 12.0.0 为默认占位，官方稳定版升版后请改为实际的已发布 tag。
-    image: ${IMAGE:-bugseeker/baota:12.0.0}
-    # 说明：本 compose 与 release/ 的 compose 共用全局卷名(baota_data/baota_persist)与容器名，
-    #       因此【同一台宿主机只部署一套】；切勿同机同时拉起 stable 与 release（两者数据会互相接管）。
-    #       如需同机多开，请自行改 container_name 与底部 volumes 的 name 使其唯一。
+    image: bugseeker/baota:12.0.0
     container_name: baota
-    restart: always
+    hostname: baota
+    restart: unless-stopped
 
-    # 优雅停机：给 bt / mysqld / nginx 足够时间落盘再被停，避免停止瞬间数据库脏写
-    stop_grace_period: 60s
+    # 镜像同时发布了 amd64 与 arm64，Docker 会自动挑匹配的架构。
+    #
+    # 保留本行是给 x86 机型的一道保险（明确锁定，避免拉错）。
+    # ★ ARM 机型（含 ARM 版飞牛）请把本行注释掉 ——
+    #   否则会跑在 QEMU 模拟下，性能损耗明显。
+    platform: linux/amd64
 
-    # 宝塔面板需要管理容器内系统服务/防火墙，一般需要特权模式；
-    # 若仅使用 Web 环境（nginx/mysql/php）且不接受提权，可设为 false
-    privileged: ${PRIVILEGED:-true}
+    # ---- 运行 systemd + overlay 持久化的必要条件 ----
+    # privileged：容器内要 mount overlay、要跑 systemd、宝塔还要管服务和 iptables。
+    #   等同于把宿主机内核交给容器，请只在自己信任的内网环境使用。
+    # 注意这里故意不写 cgroup: host ——
+    #   飞牛（Debian 12 内核）是 cgroup v2，Docker 默认给私有 cgroup 命名空间，
+    #   systemd 在这种模式下工作正常且不会去动宿主机的 cgroup 树；
+    #   而在老的 cgroup v1 宿主机上 Docker 又会自动退回 host 模式。
+    #   保持默认，两种环境都对。
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
 
-    # 内存限制（可选）：防止面板/业务异常占用过多内存导致宿主机 OOM
-    # mem_limit: 2G
+    # /run、/run/lock 必须是 tmpfs：systemd 的运行态不能落盘，
+    # 否则重建后会读到过期的 pid / socket 导致服务起不来。
+    # /tmp 故意不放 tmpfs：面板上传大文件、解压备份都在 /tmp，
+    # 走内存容易把 NAS 撑爆；留在容器可写层，落盘且随容器销毁。
+    tmpfs:
+      - /run
+      - /run/lock
 
-    # bridge 网络模式（Docker 默认即 bridge，此处显式声明以明确隔离语义）：
-    # 容器内固定使用宝塔标准端口（80/443/3306/22 等），与宿主机通过下方 ports 映射隔离；
-    # 与 host 网络不同，bridge 下若宿主机端口被占用，直接改下方左侧端口即可规避。
+    # systemd 收到 SIGRTMIN+3 才会走正常关机流程（依次停掉 nginx/mysql/面板）。
+    # 默认的 SIGTERM 对 PID 1 的 systemd 是「重新执行自己」，会导致直接超时被杀。
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 90s
+
+    # /dev/shm 默认仅 64M，MySQL / Redis 运行时会踩坑
+    shm_size: 512m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      nproc: 65535
+
+    # ---- 首次启动的初始凭据 ----
+    #
+    # 镜像里不含任何固定口令：root 是锁定状态，面板口令只是构建期的随机占位，
+    # 谁都猜不到、也没意义。真正的凭据在容器首次启动时才确定。
+    #
+    # 下面这四项，不写、或写了留空，行为如下：
+    #
+    #   变量              | 不写 / 留空的效果        | 登录后在哪能看到
+    #   ------------------|------------------------|--------------------------------
+    #   PANEL_USER        | 固定为 baota（不会随机）  | 面板登录页用户名
+    #   PANEL_PASSWORD    | 随机生成 12 位           | 首次启动日志（只打印这一次）
+    #   PANEL_SAFE_PATH   | 随机生成 8 位            | 面板地址里 /login 前面那一段
+    #   ROOT_PASSWORD     | 随机生成 12 位           | 首次启动日志（只打印这一次）
+    #
+    # 也就是说：全部保持注释 = 全随机，这是最省事也最安全的用法，
+    # 启动后执行一次 docker compose logs 就能拿到，见文件开头的第 5 步。
+    #
+    # 想自己指定就取消注释填写。注意这个文件是要提交到 Git 的，
+    # 口令写在这里等于公开；若既要固定又要保密，改用同目录的 .env 文件。
+    #
+    # ★ 重要：这四项只在「首次启动」生效，即 data/ 目录为空的那一次。
+    #   之后再改这里不会有任何效果 —— 那时请用：
+    #     改面板口令：docker exec -it baota bt 5
+    #     改 root 口令：docker exec baota passwd root
+    #   这是故意的：否则重启一次容器就会把你在面板里设的东西覆盖掉。
+    environment:
+      TZ: Asia/Shanghai
+      # PANEL_USER: baota           # 不写/留空 → 默认 baota
+      # PANEL_PASSWORD: ""          # 不写/留空 → 随机 12 位，见首次启动日志
+      # PANEL_SAFE_PATH: ""         # 不写/留空 → 随机 8 位，见面板地址
+      # ROOT_PASSWORD: ""           # 不写/留空 → 随机 12 位，见首次启动日志
+
+    # ---- 持久化：一个 data 目录保住 8 个核心目录 ----
+    # 就放在本文件旁边，可以直接用飞牛「文件管理」翻看和备份：
+    #   data/www/upper    站点、数据库、备份、证书、面板本体
+    #   data/etc/upper    系统与服务配置
+    #   data/usr/upper    apt / 源码装的软件
+    #   data/<目录>/work  overlay 工作目录，可以删，启动时自动重建
+    # 备份只需要各个 upper；work 是临时的。
+    #
+    # 唯一要求：data 必须落在 ext4 / btrfs / xfs 上（飞牛的存储池就是，直接可用）。
+    # 放到 SMB / NFS 网络共享或 exFAT / NTFS 移动盘上，overlay 会「挂载成功但只读」，
+    # 之后所有写入静默失败。容器启动时会实测一次并明确告警，看到告警就立刻换位置。
+    volumes:
+      - ./data:/data
+
+    # 用 Docker 自带的默认 bridge 网络，不额外创建项目专属网络：
+    # 单容器部署没有容器间用名字互访的需求，少一层网络更干净。
+    # 端口映射照常生效，容器会拿到 docker0 上的内网 IP。
     network_mode: bridge
 
     ports:
-      # 面板端口（容器内与宿主机两端同步，由 BT_PANEL_PORT 驱动，改 .env 重启即生效）
-      - "${BT_PANEL_PORT:-8888}:${BT_PANEL_PORT:-8888}"
-      # 站点 Web / HTTPS：容器内固定 80/443（宝塔站点配置/证书签发依赖标准端口），
-      # 宿主机侧被占用时，直接修改本行左侧端口（如 "8080:80"）即可规避
-      - "80:80"
-      - "443:443"
-      # 数据库 / 容器内 SSH / FTP（默认关闭，按需取消注释；同样直接改左侧端口规避占用）
-      # - "3306:3306"
-      # - "22:22"
-      # - "21:21"
-      # - "20:20"
+      - "8888:8888"     # 面板
+      - "888:888"       # phpMyAdmin
+      - "8080:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
+      - "8443:443"      # 站点 HTTPS（宿主机 443 被 fnOS 占用）
+      - "2222:22"       # SSH（root 口令见首启日志，非必要建议注释掉本行）
+      - "3306:3306"     # MySQL
+      # FTP 主动 + 被动端口。被动端口范围大，非必要不开。
+      # - "20-21:20-21"
+      # - "39000-40000:39000-40000"
 
-    environment:
-      # 面板端口（容器内生效，与上方端口映射保持一致）
-      BT_PANEL_PORT: "${BT_PANEL_PORT:-8888}"
-      # 面板安全入口：http://IP:端口/入口
-      BT_ENTRY_PATH: "${BT_ENTRY_PATH:-dockerbt}"
-      # 面板登录账号 / 密码
-      # BT_PASSWORD 留空（默认）时，entrypoint 会在首次启动生成随机强密码并打印到容器日志
-      # （docker logs baota 可查看），避免使用公开默认弱密码——如同真实服务器安装宝塔；
-      # 如需固定密码，请务必在 .env 中设置强密码
-      BT_USERNAME: "${BT_USERNAME:-admin}"
-      BT_PASSWORD: "${BT_PASSWORD:-}"
-      # 是否每次启动都应用上面的环境变量到面板
-      # auto（默认）：仅首次创建（空数据卷）时应用，之后保留面板内修改；
-      # true：每次强制覆盖面板内修改；false：永不应用，完全使用面板内配置
-      BT_APPLY_ENV: "${BT_APPLY_ENV:-auto}"
-      # 可选：容器内 SSH
-      SSH_ENABLE: "${SSH_ENABLE:-false}"
-      SSH_PASSWORD: "${SSH_PASSWORD:-}"
-      # 当 SSH_ENABLE=true 且 SSH_PASSWORD 为空时：true 允许 root 无密码登录（仅可信环境）
-      SSH_ALLOW_EMPTY: "${SSH_ALLOW_EMPTY:-false}"
-      # 时区
-      TZ: "${TZ:-Asia/Shanghai}"
-      # 容器主机名 / Postfix 邮件域名（可选，留空则用默认）
-      CONTAINER_HOSTNAME: "${CONTAINER_HOSTNAME:-}"
-      # 系统态周期性写回间隔（秒）：容器被 kill -9 / 宿主机断电时的数据丢失窗口，默认 600（可调小）
-      PERSIST_SYNC_INTERVAL: "${PERSIST_SYNC_INTERVAL:-600}"
-
-    volumes:
-      # 核心：业务数据（面板配置、站点、数据库、证书、日志）
-      - baota_data:/www
-      # 系统态双向同步（/etc、/usr/local、/var/spool/cron）——开机恢复/停机写回
-      - baota_persist:/persist
-      # 如需在宿主机直接看到/备份业务数据，改用 bind mount：
-      # - ./www:/www
-      #
-      # ⚠️ 数据安全（重要）：
-      #   - 纯 `docker compose down` / `docker compose up --force-recreate` 会保留数据卷，**数据不丢**；
-      #   - 但 `docker compose down -v` 或 `docker volume rm baota_data baota_persist` 会【永久删除数据】；
-      #   - 建议定期备份两个卷，例如：
-      #       docker run --rm -v baota_data:/src -v "$(pwd)"/backup:/dst alpine tar czf /dst/baota_data.tar.gz -C /src .
-      #       docker run --rm -v baota_persist:/src -v "$(pwd)"/backup:/dst alpine tar czf /dst/baota_persist.tar.gz -C /src .
-      #   （恢复时把上面 czf 改成 -xzf，并把 /src /dst 对调即可）
-
-      # ---------- 管理宿主机 Docker（宝塔 Docker 管理器，可选，默认关闭） ----------
-      # 用途：把宿主机的 Docker 套接字挂进容器，让宝塔面板的「Docker 管理器」能管理宿主机容器。
-      # ⚠️ 风险提示：容器将获得宿主机 Docker 的完全控制权（等同 root），仅在可信环境启用。
-      # ⚠️ 与飞牛 fnOS 等自带容器管理 UI 的系统共存时，两套管理器操作同一 daemon 易冲突，一般无需开启。
-      #
-      # 路径说明：
-      #   - socket：标准路径为 /run/docker.sock（飞牛 fnOS 实测亦为此路径，/var/run 为其软链）。
-      #   - docker 二进制：飞牛/各发行版路径不固定（/usr/bin 或 /usr/local/bin），故【不挂载二进制】，
-      #     改为在镜像内置 docker CLI（见 Dockerfile/entrypoint），仅靠 socket 连通宿主机 daemon，跨平台通用。
-      #
-      # 启用方式：在 .env 中设置 DOCKER_HOST_SOCK=/run/docker.sock 即启用；
-      # 未设置/留空时，本行兜底把宿主 /dev/null 挂到容器 /var/run/docker.sock，
-      # 使容器内 docker CLI 无法连到任何 daemon（效果等同关闭，但并非"不挂载"）。
-      - "${DOCKER_HOST_SOCK:-/dev/null}:/var/run/docker.sock"
-
-    # 健康检查：面板主进程存活
-    # 注意：必须用 CMD-SHELL（走 shell），否则 exec 形式下 `||` 会被当成 pgrep 参数，
-    #       且模式 "pgrep" 会匹配到 pgrep 自身，面板挂了也会误报 healthy。
+    # 面板端口可能被用户在面板里改掉，所以从 port.pl 现读；
+    # 面板开了 HTTPS 也能探到，故 http 失败再试 https。
+    # 注意：探活命令里绝不能出现面板进程名，否则会被 bt 脚本的 ps|grep 误判成
+    # 「面板已在运行」而跳过启动。
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f BT-Panel >/dev/null 2>&1 || pgrep -f panel/main.py >/dev/null 2>&1"]
-      interval: 60s
+      test:
+        - CMD-SHELL
+        - >-
+          p=$$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888);
+          curl -skf -o /dev/null "http://127.0.0.1:$$p/"
+          || curl -skf -o /dev/null "https://127.0.0.1:$$p/"
+      interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 180s
 
-volumes:
-  baota_data:
-    name: baota_data
-  baota_persist:
-    name: baota_persist
+    # 面板日志量不小，限制 Docker 侧日志体积，避免长期运行把存储写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
