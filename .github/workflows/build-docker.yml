@@ -4,6 +4,14 @@ name: Build and Push to DockerHub
 #  发布策略
 #    镜像版本由 stable/VERSION 决定（文件内容即宝塔版本号）。
 #    该文件变更时自动发布；需要按同一版本重新发布时，在页面手动触发。
+#    手动触发时会先探测安装脚本实际会装的版本并校准 stable/VERSION
+#    （必要时回写仓库，见 version job），不会因为版本号过期而构建失败。
+#
+#  触发方式
+#    push             main 上 stable/VERSION 变更 → 完整构建 + 健康检查 + 推送
+#    pull_request     升级 PR（check-upstream.yml 创建）→ 只构建 + 健康检查，
+#                     不推送；合并前就能看到新版本能否正常构建
+#    workflow_dispatch  手动触发 → 先校准 stable/VERSION，再完整构建 + 推送
 #
 #  并行多架构
 #    amd64 和 arm64 两个 job 各自跑在「原生」runner 上，同时进行，
@@ -47,25 +55,46 @@ on:
     branches: [main]
     paths:
       - 'stable/VERSION'
+  # 升级 PR（check-upstream.yml 创建）也要跑构建 + 健康检查，
+  # 但只验证、不推送（相关步骤都有 if 条件排除 pull_request 事件）。
+  pull_request:
+    branches: [main]
+    paths:
+      - 'stable/VERSION'
   workflow_dispatch:
+    inputs:
+      install_url:
+        description: '上游安装脚本地址（手动运行时用于校准 stable/VERSION；默认与 Dockerfile 一致）'
+        required: false
+        default: 'https://download.bt.cn/install/installStable_12.sh'
+        type: string
 
 env:
   # 必须与 stable/docker-compose.yml 里的 image 保持一致
   IMAGE_NAME: baota
+  # 安装脚本地址，必须与 stable/Dockerfile 的 INSTALL_URL 默认值保持一致。
+  # 手动运行时可通过 install_url 输入覆盖，探测版本与构建都用它，保证一致。
+  INSTALL_URL: ${{ inputs.install_url || 'https://download.bt.cn/install/installStable_12.sh' }}
 
 jobs:
   # ---------------------------------------------------------------------------
   # 读版本号。两个构建 job 都要用，抽出来只读一次，避免不一致。
+  # 手动触发（workflow_dispatch）时还会先探测安装脚本实际会装的版本，
+  # 与 stable/VERSION 不一致就就地校准并回写仓库，避免「脚本已升版、
+  # VERSION 未同步」导致健康检查 A6 失败、发布卡死。
   # ---------------------------------------------------------------------------
   version:
     runs-on: ubuntu-latest
+    # 校准后要把 stable/VERSION 回写仓库，需要写权限
+    permissions:
+      contents: write
     outputs:
       value: ${{ steps.read.outputs.value }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v7
 
-      - name: 读取宝塔版本号
+      - name: 读取并校准宝塔版本号
         id: read
         run: |
           VER=$(tr -d '[:space:]' < stable/VERSION)
@@ -77,8 +106,51 @@ jobs:
             echo "::error::版本号应为 x.y.z 格式，当前为 ${VER}"
             exit 1
           fi
+
+          # ---- 手动运行时校准：以安装脚本横幅里的版本号为准 ----
+          # 与 check-upstream.yml 的提取方式保持一致（只认安装横幅，
+          # 例如「您正在安装宝塔面板 12.0.0 稳定版」）。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TMP=$(mktemp)
+            if curl -fsSL --connect-timeout 10 --max-time 60 "$INSTALL_URL" -o "$TMP" 2>/dev/null; then
+              BANNER=$(grep -m1 '您正在安装宝塔面板' "$TMP" || true)
+              ACTUAL=$(echo "$BANNER" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+              rm -f "$TMP"
+              if [ -n "$ACTUAL" ] && printf '%s' "$ACTUAL" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                if [ "$ACTUAL" != "$VER" ]; then
+                  echo "::warning::stable/VERSION(${VER}) 与安装脚本实际版本(${ACTUAL}) 不一致，已校准"
+                  printf '%s\n' "$ACTUAL" > stable/VERSION
+                  VER=$ACTUAL
+                fi
+              else
+                echo "::warning::无法从安装脚本横幅解析版本号，按 stable/VERSION(${VER}) 继续"
+              fi
+            else
+              echo "::warning::无法下载安装脚本（${INSTALL_URL}），按 stable/VERSION(${VER}) 继续"
+            fi
+          fi
+
           echo "value=${VER}" >> "$GITHUB_OUTPUT"
           echo "宝塔版本：${VER}"
+
+      - name: 校准结果回写仓库（仅手动运行且版本有变化时）
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git diff --quiet stable/VERSION; then
+            echo "stable/VERSION 已与安装脚本一致，无需回写"
+            exit 0
+          fi
+          NEW=$(tr -d '[:space:]' < stable/VERSION)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stable/VERSION
+          # [skip ci]：回写只是同步版本号，避免再次触发 push 工作流造成重复构建
+          git commit -m "chore: sync stable/VERSION to ${NEW} [skip ci]"
+          if git push; then
+            echo "已回写 stable/VERSION = ${NEW}"
+          else
+            echo "::warning::回写 stable/VERSION 失败（分支可能受保护），本次构建不受影响，请稍后手动提交"
+          fi
 
   # ---------------------------------------------------------------------------
   # 并行构建：两个架构同时在各自的原生 runner 上跑
@@ -129,6 +201,7 @@ jobs:
           build-args: |
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
             IMAGE_VERSION=${{ needs.version.outputs.value }}
+            INSTALL_URL=${{ env.INSTALL_URL }}
           tags: baota:candidate
           # 按架构分开缓存，避免两个 job 互相覆盖
           cache-from: type=gha,scope=${{ matrix.arch }}
@@ -138,6 +211,8 @@ jobs:
         run: bash stable/scripts/health-check.sh "baota:candidate" "${{ needs.version.outputs.value }}"
 
       - name: 登录 DockerHub
+        # PR 只验证不推送，无需登录
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -159,6 +234,8 @@ jobs:
       #   如果你更在意构建时间、能接受坏镜像以无标签形式留在仓库里，
       #   可以把两次合并成上面那种单次多输出，并去掉健康检查后的推送步骤。
       - name: 按 digest 推送（不产生标签）
+        # PR 只验证不推送（且 fork 的 PR 拿不到 DockerHub secrets）
+        if: github.event_name != 'pull_request'
         id: push
         uses: docker/build-push-action@v7
         with:
@@ -177,16 +254,19 @@ jobs:
           build-args: |
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
             IMAGE_VERSION=${{ needs.version.outputs.value }}
+            INSTALL_URL=${{ env.INSTALL_URL }}
           cache-from: type=gha,scope=${{ matrix.arch }}
 
       # 矩阵 job 的 outputs 会被各实例互相覆盖，所以改用产物文件传递 digest
       - name: 保存 digest
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           echo "${{ steps.push.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
           echo "${{ matrix.arch }} digest: ${{ steps.push.outputs.digest }}"
 
       - name: 上传 digest 产物
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.arch }}
@@ -196,8 +276,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # 合并成唯一的多架构标签 repo:版本
   # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步。
+  # PR 触发的运行只验证不发布，不进本 job。
   # ---------------------------------------------------------------------------
   manifest:
+    if: github.event_name != 'pull_request'
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:

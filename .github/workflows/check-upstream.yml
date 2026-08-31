@@ -116,7 +116,16 @@ jobs:
             echo "发现新版本：${CURRENT} → ${UPSTREAM}"
           fi
 
-      - name: 更新 VERSION 并创建 PR
+      # 先把新版本号写进 VERSION 文件。
+      # create-pull-request 只会提交「工作区里已有的改动」，
+      # 不先改文件的话它没有东西可提交，PR 根本不会创建。
+      - name: 更新 VERSION 文件
+        if: steps.compare.outputs.result == 'new-version'
+        run: |
+          printf '%s\n' "${{ steps.upstream.outputs.value }}" > "$VERSION_FILE"
+          echo "$VERSION_FILE：${{ steps.current.outputs.value }} -> ${{ steps.upstream.outputs.value }}"
+
+      - name: 创建升级 PR
         if: steps.compare.outputs.result == 'new-version'
         uses: peter-evans/create-pull-request@v7
         with:

@@ -350,7 +350,9 @@ CI 专用的 `scripts/health-check.sh` 通过 `.dockerignore` 排除，不会进
 
 ### 自动发布
 
-推送到 `main` 且 `stable/VERSION` 变更时，`.github/workflows/build-docker.yml` 会自动执行**并行多架构构建**：
+推送到 `main` 且 `stable/VERSION` 变更时，`.github/workflows/build-docker.yml` 会自动执行**并行多架构构建**。
+
+手动触发构建（页面 → Actions → **Build and Push to DockerHub** → Run workflow）时，工作流会先探测安装脚本实际会装的版本并校准 `stable/VERSION`（必要时回写仓库），因此即使忘了同步版本号，构建也不会因版本校验失败。升级 PR（`check-upstream.yml` 创建）里的构建只验证、不推送，合并前就能看到新版本能否正常构建。
 
 ```
         ┌─ amd64（ubuntu-latest）───── 构建 → 健康检查 → 按 digest 推送 ─┐
