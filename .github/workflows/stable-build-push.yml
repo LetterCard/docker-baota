@@ -14,8 +14,12 @@ name: 🚀 stable：构建并发布镜像
 #    已推送的版本，构建失败时文件不动，下次运行自动重试）
 #
 #  触发方式
-#    🖱️ 仅手动     页面触发，自动探测上游版本并发布；发布成功后回写
-#                  stable/VERSION。文件变更不触发任何工作流。
+#    🗓️ 每周一     UTC 02:00（北京时间周一 10:00）自动运行一次。先探测上游
+#                  横幅版本：没有新版本就空转结束，有新版本才走完整构建发布。
+#                  与 release 通道的每日 UTC 17:00 错开。
+#    🖱️ 手动       随时在页面触发，流程与定时一致，但无论版本是否变化都会
+#                  重新构建发布一次（需要「不改版本号也重建」时用这个）。
+#    发布成功后回写 stable/VERSION；文件变更不触发任何工作流。
 #
 #  并行多架构
 #    amd64 与 arm64 各自跑在「原生」runner 上，总耗时约等于较慢的那个。
@@ -38,6 +42,10 @@ name: 🚀 stable：构建并发布镜像
 # ==============================================================================
 
 on:
+  schedule:
+    # 每周一 UTC 02:00（北京时间周一 10:00）。
+    # 与 release 通道的每日 UTC 17:00（北京时间 1 点）错开，避免两个通道同时构建
+    - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
       install_url:
@@ -75,7 +83,7 @@ jobs:
       probe: ${{ steps.resolve.outputs.probe }}
     steps:
       - name: 📥 检出代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: 🔍 探测上游版本并与 VERSION 比对
         id: resolve
@@ -130,10 +138,21 @@ jobs:
         run: |
           CURRENT="${{ steps.resolve.outputs.current }}"
           VALUE="${{ steps.resolve.outputs.value }}"
-          case "${{ steps.resolve.outputs.probe }}:${{ steps.resolve.outputs.changed }}" in
+          PROBE="${{ steps.resolve.outputs.probe }}"
+          CHANGED="${{ steps.resolve.outputs.changed }}"
+
+          # 手动触发 = 用户明确要求发布（版本未变也重新构建）；
+          # 定时触发 = 仅在探测到新版本（changed=true）时才有后续构建任务
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MANUAL_NOTE="，手动触发将重新构建发布"
+          else
+            MANUAL_NOTE="，定时触发本次不构建"
+          fi
+
+          case "${PROBE}:${CHANGED}" in
             ok:true)  TEXT="🎉 发现上游新版本：${CURRENT} → ${VALUE}，将按新版本发布" ;;
-            ok:false) TEXT="✅ 已是最新（${VALUE}），按此版本发布" ;;
-            failed:*) TEXT="⚠️ 探测失败，按 stable/VERSION（${VALUE}）继续；若上游已更新，健康检查的版本校验会拦住" ;;
+            ok:false) TEXT="✅ 已是最新（${VALUE}）${MANUAL_NOTE}" ;;
+            failed:*) TEXT="⚠️ 探测失败，按 stable/VERSION（${VALUE}）继续${MANUAL_NOTE}" ;;
             *)        TEXT="❓ 未知状态" ;;
           esac
           {
@@ -149,6 +168,10 @@ jobs:
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
     needs: version
+    # 定时触发时只在探测到新版本才构建，否则每周都要空跑一整轮双架构构建
+    # （单次约 40 分钟，还要重复覆盖 DockerHub 上已有的同一个标签）。
+    # 手动触发则总是构建，方便在不改版本号的情况下重建镜像。
+    if: github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
     timeout-minutes: 180
     strategy:
       # 不要 fail-fast：让两个架构都跑完，一次就能看到各自的问题
@@ -163,7 +186,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: 📥 检出代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: 🖥️ 确认 runner 架构
         run: |
@@ -175,12 +198,12 @@ jobs:
           esac
 
       - name: 🔧 准备 Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.3.0
 
       # ---- 第一次构建：只加载到本地，供健康检查使用 ----
       # 它同时把构建缓存写进 GitHub Actions 缓存，供第二次构建复用
       - name: 🏗️ 构建镜像（仅加载到本地，不推送）
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: ./stable/Dockerfile
@@ -203,7 +226,7 @@ jobs:
         run: bash .github/scripts/health-check.sh "baota:candidate" "${{ needs.version.outputs.value }}"
 
       - name: 🔑 登录 DockerHub
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -220,7 +243,7 @@ jobs:
       #   换来的是「坏镜像根本不会被推送」这个强保证。
       - name: 📤 按 digest 推送（不产生标签）
         id: push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: ./stable/Dockerfile
@@ -242,7 +265,7 @@ jobs:
           echo "${{ matrix.arch }} digest: ${{ steps.push.outputs.digest }}"
 
       - name: 📦 上传 digest 产物
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: digest-${{ matrix.arch }}
           path: /tmp/digests/${{ matrix.arch }}
@@ -250,11 +273,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 合并成唯一的多架构标签 repo:版本
-  # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步
+  # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步。
+  # 跳过条件与 build 相同：定时触发且没有新版本时，这里同样不运行
   # ---------------------------------------------------------------------------
   publish:
     name: 🚀 合并多架构并发布（stable）
     needs: [version, build]
+    if: github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -262,14 +287,14 @@ jobs:
       tag: ${{ steps.manifest.outputs.tag }}
     steps:
       - name: 📥 下载各架构 digest
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.1
         with:
           pattern: digest-*
           path: /tmp/digests
           merge-multiple: true
 
       - name: 🔑 登录 DockerHub
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -327,7 +352,7 @@ jobs:
       contents: write
     steps:
       - name: 📥 检出代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: ✏️ 回写已发布的版本号
         run: |
