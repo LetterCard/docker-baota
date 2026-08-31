@@ -1,0 +1,96 @@
+# ==============================================================================
+#  📦 宝塔 Linux 面板容器化 —— release 通道（官方正式版最新）
+#
+#  与 stable/docker-compose.yml 只有一处不同：image 标签。
+#    release 通道发布 <版本> 与 latest 两个标签，latest 永远指向最新的正式版
+#    （由 release-build-push.yml 每天自动构建发布）。
+#    想锁定版本防意外升级，把 latest 改成具体版本号即可。
+#
+#  其余配置（持久化、端口、安全、探活、日志）与 stable 完全一致，
+#  逐项的原理说明与注意事项见 stable/docker-compose.yml 与 README。
+# ==============================================================================
+name: baota
+
+services:
+  baota:
+    image: bugseeker/baota:latest
+    container_name: baota
+    hostname: baota
+    restart: unless-stopped
+
+    # ★ ARM 机型（含 ARM 版飞牛）请把本行注释掉，否则会跑在 QEMU 模拟下
+    platform: linux/amd64
+
+    # ---- ⚙️ 运行 systemd + overlay 持久化的必要条件 ----
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+
+    # /run、/run/lock 必须是 tmpfs；/tmp 故意留在容器可写层
+    tmpfs:
+      - /run
+      - /run/lock
+
+    # systemd 收到 SIGRTMIN+3 才会走正常关机流程
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 90s
+
+    # /dev/shm 默认仅 64M，MySQL / Redis 运行时会踩坑
+    shm_size: 512m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      nproc: 65535
+
+    # ---- 🔑 首次启动的初始凭据（只在 data/ 为空时生效）----
+    #   四项不写或留空 = 全随机，启动后 docker compose logs 即可拿到：
+    #   PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
+    #   口令写在本文件等于公开，既要固定又要保密请改用同目录的 .env。
+    environment:
+      TZ: Asia/Shanghai
+      # PANEL_USER: baota
+      # PANEL_PASSWORD: ""
+      # PANEL_SAFE_PATH: ""
+      # ROOT_PASSWORD: ""
+
+    # ---- 💾 持久化：一个 data 目录保住 8 个核心目录 ----
+    #   ⚠️ data 必须在 ext4 / btrfs / xfs 上，否则会「挂载成功但只读」、
+    #      写入静默失败（容器启动时会实测一次并告警）。
+    volumes:
+      - ./data:/data
+
+    network_mode: bridge
+
+    ports:
+      - "8888:8888"     # 面板
+      - "888:888"       # phpMyAdmin
+      - "8080:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
+      - "8443:443"      # 站点 HTTPS（宿主机 443 被 fnOS 占用）
+      - "2222:22"       # SSH（root 口令见首启日志，非必要建议注释掉本行）
+      - "3306:3306"     # MySQL
+      # FTP 主动 + 被动端口。被动端口范围大，非必要不开。
+      # - "20-21:20-21"
+      # - "39000-40000:39000-40000"
+
+    # 从 port.pl 现读端口，http 失败再试 https。
+    # 注意：探活命令里绝不能出现面板进程名，否则会被 bt 脚本的 ps|grep
+    # 误判成「面板已在运行」而跳过启动。
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          p=$$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888);
+          curl -skf -o /dev/null "http://127.0.0.1:$$p/"
+          || curl -skf -o /dev/null "https://127.0.0.1:$$p/"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

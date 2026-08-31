@@ -1,0 +1,406 @@
+name: 📦 release：检查并发布正式版
+
+# ==============================================================================
+#  📦 release 通道：每日自动跟进宝塔「正式版」并发布镜像
+#
+#  与 stable 通道的区别：
+#    - 安装脚本用引导式的 install_panel.sh（自身不含版本号，装出的版本由
+#      官方服务端决定），而 stable 用带版本横幅的 installStable_12.sh
+#    - 版本一致性靠「两级比对 + 冒烟」验证，而不是脚本横幅提取
+#    - 发布 <版本> 与 latest 两个标签（stable 只发精确版本标签）
+#
+#  流程（每天自动跑一次，也可手动触发）：
+#    🔍 detect      get_version API 取最新版号，与 release/VERSION 比对；
+#                   一致 → 结束；不一致 → 进入下一步
+#    🧪 verify      裸容器 wget 拉取 install_panel.sh 并实装，
+#                   读面板实际版本与 API 比对；一致 → 开始冒烟测试
+#                   （启动面板、探活登录页）
+#    🏗️ build       双架构构建 → 17 项健康检查 → 按 digest 推送
+#    🚀 publish     合并 digest → 打 repo:<版本> 与 repo:latest
+#    ✏️ writeback   把「实际推送的版本号」回写 release/VERSION，供下次比对
+#
+#  关键保证：
+#    - release/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
+#    - 构建失败时 VERSION 不动，下次运行会自动重试同一版本
+#    - 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈
+#    - 任一步失败即中断，latest 不会指向坏镜像
+#
+#  🔑 所需仓库 Secrets：
+#    DOCKERHUB_USERNAME  DockerHub 用户名
+#    DOCKERHUB_TOKEN     DockerHub Access Token（不要用登录密码）
+#  writeback 推送 main 需要 Workflow permissions 勾选 Read and write permissions。
+# ==============================================================================
+
+on:
+  schedule:
+    # 每天 UTC 17:00（北京时间 1 点），错开 stable 通道的检查时间
+    - cron: '0 17 * * *'
+  workflow_dispatch: {}
+
+# 同一时刻只跑一个：排队期间上游版本若已被上一次运行发布，
+# 重新探测会得到「已一致」，后续 job 自动跳过
+concurrency:
+  group: release-build-push
+  cancel-in-progress: false
+
+env:
+  VERSION_FILE: release/VERSION
+  VERSION_API: https://www.bt.cn/api/panel/get_version
+  INSTALL_URL: https://download.bt.cn/install/install_panel.sh
+  IMAGE_NAME: baota
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 🔍 第一级比对：get_version API vs release/VERSION。
+  # 一致 → 今天无事可做；不一致 → 输出新版本号，交给 verify 实装验证。
+  # ---------------------------------------------------------------------------
+  detect:
+    name: 🔍 探测并与 release/VERSION 比对
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: 🔍 API 取版号并与 VERSION 比对
+        id: detect
+        run: |
+          UPSTREAM=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" | tr -d '[:space:]' || true)
+          if [ -z "$UPSTREAM" ]; then
+            echo "::error::get_version API 无返回：${VERSION_API}"
+            exit 1
+          fi
+          if ! printf '%s' "$UPSTREAM" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::API 返回 '$UPSTREAM' 不是 x.y.z 格式"
+            exit 1
+          fi
+
+          CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" || true)
+          if [ -z "$CURRENT" ]; then
+            echo "::error::$VERSION_FILE 为空"
+            exit 1
+          fi
+
+          if [ "$UPSTREAM" = "$CURRENT" ]; then
+            RESULT=up-to-date
+          else
+            LATEST=$(printf '%s\n%s\n' "$CURRENT" "$UPSTREAM" | sort -V | tail -1)
+            if [ "$LATEST" = "$UPSTREAM" ]; then
+              RESULT=new-version
+            else
+              # API 版本低于仓库：官方回滚或 API 异常，绝不自动降级
+              RESULT=behind
+            fi
+          fi
+
+          if [ "$RESULT" = "new-version" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "发现新版本：${CURRENT} → ${UPSTREAM}，进入实装验证"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "仓库版本 ${CURRENT}，API 版本 ${UPSTREAM}（${RESULT}），无需发布"
+          fi
+          echo "version=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+
+      - name: 📋 输出摘要
+        if: always()
+        run: |
+          CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo 未知)
+          if [ "${{ steps.detect.outputs.changed }}" = "true" ]; then
+            TEXT="🎉 发现新版本：${CURRENT} → ${{ steps.detect.outputs.version }}"
+          elif [ -n "${{ steps.detect.outputs.changed }}" ]; then
+            TEXT="✅ 已一致（${CURRENT}），无需发布"
+          else
+            TEXT="❌ 探测失败，详见日志"
+          fi
+          {
+            echo "### 📦 release 通道检查"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| release/VERSION | \`${CURRENT}\` |"
+            echo "| get_version API | \`${{ steps.detect.outputs.version || '获取失败' }}\` |"
+            echo "| 结果 | ${TEXT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 🧪 第二级比对 + 冒烟：裸 debian:12 实装 install_panel.sh。
+  # 引导脚本自身不含版本号，所以「API 版本是否可信」只有实装后读面板的
+  # 版本字段才能确认；一致后立刻在同一个容器里做冒烟（启动面板、探活登录页）。
+  # ---------------------------------------------------------------------------
+  verify:
+    name: 🧪 实装比对 + 🩺 冒烟
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      EXPECT_VERSION: ${{ needs.detect.outputs.version }}
+      CONTAINER: baota-release-verify
+    steps:
+      - name: 🐳 启动裸容器
+        run: docker run -d --name "$CONTAINER" debian:12 sleep infinity
+
+      - name: 🧪 实装 install_panel.sh
+        run: |
+          docker exec "$CONTAINER" bash -c '
+            set -e
+            rm -f /usr/sbin/policy-rc.d
+            apt-get update -qq
+            apt-get install -y -qq wget ca-certificates curl > /dev/null
+            cd /root
+            # 与官方一致的方式：wget -O install_panel.sh <URL> && bash install_panel.sh
+            wget -qO install_panel.sh https://download.bt.cn/install/install_panel.sh
+            bash -n install_panel.sh
+            bash install_panel.sh -y -P 8888 -u baota -p smoke0test --ssl-disable --safe-path smoke0test
+          ' || {
+            echo "::error::install_panel.sh 实装失败，日志尾部："
+            docker exec "$CONTAINER" tail -n 120 /tmp/btpanel-install.log 2>/dev/null || true
+            exit 1
+          }
+
+      - name: ⚖️ 实际版本与 API 版本比对
+        id: compare
+        run: |
+          V=$(docker exec "$CONTAINER" bash -c '
+            if [ -f /www/server/panel/class/common.py ]; then
+              grep -E "^version[[:space:]]*=" /www/server/panel/class/common.py \
+                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1
+            fi' || true)
+          if [ -z "$V" ]; then
+            V=$(docker exec "$CONTAINER" bash -c '
+              grep -oE "\"version\"[[:space:]]*:[[:space:]]*\"[0-9.]+\"" \
+                /www/server/panel/config/menu.json 2>/dev/null \
+                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1' || true)
+          fi
+          echo "面板实际版本：${V:-未知}　API 版本：${EXPECT_VERSION}"
+          [ -n "$V" ] || { echo "::error::无法读取面板实际版本"; exit 1; }
+          [ "$V" = "$EXPECT_VERSION" ] || {
+            echo "::error::实际版本 ${V} 与 API 版本 ${EXPECT_VERSION} 不一致，中止发布"
+            exit 1
+          }
+          echo "result=match" >> "$GITHUB_OUTPUT"
+
+      - name: 🩺 冒烟测试（启动面板、探活登录页）
+        run: |
+          docker exec "$CONTAINER" bash -c '/etc/init.d/bt start' || true
+          CODE=000
+          for i in $(seq 1 60); do
+            CODE=$(docker exec "$CONTAINER" curl -sk -o /dev/null -w '%{http_code}' \
+              --max-time 5 "http://127.0.0.1:8888/smoke0test/login" 2>/dev/null || echo 000)
+            [ "$CODE" = "200" ] && break
+            sleep 2
+          done
+          echo "登录页 HTTP 状态：${CODE}"
+          [ "$CODE" = "200" ] || {
+            echo "::error::冒烟失败：登录页未返回 200"
+            docker exec "$CONTAINER" bash -c 'tail -n 60 /tmp/btpanel-install.log 2>/dev/null; ps aux | grep -v grep | head -15' || true
+            exit 1
+          }
+          echo "✅ 冒烟通过"
+
+      - name: 🧹 清理容器
+        if: always()
+        run: docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+      - name: 📋 输出摘要
+        if: always()
+        run: |
+          if [ "${{ steps.compare.outputs.result }}" = "match" ]; then
+            echo "### 🧪🩺 实装版本与 API 一致（${EXPECT_VERSION}），冒烟通过" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 🧪🩺 实装验证未通过，中止发布" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 🏗️ 双架构构建。上下文是仓库根（两个通道共用 shared/build/ 下的构建脚本）。
+  # ---------------------------------------------------------------------------
+  build:
+    name: 🏗️ 构建 linux/${{ matrix.arch }}
+    needs: [detect, verify]
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: 🖥️ 确认 runner 架构
+        run: |
+          echo "runner: $(uname -m)  target: ${{ matrix.arch }}"
+          case "${{ matrix.arch }}-$(uname -m)" in
+            amd64-x86_64|arm64-aarch64) echo "✅ 原生构建" ;;
+            *) echo "::error::runner 与目标架构不匹配"; exit 1 ;;
+          esac
+
+      - name: 🔧 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 🏗️ 构建镜像（仅加载本地）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./release/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          provenance: false
+          build-args: |
+            INSTALL_URL=${{ env.INSTALL_URL }}
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.detect.outputs.version }}
+          tags: baota-release:candidate
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,scope=release-${{ matrix.arch }},mode=max
+
+      - name: 🩺 发布前健康检查
+        run: |
+          bash .github/scripts/health-check.sh \
+            "baota-release:candidate" "${{ needs.detect.outputs.version }}"
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 📤 按 digest 推送（不打标签）
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./release/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: >-
+            type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},
+            push=true,push-by-digest=true
+          provenance: false
+          build-args: |
+            INSTALL_URL=${{ env.INSTALL_URL }}
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.detect.outputs.version }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+
+      - name: 💾 保存 digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.push.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "${{ matrix.arch }}: ${{ steps.push.outputs.digest }}"
+
+      - name: 📦 上传 digest 产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-release-${{ matrix.arch }}
+          path: "/tmp/digests/${{ matrix.arch }}"
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 🚀 合并 digest → repo:<版本> 与 repo:latest 两个标签。
+  # 依赖 build 两个矩阵 job 全部成功，任一架构失败都到不了这里，
+  # 所以 latest 永远不会指向坏镜像。
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 🚀 发布（版本 + latest）
+    needs: [detect, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      repo: ${{ steps.publish.outputs.repo }}
+      tag: ${{ steps.publish.outputs.tag }}
+    steps:
+      - name: 📥 下载 digest 产物
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-release-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🚀 合并并打标签（版本 + latest）
+        id: publish
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          VER="${{ needs.detect.outputs.version }}"
+
+          AMD64=$(tr -d '[:space:]' < /tmp/digests/amd64)
+          ARM64=$(tr -d '[:space:]' < /tmp/digests/arm64)
+          echo "amd64: ${AMD64}  arm64: ${ARM64}"
+          [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少 digest"; exit 1; }
+
+          docker buildx imagetools create \
+            -t "${REPO}:${VER}" -t "${REPO}:latest" \
+            "${REPO}@${AMD64}" "${REPO}@${ARM64}"
+
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: 📋 输出摘要
+        run: |
+          REPO="${{ steps.publish.outputs.repo }}"
+          TAG="${{ steps.publish.outputs.tag }}"
+          {
+            echo "### 🚀 release 通道发布完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 宝塔版本 | \`${TAG}\` |"
+            echo "| 标签 | \`${REPO}:${TAG}\` 与 \`${REPO}:latest\` |"
+            echo "| 架构 | linux/amd64、linux/arm64 |"
+            echo ""
+            echo "\`\`\`bash"
+            echo "docker pull ${REPO}:latest"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # ✏️ 发布成功之后才回写 release/VERSION —— 保证文件永远对应「已推送」
+  # 的版本。构建失败时 VERSION 不动，下次运行会自动重试同一版本；
+  # 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈。
+  # ---------------------------------------------------------------------------
+  writeback:
+    name: ✏️ 回写 release/VERSION
+    needs: [detect, publish]
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: ✏️ 回写推送成功的版本号
+        run: |
+          VER="${{ needs.publish.outputs.tag }}"
+          printf '%s\n' "$VER" > "$VERSION_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$VERSION_FILE"
+          git commit -m "chore: release baota ${VER} (writeback release/VERSION)"
+          if git push; then
+            echo "已回写 $VERSION_FILE = ${VER}"
+          else
+            echo "::warning::回写推送失败（分支可能受保护）。镜像 ${VER} 已发布成功；下次运行 detect 仍会发现不一致并自动重试回写"
+          fi
+
+      - name: 📋 输出摘要
+        run: |
+          echo "### ✏️ release/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"

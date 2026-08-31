@@ -1,0 +1,27 @@
+# ==============================================================================
+#  仓库根构建上下文排除清单
+#
+#  两个通道都以「仓库根」为构建上下文（docker build -f stable/Dockerfile .），
+#  用 -f 指定各自的 Dockerfile。shared/ 下的构建脚本、运行期脚本与 systemd unit
+#  都是镜像的一部分，必须留在上下文中。
+#
+#  作用：减小上下文体积；防止把 CI / 本地专用的东西打进生产镜像。
+# ==============================================================================
+
+# 版本控制与 CI（CI 专用的健康检查脚本在 .github/scripts/ 下，一并排除）
+.git
+.github
+
+# 运行期数据与本地产物
+data/
+*.log
+.DS_Store
+
+# 项目文档（镜像内不需要）
+*.md
+
+# 各通道的编排与版本号文件（镜像内不需要；Dockerfile 本身必须留在上下文中）
+stable/docker-compose.yml
+stable/VERSION
+release/docker-compose.yml
+release/VERSION

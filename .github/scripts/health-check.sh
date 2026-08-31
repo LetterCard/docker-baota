@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  宝塔面板镜像发布前健康检查（CI 门禁）
+#  🩺 宝塔面板镜像发布前健康检查（CI 门禁）
 #
 #  用法：health-check.sh <镜像名:标签> <期望的宝塔版本号>
 #
-#  流程定位：
-#    镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后，
-#    workflow 才会执行登录与推送。任一检查失败即非零退出，阻断发布。
+#  镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后，workflow 才登录
+#  并推送。任一检查失败即非零退出，阻断发布。
 #
-#  检查项是针对「本容器化方案 + 真机宝塔运行体验」定制的，不是通用 HTTP 探活：
-#    A 阶段（全新数据卷）
-#      systemd 就绪 / overlay 持久化可写 / 宝塔真实路径 / 面板与任务进程 /
-#      带安全入口的登录页 / 面板版本号 / 首启随机凭据 / 写入落盘 /
-#      开机自启 / 定制补丁 / 防火墙默认关闭 / SSH 与 bt 命令
-#    B 阶段（销毁容器后用同一个卷重建）
-#      业务与系统数据仍在 / 不会二次初始化 / 面板自动恢复运行
+#  两阶段共 17 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
+#    A 全新数据卷：systemd / overlay 可写 / 关键路径 / 面板与任务进程 /
+#                  安全入口 / 版本号 / 首启凭据 / 写入落盘 / 自启 / 补丁 /
+#                  防火墙关闭 / SSH 与 bt 命令
+#    B 销毁容器后用同一个卷重建：数据不丢、不会二次初始化、面板自动恢复
+#
+#  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 整体排除，
+#  不会进入生产镜像。
 # ==============================================================================
 set -euo pipefail
 
@@ -23,10 +23,11 @@ EXPECT_VERSION=${2:?用法: health-check.sh <镜像> <期望版本>}
 
 CONTAINER="baota-healthcheck-$$"
 VOLUME="baota-healthcheck-data-$$"
+# 必须与 Dockerfile ENV 中的 PERSIST_DIRS 保持一致
 PERSIST_DIRS="etc usr var www root opt home srv"
 
-pass() { echo "  [ OK ] $*"; }
-step() { echo; echo "[health-check] ==== $* ===="; }
+pass() { echo "  ✅ $*"; }
+step() { echo; echo "🩺 ==== $* ===="; }
 fail() {
     echo "::error::$*"
     echo "----- 容器日志尾部 -----"
@@ -41,22 +42,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 容器内取值的简写
-inside()       { docker exec "$CONTAINER" "$@"; }
-inside_sh()    { docker exec "$CONTAINER" sh -c "$1"; }
-read_file_in() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
+# ---------------------------------------------------------------------------
+# 容器内操作的简写
+#   inside      直接执行一条命令
+#   inside_sh   在容器里起 sh 执行（需要管道、重定向、通配时用）
+#   inside_cat  读取文件内容并去掉全部空白
+# ---------------------------------------------------------------------------
+inside()     { docker exec "$CONTAINER" "$@"; }
+inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
+inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
 
-# 去掉 ANSI 颜色码，再判断 bt status 输出
-panel_is_running() {
-    local status
-    status=$(inside bt status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
-    echo "$status" | grep -q 'Bt-Panel .*already running'
+# 面板运行状态（输出带颜色码，去掉后再判断）。
+# 面板与任务两个进程共用这一次调用的结果，不重复执行 bt status。
+panel_status() {
+    inside bt status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true
 }
 
-task_is_running() {
-    local status
-    status=$(inside bt status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
-    echo "$status" | grep -q 'Bt-Task .*already running'
+assert_processes_up() {
+    local status="$1"
+    echo "$status" | grep -q 'Bt-Panel .*already running' || fail "面板进程未运行"
+    echo "$status" | grep -q 'Bt-Task .*already running'  || fail "任务进程未运行"
 }
 
 # ---------------------------------------------------------------------------
@@ -75,11 +80,13 @@ start_container() {
         "$IMAGE" >/dev/null || fail "容器无法启动"
 }
 
+# degraded 在容器里属常见（个别 unit 被 mask），放行
 wait_systemd() {
-    local state="" i
-    for i in $(seq 1 90); do
+    local state="" tries=0
+    while [ "$tries" -lt 90 ]; do
         state=$(docker exec "$CONTAINER" systemctl is-system-running 2>/dev/null || true)
         case "$state" in running|degraded) break ;; esac
+        tries=$((tries + 1))
         sleep 2
     done
     case "$state" in
@@ -91,18 +98,21 @@ wait_systemd() {
 
 # 面板进程由 systemd 拉起，需要等一会儿才会监听端口
 wait_panel_http() {
-    local port code="" i
-    port=$(read_file_in /www/server/panel/data/port.pl)
+    local port code="" tries=0
+    port=$(inside_cat /www/server/panel/data/port.pl)
     [ -n "$port" ] || fail "无法确定面板端口"
-    for i in $(seq 1 60); do
+    while [ "$tries" -lt 60 ]; do
         code=$(inside curl -skf -o /dev/null -w '%{http_code}' --max-time 5 \
                 "http://127.0.0.1:${port}/" 2>/dev/null || echo 000)
-        [ "$code" != "000" ] && break
+        if [ "$code" != "000" ]; then break; fi
+        tries=$((tries + 1))
         sleep 2
     done
     [ "$code" != "000" ] || fail "面板端口 ${port} 在 120 秒内没有响应"
 }
 
+# 只读降级是本方案最危险的失效模式：挂载会「成功」，但所有写入静默丢失。
+# 断言的这句文案由 init-mounts.sh 输出，改动时两处要一起改。
 assert_no_readonly_warning() {
     if docker logs "$CONTAINER" 2>&1 | grep -q "持久化层挂载成功但不可写"; then
         fail "持久化层降级为只读，数据写入会静默丢失"
@@ -110,7 +120,7 @@ assert_no_readonly_warning() {
 }
 
 # ==============================================================================
-#  A 阶段：全新数据卷
+#  🅰️ A 阶段：全新数据卷
 # ==============================================================================
 step "A0) 启动容器（与生产一致的运行条件）"
 docker volume create "$VOLUME" >/dev/null
@@ -121,7 +131,6 @@ step "A1) 等待 systemd 就绪"
 wait_systemd
 
 step "A2) 校验 overlay 持久化"
-# 只读降级是本方案最危险的失效模式：挂载会「成功」，但所有写入静默丢失
 assert_no_readonly_warning
 MOUNTED=$(inside_sh "mount | grep -c 'type overlay'" || true)
 MOUNTED=${MOUNTED:-0}
@@ -131,7 +140,7 @@ EXPECT_MOUNTS=$(echo "$PERSIST_DIRS" | wc -w | tr -d ' ')
 pass "overlay 挂载 ${MOUNTED} 个，无只读告警"
 
 for d in $PERSIST_DIRS; do
-    inside test -d "/data/${d}/upper" || fail "持久化目录缺失：/data/${d}/upper"
+    inside test -d "/data/${d}" || fail "持久化目录缺失：/data/${d}"
 done
 pass "${EXPECT_MOUNTS} 个持久化目录齐备"
 
@@ -158,13 +167,12 @@ step "A4) 校验面板双进程"
 # 真机上宝塔就是「面板 + 任务」两个常驻进程，缺一不可（任务进程负责计划任务与后台作业）。
 # 用宝塔自带的 bt status 判断，避免自己写 ps|grep 反而干扰 bt 脚本的进程判定。
 wait_panel_http
-panel_is_running || fail "面板进程未运行"
-task_is_running  || fail "任务进程未运行"
+assert_processes_up "$(panel_status)"
 pass "面板与任务进程均在运行"
 
 step "A5) 校验面板 HTTP（必须带安全入口）"
-PORT=$(read_file_in /www/server/panel/data/port.pl)
-SAFE=$(read_file_in /www/server/panel/data/admin_path.pl)
+PORT=$(inside_cat /www/server/panel/data/port.pl)
+SAFE=$(inside_cat /www/server/panel/data/admin_path.pl)
 URL="http://127.0.0.1:${PORT}${SAFE}/login"
 CODE=$(inside curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" || echo 000)
 case "$CODE" in
@@ -209,7 +217,7 @@ inside test -e /www/server/panel/data/.docker-initialized \
     || fail "缺少首次初始化标记，entrypoint 的初始化没有执行"
 echo "$SAFE" | grep -Eq '^/[0-9a-f]{8}$' \
     || fail "安全入口不是首启随机生成的（当前：${SAFE}）"
-DEFAULT_PW=$(read_file_in /www/server/panel/default.pl)
+DEFAULT_PW=$(inside_cat /www/server/panel/default.pl)
 echo "$DEFAULT_PW" | grep -Eq '^[0-9a-f]{12}$' \
     || fail "面板初始口令不是首启随机生成的（当前长度 ${#DEFAULT_PW}）"
 # 镜像里 root 是锁定的（shadow 字段以 ! 开头），首启后必须已设置真实口令
@@ -218,14 +226,16 @@ if inside_sh 'grep "^root:" /etc/shadow | cut -d: -f2 | grep -q "^[!*]"'; then
 fi
 pass "安全入口、面板口令、root 口令均为首启随机生成"
 
-step "A8) 校验写入确实落到 upper 层"
+step "A8) 校验写入确实落到持久化层"
 inside_sh 'echo persist > /etc/_persist_marker'
 inside_sh 'echo persist > /www/_persist_marker'
 inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_marker'
-inside test -f /data/etc/upper/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f /data/www/upper/_persist_marker            || fail "/www 写入未落盘"
-inside test -f /data/var/upper/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入已落到 /data/*/upper"
+inside_sh 'echo persist > /www/wwwroot/_persist_marker'
+inside test -f /data/etc/_persist_marker            || fail "/etc 写入未落盘"
+inside test -f /data/www/_persist_marker            || fail "/www 写入未落盘"
+inside test -f /data/www/wwwroot/_persist_marker    || fail "/www/wwwroot 写入未落到 /data/www/wwwroot"
+inside test -f /data/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
+pass "写入已落到 /data/<目录> 与 /data/www/wwwroot"
 
 step "A9) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
@@ -264,7 +274,7 @@ inside bt status >/dev/null 2>&1 || fail "bt 命令执行失败"
 pass "sshd 运行中、bt 命令可用"
 
 # ==============================================================================
-#  B 阶段：销毁容器 → 用同一个卷重建
+#  🅱️ B 阶段：销毁容器 → 用同一个卷重建
 #
 #  这是本项目最核心的承诺：容器销毁、重建后，业务与系统环境数据都不丢。
 #  只做「重启」是测不出来的（重启不会丢容器可写层），必须真的 rm 掉重建。
@@ -286,15 +296,14 @@ inside test -f /www/_persist_marker            || fail "/www 数据在重建后�
 inside test -f /var/spool/cron/_persist_marker || fail "/var 计划任务在重建后丢失"
 pass "系统配置、业务数据、计划任务均已保留"
 
-SAFE_AFTER=$(read_file_in /www/server/panel/data/admin_path.pl)
-PW_AFTER=$(read_file_in /www/server/panel/default.pl)
+SAFE_AFTER=$(inside_cat /www/server/panel/data/admin_path.pl)
+PW_AFTER=$(inside_cat /www/server/panel/default.pl)
 [ "$SAFE_AFTER" = "$SAFE" ] || fail "重建后安全入口被改写（${SAFE} -> ${SAFE_AFTER}）"
 [ "$PW_AFTER" = "$DEFAULT_PW" ] || fail "重建后初始口令被改写，说明发生了二次初始化"
 pass "未发生二次初始化，登录地址与账号保持不变"
 
 step "B3) 校验重建后面板自动恢复运行"
-panel_is_running || fail "重建后面板进程未自启"
-task_is_running  || fail "重建后任务进程未自启"
+assert_processes_up "$(panel_status)"
 inside systemctl is-active btpanel >/dev/null 2>&1 || fail "重建后 btpanel 未 active"
 pass "面板与任务进程随容器自动恢复"
 

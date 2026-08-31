@@ -1,25 +1,19 @@
 #!/bin/bash
 # ==============================================================================
-#  阶段 1 —— 收尾初始化，然后交给 systemd
+#  🚀 阶段 1 —— 收尾初始化，然后交给 systemd
 #
-#  进入本脚本时 overlay 已挂载完成，/usr 完整可用。
-#  此后对 /etc、/usr、/var、/www 等目录的任何写入都会落入 /data/<dir>/upper，
-#  即：容器销毁、重建、升级镜像都不会丢失。
+#  进入本脚本时 overlay 已挂载完成，此后对 /etc、/usr、/var、/www 等目录的
+#  写入都会落入 /data/<同名目录>，容器销毁、重建、升级都不丢。
 #
-#  可用环境变量。
-#    标「仅首次」的只在这份 /data 第一次被使用时生效，之后一律以面板内 /
-#    容器内的实际设置为准，避免每次启动都把用户改过的东西覆盖掉。
-#
-#    PANEL_PORT       面板端口，仅首次。未设置 → 8888
-#    PANEL_USER       面板用户名，仅首次。未设置或为空 → baota（不随机）
-#    PANEL_PASSWORD   面板口令，仅首次。未设置或为空 → 随机 12 位十六进制
-#    PANEL_SAFE_PATH  面板安全入口，仅首次。未设置或为空 → 随机 8 位十六进制
-#    ROOT_PASSWORD    root 的 SSH 口令，仅首次。未设置或为空 → 随机 12 位十六进制
-#    TZ               时区，每次启动都生效，默认 Asia/Shanghai
+#  可用环境变量（详见 README「首次登录凭据」）：
+#    PANEL_PORT / PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
+#    除 TZ 每次生效外，其余都只在首次启动（data/ 为空）时生效，
+#    避免每次启动都覆盖用户在面板里改过的设置。
 # ==============================================================================
 set -euo pipefail
 
 PANEL_DIR=/www/server/panel
+PANEL_PY=${PANEL_DIR}/pyenv/bin/python
 
 # 首次启动标记。它在 /www 持久化层里，所以「首次」= 这份 /data 第一次被使用。
 FIRST_BOOT_MARKER="${PANEL_DIR}/data/.docker-initialized"
@@ -32,9 +26,9 @@ NEW_ROOT_PASSWORD=""
 # ---------------------------------------------------------------------------
 # 日志约定：[entrypoint] 带时间戳；die() 用于致命错误
 # ---------------------------------------------------------------------------
-log()  { echo "[entrypoint] $(date '+%H:%M:%S') - $*"; }
-warn() { echo "[entrypoint][WARN] $(date '+%H:%M:%S') - $*" >&2; }
-die()  { echo "[entrypoint][ERROR] $(date '+%H:%M:%S') - $*" >&2; exit 1; }
+log()  { echo "🚀 [entrypoint] $(date '+%H:%M:%S') - $*"; }
+warn() { echo "⚠️ [entrypoint][WARN] $(date '+%H:%M:%S') - $*" >&2; }
+die()  { echo "❌ [entrypoint][ERROR] $(date '+%H:%M:%S') - $*" >&2; exit 1; }
 
 # 生成 2N 位十六进制随机串。
 # 不用 `tr -dc ... | head -c N`：head 提前关闭管道会触发 SIGPIPE，
@@ -42,28 +36,25 @@ die()  { echo "[entrypoint][ERROR] $(date '+%H:%M:%S') - $*" >&2; exit 1; }
 random_hex() { od -An -tx1 -N "$1" /dev/urandom | tr -d ' \n'; }
 
 # ---------------------------------------------------------------------------
-# 面板文件自检
+# 🔍 面板文件自检
 #    持久化层被写坏时（例如误删 /www/server/panel），这里给出明确指引，
 #    而不是让 systemd 反复拉不起面板、用户在日志里毫无头绪。
 # ---------------------------------------------------------------------------
 check_panel_files() {
     [ -f "${PANEL_DIR}/BT-Panel" ] \
-        || die "找不到 ${PANEL_DIR}/BT-Panel，持久化层可能已损坏；清空 ${PERSIST_ROOT:-/data}/www/upper 后重启可回退到镜像自带的面板"
-    [ -x "${PANEL_DIR}/pyenv/bin/python" ] \
-        || die "找不到面板 Python 运行环境 ${PANEL_DIR}/pyenv/bin/python"
+        || die "找不到 ${PANEL_DIR}/BT-Panel，持久化层可能已损坏；清空 ${PERSIST_ROOT:-/data}/www 后重启可回退到镜像自带的面板"
+    [ -x "$PANEL_PY" ] \
+        || die "找不到面板 Python 运行环境 ${PANEL_PY}"
 }
 
 # ---------------------------------------------------------------------------
-# 持久化覆盖自检（针对上游变更）
+# 🛡️ 持久化覆盖自检（针对上游变更）
 #
-#  本项目的数据安全建立在「宝塔只往 PERSIST_DIRS 里写」这个前提上。
-#  这个前提已实测确认（安装官方脚本后，新增内容只落在 etc/usr/var/www/root），
-#  但上游一旦把数据目录挪走，数据就会静默丢失。下面两道检查就是为了
-#  让这种变化在启动日志里立刻暴露，而不是等用户发现数据没了。
-#
-#  两者都只读取、不写入，纯诊断，不会因为检查失败而阻断启动 ——
-#  面板停掉反而让用户无从下手，明确告警 + 修复指引才是可行动的。
+#  数据安全的前提是「宝塔只往 PERSIST_DIRS 里写」（已实测确认）。
+#  上游一旦把数据挪走，数据会静默丢失，所以每次启动做两项只读检查：
+#  只告警、不阻断 —— 把面板停掉反而让用户无从下手。
 # ---------------------------------------------------------------------------
+# 兜底列表必须与 Dockerfile 的 ENV、init-mounts.sh 的默认值一致
 is_persisted() {
     local top="$1"
     case " ${PERSIST_DIRS:-etc usr var www root opt home srv} " in
@@ -96,14 +87,17 @@ check_setup_path_covered() {
 #    构建期在 /opt/baota/baseline-dirs.txt 存了一份快照。这个文件从不在
 #    运行期写入，所以按 overlay 语义它始终跟随当前镜像 —— 换镜像即换基线。
 check_new_top_dirs() {
-    local baseline=/opt/baota/baseline-dirs.txt
-    [ -f "$baseline" ] || return 0
+    local baseline_file=/opt/baota/baseline-dirs.txt
+    [ -f "$baseline_file" ] || return 0
 
-    local d
+    # 一次读入后做整体匹配，避免每个目录都起一次 grep
+    local baseline d
+    baseline=" $(tr '\n' ' ' < "$baseline_file") "
+
     for d in /*; do
         [ -d "$d" ] || continue
         case "$d" in /proc|/sys|/dev|/run|/tmp) continue ;; esac
-        grep -qx "${d#/}" "$baseline" && continue
+        case "$baseline" in *" ${d#/} "*) continue ;; esac
         # 挂载点是用户自己挂进来的（如 NAS 共享目录），属于预期行为，跳过
         awk -v p="$d" '$2==p{c++} END{exit(c?0:1)}' /proc/mounts && continue
 
@@ -118,7 +112,7 @@ audit_persist_coverage() {
 }
 
 # ---------------------------------------------------------------------------
-# 清理 systemd 运行时目录
+# 🧹 清理 systemd 运行时目录
 #    /run 不在持久化范围内，但镜像层可能残留构建期写入的状态
 # ---------------------------------------------------------------------------
 prepare_runtime_dirs() {
@@ -143,7 +137,7 @@ prepare_runtime_dirs() {
 }
 
 # ---------------------------------------------------------------------------
-# 每次启动刷新的一致性修正
+# 🔄 每次启动刷新的一致性修正
 # ---------------------------------------------------------------------------
 refresh_consistency() {
     ln -sfn /proc/self/mounts /etc/mtab
@@ -161,7 +155,7 @@ refresh_consistency() {
 }
 
 # ---------------------------------------------------------------------------
-# 复位面板补丁
+# 🩹 复位面板补丁
 #    补丁改的是 /www 里的文件，而 /www 在持久化层里 ——
 #    用户还原备份、覆盖文件都可能把补丁冲掉，所以每次启动重放一遍（幂等）。
 # ---------------------------------------------------------------------------
@@ -175,7 +169,7 @@ reset_panel_patches() {
 }
 
 # ---------------------------------------------------------------------------
-# 首次启动初始化：端口、安全入口、账号
+# 🔑 首次启动初始化：端口、安全入口、账号
 #
 #  镜像是公开的，里面的口令和安全入口人人可见，所以必须在部署侧重新生成。
 #  只在首次执行，之后用户在面板里改过的设置属于持久化数据，绝不覆盖。
@@ -183,7 +177,6 @@ reset_panel_patches() {
 init_first_boot() {
     [ -e "$FIRST_BOOT_MARKER" ] && return 0
 
-    local py="${PANEL_DIR}/pyenv/bin/python"
     local user="${PANEL_USER:-baota}"
     local password="${PANEL_PASSWORD:-$(random_hex 6)}"
     local safe_path="${PANEL_SAFE_PATH:-$(random_hex 4)}"
@@ -196,9 +189,9 @@ init_first_boot() {
     # 宝塔约定 admin_path.pl 以 / 开头，登录地址即 http://IP:端口<该值>/login
     echo "/${safe_path#/}" > "${PANEL_DIR}/data/admin_path.pl"
 
-    ( cd "$PANEL_DIR" && "$py" tools.py panel "$password" ) >/dev/null \
+    ( cd "$PANEL_DIR" && "$PANEL_PY" tools.py panel "$password" ) >/dev/null \
         || die "面板口令初始化失败，请检查 ${PANEL_DIR}/data/db/panel.db 是否可写"
-    ( cd "$PANEL_DIR" && "$py" -c "import tools;tools.set_panel_username('${user}')" ) >/dev/null \
+    ( cd "$PANEL_DIR" && "$PANEL_PY" -c "import tools;tools.set_panel_username('${user}')" ) >/dev/null \
         || die "面板用户名初始化失败"
 
     # 与真机安装一致：初始口令落在 default.pl，供 bt default 命令读取
@@ -216,7 +209,7 @@ init_first_boot() {
 }
 
 # ---------------------------------------------------------------------------
-# 启动信息
+# 📋 启动信息
 # ---------------------------------------------------------------------------
 print_summary() {
     local port safe
@@ -234,12 +227,12 @@ print_summary() {
         log "查看面板账号：docker exec <容器名> bt default"
         log "重置面板口令：docker exec -it <容器名> bt 5"
     fi
-    log "持久化根目录：${PERSIST_ROOT:-/data}（各目录的可写层在 <目录>/upper）"
+    log "持久化根目录：${PERSIST_ROOT:-/data}（可写层与容器内路径同名，站点目录在 /data/www/wwwroot）"
     echo "=================================================================="
 }
 
 # ---------------------------------------------------------------------------
-# 入口
+# ▶️ 入口
 # ---------------------------------------------------------------------------
 main() {
     check_panel_files

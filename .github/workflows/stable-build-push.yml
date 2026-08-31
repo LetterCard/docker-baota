@@ -1,0 +1,348 @@
+name: 🚀 stable：构建并发布镜像
+
+# ==============================================================================
+#  🚀 [stable 通道] 多架构构建 → 17 项健康检查 → 发布到 DockerHub
+#
+#    与 release 通道（release-build-push.yml）的区别：
+#      - 版本来源：stable/VERSION（version job 每次运行时自动探测校准）
+#      - 安装脚本：installStable_12.sh（稳定线 12.x）
+#      - 只发布精确版本标签，不打 latest
+#
+#  版本来源
+#    每次运行探测安装脚本横幅版本：高于 stable/VERSION 就按新版本发布，
+#    发布成功后才回写 stable/VERSION（与 release 通道对称：文件永远对应
+#    已推送的版本，构建失败时文件不动，下次运行自动重试）
+#
+#  触发方式
+#    🖱️ 仅手动     页面触发，自动探测上游版本并发布；发布成功后回写
+#                  stable/VERSION。文件变更不触发任何工作流。
+#
+#  并行多架构
+#    amd64 与 arm64 各自跑在「原生」runner 上，总耗时约等于较慢的那个。
+#    ⚠️ arm64 要源码编译 Python 3.7（官方无 aarch64 预编译包），
+#       在 QEMU 模拟下慢到不实用，所以必须用原生 runner。
+#    ⚠️ ubuntu-24.04-arm 只对「公开仓库」免费；仓库转私有请删掉矩阵里的 arm64。
+#
+#  只发布一个标签
+#    两个架构都「按 digest 推送」，最后由 publish 合并成唯一的 repo:版本，
+#    DockerHub 上不会留下 -amd64 / -arm64 之类的中间产物。
+#
+#  安全底线
+#    每个架构都是：本地构建 → 健康检查通过 → 才推送。
+#    健康检查失败会终止该 job；publish 依赖两个 job 都成功，
+#    所以坏镜像不可能出现在 :版本 这个标签里。
+#
+#  🔑 所需 Secrets
+#    DOCKERHUB_USERNAME  DockerHub 用户名
+#    DOCKERHUB_TOKEN     DockerHub Access Token（不要用登录密码）
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      install_url:
+        description: '安装脚本地址（手动运行时用于校准 VERSION；默认与 Dockerfile 一致）'
+        required: false
+        default: 'https://download.bt.cn/install/installStable_12.sh'
+        type: string
+
+# 同一时刻只保留最新一次运行，避免两套多架构构建互相抢缓存
+concurrency:
+  group: stable-build
+  cancel-in-progress: true
+
+env:
+  # 必须与 stable/docker-compose.yml 里的 image 保持一致
+  IMAGE_NAME: baota
+  INSTALL_URL: ${{ inputs.install_url || 'https://download.bt.cn/install/installStable_12.sh' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 版本号只有一个来源，抽出来只读一次，两个构建 job 共用。
+  #
+  # 每次运行探测上游横幅版本并与 stable/VERSION 比对：只自动升版、绝不自动
+  # 降级（stable/VERSION 是降级检测的比对基准）。本 job 不回写文件 ——
+  # 回写发生在发布成功之后（writeback），保证文件永远对应已推送的版本。
+  # ---------------------------------------------------------------------------
+  version:
+    name: 🔍 确定 stable 版本号
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      value: ${{ steps.resolve.outputs.value }}
+      current: ${{ steps.resolve.outputs.current }}
+      changed: ${{ steps.resolve.outputs.changed }}
+      probe: ${{ steps.resolve.outputs.probe }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: 🔍 探测上游版本并与 VERSION 比对
+        id: resolve
+        run: |
+          VER=$(tr -d '[:space:]' < stable/VERSION)
+          if [ -z "$VER" ]; then
+            echo "::error::stable/VERSION 为空"
+            exit 1
+          fi
+          if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::版本号应为 x.y.z 格式，当前为 ${VER}"
+            exit 1
+          fi
+          echo "current=${VER}" >> "$GITHUB_OUTPUT"
+
+          # 探测安装脚本横幅里的实际版本
+          ACTUAL=""
+          TMP=$(mktemp)
+          if curl -fsSL --connect-timeout 10 --max-time 60 "$INSTALL_URL" -o "$TMP" 2>/dev/null; then
+            ACTUAL=$(grep -m1 '您正在安装宝塔面板' "$TMP" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            rm -f "$TMP"
+          else
+            rm -f "$TMP"
+          fi
+
+          CHANGED=false
+          if [ -z "$ACTUAL" ]; then
+            echo "probe=failed" >> "$GITHUB_OUTPUT"
+            echo "::warning::无法探测上游版本（${INSTALL_URL}），按 stable/VERSION(${VER}) 继续；若上游已更新，健康检查的版本校验会拦住"
+          else
+            echo "probe=ok" >> "$GITHUB_OUTPUT"
+            if [ "$ACTUAL" != "$VER" ]; then
+              # 语义比较：只自动升版。横幅低于 VERSION（官方回滚或提取异常）时
+              # 绝不自动降级 —— stable/VERSION 此时就是比对基准
+              LATEST=$(printf '%s\n%s\n' "$VER" "$ACTUAL" | sort -V | tail -1)
+              if [ "$LATEST" = "$ACTUAL" ]; then
+                echo "::warning::发现上游新版本：${VER} → ${ACTUAL}，将按新版本构建发布"
+                VER=$ACTUAL
+                CHANGED=true
+              else
+                echo "::warning::上游横幅版本(${ACTUAL}) 低于 stable/VERSION(${VER})，"
+                echo "::warning::可能是官方回滚或提取异常，绝不自动降级，按 ${VER} 继续"
+              fi
+            fi
+          fi
+
+          echo "value=${VER}" >> "$GITHUB_OUTPUT"
+          echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
+          echo "宝塔版本：${VER}（changed=${CHANGED}）"
+
+      - name: 📋 输出摘要
+        run: |
+          CURRENT="${{ steps.resolve.outputs.current }}"
+          VALUE="${{ steps.resolve.outputs.value }}"
+          case "${{ steps.resolve.outputs.probe }}:${{ steps.resolve.outputs.changed }}" in
+            ok:true)  TEXT="🎉 发现上游新版本：${CURRENT} → ${VALUE}，将按新版本发布" ;;
+            ok:false) TEXT="✅ 已是最新（${VALUE}），按此版本发布" ;;
+            failed:*) TEXT="⚠️ 探测失败，按 stable/VERSION（${VALUE}）继续；若上游已更新，健康检查的版本校验会拦住" ;;
+            *)        TEXT="❓ 未知状态" ;;
+          esac
+          {
+            echo "### 🔍 stable 版本探测"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| stable/VERSION | \`${CURRENT}\` |"
+            echo "| 上游横幅版本 | \`${VALUE}\` |"
+            echo "| 结果 | ${TEXT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: 🏗️ 构建 linux/${{ matrix.arch }}
+    needs: version
+    timeout-minutes: 180
+    strategy:
+      # 不要 fail-fast：让两个架构都跑完，一次就能看到各自的问题
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            # 原生 ARM runner，避免 QEMU 模拟下编译 Python 的漫长等待
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: 🖥️ 确认 runner 架构
+        run: |
+          echo "runner 架构：$(uname -m)"
+          echo "目标架构：${{ matrix.arch }}"
+          case "${{ matrix.arch }}-$(uname -m)" in
+            amd64-x86_64|arm64-aarch64) echo "✅ 原生构建，无需模拟" ;;
+            *) echo "::error::runner 架构与目标不匹配，会退化为 QEMU 模拟"; exit 1 ;;
+          esac
+
+      - name: 🔧 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # ---- 第一次构建：只加载到本地，供健康检查使用 ----
+      # 它同时把构建缓存写进 GitHub Actions 缓存，供第二次构建复用
+      - name: 🏗️ 构建镜像（仅加载到本地，不推送）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./stable/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          # v6 起默认生成 provenance 证明，部分旧客户端拉取时会显示
+          # unknown/unknown 平台。关掉以保证最大兼容性
+          provenance: false
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.version.outputs.value }}
+            INSTALL_URL=${{ env.INSTALL_URL }}
+          tags: baota:candidate
+          # 按架构分开缓存，避免两个 job 互相覆盖
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: 🩺 发布前健康检查（未通过则不推送）
+        run: bash .github/scripts/health-check.sh "baota:candidate" "${{ needs.version.outputs.value }}"
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---- 第二次构建：按 digest 推送，不产生任何标签 ----
+      #
+      # 为什么要构建两次（是取舍，不是技术限制）：
+      #   buildx 支持一次调用里同时输出多种类型，但那样「推送」会发生在
+      #   「健康检查」之前 —— 镜像万一有问题，它已经进 DockerHub 了
+      #   （虽然没标签、拉不到，但确实在那儿）。
+      #
+      #   所以这里先构建并 load 到本机、健康检查通过后再推送。第二次会命中
+      #   上一次刚写入的 GHA 缓存，几乎不重新编译任何东西，代价很小；
+      #   换来的是「坏镜像根本不会被推送」这个强保证。
+      - name: 📤 按 digest 推送（不产生标签）
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./stable/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 只推 manifest，不打任何标签；标签统一在 publish job 里创建
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},push=true,push-by-digest=true
+          provenance: false
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_VERSION=${{ needs.version.outputs.value }}
+            INSTALL_URL=${{ env.INSTALL_URL }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+      # 矩阵 job 的 outputs 会被各实例互相覆盖，所以改用产物文件传递 digest
+      - name: 💾 保存 digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.push.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "${{ matrix.arch }} digest: ${{ steps.push.outputs.digest }}"
+
+      - name: 📦 上传 digest 产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 合并成唯一的多架构标签 repo:版本
+  # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 🚀 合并多架构并发布（stable）
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      repo: ${{ steps.manifest.outputs.repo }}
+      tag: ${{ steps.manifest.outputs.tag }}
+    steps:
+      - name: 📥 下载各架构 digest
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🚀 合并为唯一标签
+        id: manifest
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          VER="${{ needs.version.outputs.value }}"
+
+          AMD64=$(tr -d '[:space:]' < /tmp/digests/amd64)
+          ARM64=$(tr -d '[:space:]' < /tmp/digests/arm64)
+          echo "amd64: ${AMD64}"
+          echo "arm64: ${ARM64}"
+          [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少某个架构的 digest"; exit 1; }
+
+          docker buildx imagetools create -t "${REPO}:${VER}" \
+            "${REPO}@${AMD64}" \
+            "${REPO}@${ARM64}"
+
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: 📋 输出摘要
+        run: |
+          REPO="${{ steps.manifest.outputs.repo }}"
+          TAG="${{ steps.manifest.outputs.tag }}"
+
+          {
+            echo "### 🚀 发布完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`${REPO}:${TAG}\` |"
+            echo "| 宝塔版本 | ${{ needs.version.outputs.value }} |"
+            echo "| 架构 | linux/amd64、linux/arm64 |"
+            echo ""
+            echo "本工作流不推送 latest 标签，compose 里请使用精确版本标签。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "已发布 ${REPO}:${TAG}"
+          docker buildx imagetools inspect "${REPO}:${TAG}"
+
+  # ---------------------------------------------------------------------------
+  # ✏️ 发布成功之后才回写 stable/VERSION —— 与 release 通道对称：
+  # 文件永远对应「已推送」的版本；构建失败时文件不动，下次运行自动重试。
+  # ---------------------------------------------------------------------------
+  writeback:
+    name: ✏️ 回写 stable/VERSION
+    needs: [version, publish]
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7
+
+      - name: ✏️ 回写已发布的版本号
+        run: |
+          VER="${{ needs.publish.outputs.tag }}"
+          printf '%s\n' "$VER" > stable/VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stable/VERSION
+          git commit -m "chore: release baota ${VER} (writeback stable/VERSION)"
+          if git push; then
+            echo "已回写 stable/VERSION = ${VER}"
+          else
+            echo "::warning::回写推送失败（分支可能受保护）。镜像 ${VER} 已发布成功；下次运行会再次探测校准并重试回写"
+          fi
+
+      - name: 📋 输出摘要
+        run: |
+          echo "### ✏️ stable/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
