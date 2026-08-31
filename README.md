@@ -17,7 +17,7 @@ wget -O install.sh https://download.bt.cn/install/installStable_12.sh && bash in
 | 通道 | 目录 | 安装脚本 | 版本跟进方式 | DockerHub 标签 |
 |---|---|---|---|---|
 | **stable** | `stable/` | `installStable_12.sh`（稳定线 12.x） | 每周一自动探测上游版本，有新版本才发布；也可手动触发 | 仅精确版本（如 `12.0.0`），**无 latest** |
-| **release** | `release/` | `install_panel.sh`（正式版最新） | 每天自动：API 探测 → 冒烟实装比对 → 直接发布 | `13.0.0` + `latest` |
+| **release** | `release/` | `install_panel.sh`（正式版最新） | 每天自动：get_version API 探测版本号 → 与 release/VERSION 比对 → 直接发布 | `13.0.0` + `latest` |
 
 选哪个：**求稳用 stable**（每周一只跟进一次稳定线，节奏慢、变更少），**求新用 release**（每天跟进，latest 永远指向最新正式版）。两者用相同的 `data/` 目录结构，数据迁移互相兼容。
 
@@ -683,17 +683,15 @@ docker compose ps                       # 容器状态应为 healthy
 
 ```
 每天北京时间 1 点
-  🔍 get_version API 与 release/VERSION 比对 → 一致即结束
-  🧪 不一致：裸容器 wget 实装 install_panel.sh，读面板实际版本与 API 比对
-  🩺 一致：冒烟测试（启动面板、探活登录页）
-  🏗️ 双架构构建 → 17 项健康检查
+  🔍 get_version API 取最新版本号，与 release/VERSION 比对 → 一致即结束
+  🏗️ 不一致：双架构构建（官方脚本安装宝塔）→ 17 项健康检查
   🚀 发布 <版本> 与 latest 两个标签
   ✏️ 把推送成功的版本号回写 release/VERSION，供下一次比对
 ```
 
-与 stable 的关键差异：`install_panel.sh` 是**引导脚本，自身不含版本号**（stable 脚本有版本横幅可提取），所以版本一致性只能靠冒烟实装后读面板版本字段来验证；加上正式版上游视为「当前版本」、更新频繁，因此跳过 PR 人工确认环节，冒烟 + 健康检查全部通过即自动发布，**latest 标签永远指向最新正式版**。
+与 stable 的关键差异：`install_panel.sh` 是**引导脚本，自身不含版本号**（stable 脚本有版本横幅可提取），所以版本号直接取自官方 `get_version` API，与 `release/VERSION` 比对后决定是否发布；加上正式版上游视为「当前版本」、更新频繁，因此跳过 PR 人工确认环节，健康检查全部通过即自动发布，**latest 标签永远指向最新正式版**。
 
-任何一步失败都会中断（例如上游临时改坏了脚本、实装版本与 API 不一致），latest 不会指向坏镜像；API 版本低于仓库版本时（官方回滚）会告警并跳过，绝不自动降级。
+任何一步失败都会中断（例如上游临时改坏了安装脚本，构建阶段会直接失败），latest 不会指向坏镜像；API 版本低于仓库版本时（官方回滚）会告警并跳过，绝不自动降级。
 
 `release/VERSION` 在**发布成功之后**才回写，永远对应已推送的版本：构建失败时文件不动，下次运行自动重试同一版本；回写推送失败仅告警，下次比对仍会发现不一致并自愈。
 

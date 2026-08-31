@@ -6,15 +6,13 @@ name: 📦 release：检查并发布正式版
 #  与 stable 通道的区别：
 #    - 安装脚本用引导式的 install_panel.sh（自身不含版本号，装出的版本由
 #      官方服务端决定），而 stable 用带版本横幅的 installStable_12.sh
-#    - 版本一致性靠「两级比对 + 冒烟」验证，而不是脚本横幅提取
+#    - 版本号只取自官方 get_version API，与 release/VERSION 比对决定是否发布，
+#      不再实装 install_panel.sh 去反查版本
 #    - 发布 <版本> 与 latest 两个标签（stable 只发精确版本标签）
 #
 #  流程（每天自动跑一次，也可手动触发）：
 #    🔍 detect      get_version API 取最新版号，与 release/VERSION 比对；
-#                   一致 → 结束；不一致 → 进入下一步
-#    🧪 verify      裸容器 wget 拉取 install_panel.sh 并实装，
-#                   读面板实际版本与 API 比对；一致 → 开始冒烟测试
-#                   （启动面板、探活登录页）
+#                   一致 → 结束；不一致 → 进入构建
 #    🏗️ build       双架构构建 → 17 项健康检查 → 按 digest 推送
 #    🚀 publish     合并 digest → 打 repo:<版本> 与 repo:latest
 #    ✏️ writeback   把「实际推送的版本号」回写 release/VERSION，供下次比对
@@ -23,7 +21,8 @@ name: 📦 release：检查并发布正式版
 #    - release/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
 #    - 构建失败时 VERSION 不动，下次运行会自动重试同一版本
 #    - 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈
-#    - 任一步失败即中断，latest 不会指向坏镜像
+#    - 官方安装脚本若被改坏，构建阶段（安装宝塔 + 17 项健康检查）会失败中断，
+#      latest 不会指向坏镜像
 #
 #  🔑 所需仓库 Secrets：
 #    DOCKERHUB_USERNAME  DockerHub 用户名
@@ -45,14 +44,15 @@ concurrency:
 
 env:
   VERSION_FILE: release/VERSION
+  # 安装脚本地址不再在这里定义：release 通道没有 workflow_dispatch 输入可覆盖它，
+  # 写死会与 release/Dockerfile 的 ARG 默认值重复。由 Dockerfile 默认值提供即可。
   VERSION_API: https://www.bt.cn/api/panel/get_version
-  INSTALL_URL: https://download.bt.cn/install/install_panel.sh
   IMAGE_NAME: baota
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 🔍 第一级比对：get_version API vs release/VERSION。
-  # 一致 → 今天无事可做；不一致 → 输出新版本号，交给 verify 实装验证。
+  # 🔍 版本号比对：get_version API vs release/VERSION。
+  # 一致 → 今天无事可做；不一致 → 输出新版本号，交给 build 构建发布。
   # ---------------------------------------------------------------------------
   detect:
     name: 🔍 探测并与 release/VERSION 比对
@@ -100,7 +100,7 @@ jobs:
 
           if [ "$RESULT" = "new-version" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "发现新版本：${CURRENT} → ${UPSTREAM}，进入实装验证"
+            echo "发现新版本：${CURRENT} → ${UPSTREAM}，进入构建发布"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "仓库版本 ${CURRENT}，API 版本 ${UPSTREAM}（${RESULT}），无需发布"
@@ -129,100 +129,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 🧪 第二级比对 + 冒烟：裸 debian:12 实装 install_panel.sh。
-  # 引导脚本自身不含版本号，所以「API 版本是否可信」只有实装后读面板的
-  # 版本字段才能确认；一致后立刻在同一个容器里做冒烟（启动面板、探活登录页）。
-  # ---------------------------------------------------------------------------
-  verify:
-    name: 🧪 实装比对 + 🩺 冒烟
-    needs: detect
-    if: needs.detect.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      EXPECT_VERSION: ${{ needs.detect.outputs.version }}
-      CONTAINER: baota-release-verify
-    steps:
-      - name: 🐳 启动裸容器
-        run: docker run -d --name "$CONTAINER" debian:12 sleep infinity
-
-      - name: 🧪 实装 install_panel.sh
-        run: |
-          docker exec "$CONTAINER" bash -c '
-            set -e
-            rm -f /usr/sbin/policy-rc.d
-            apt-get update -qq
-            apt-get install -y -qq wget ca-certificates curl procps > /dev/null
-            cd /root
-            # 与官方一致的方式：wget -O install_panel.sh <URL> && bash install_panel.sh
-            wget -qO install_panel.sh https://download.bt.cn/install/install_panel.sh
-            bash -n install_panel.sh
-            bash install_panel.sh -y -P 8888 -u baota -p smoke0test --ssl-disable --safe-path smoke0test
-          ' || {
-            echo "::error::install_panel.sh 实装失败，日志尾部："
-            docker exec "$CONTAINER" tail -n 120 /tmp/btpanel-install.log 2>/dev/null || true
-            exit 1
-          }
-
-      - name: ⚖️ 实际版本与 API 版本比对
-        id: compare
-        run: |
-          V=$(docker exec "$CONTAINER" bash -c '
-            if [ -f /www/server/panel/class/common.py ]; then
-              grep -E "^version[[:space:]]*=" /www/server/panel/class/common.py \
-                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1
-            fi' || true)
-          if [ -z "$V" ]; then
-            V=$(docker exec "$CONTAINER" bash -c '
-              grep -oE "\"version\"[[:space:]]*:[[:space:]]*\"[0-9.]+\"" \
-                /www/server/panel/config/menu.json 2>/dev/null \
-                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1' || true)
-          fi
-          echo "面板实际版本：${V:-未知}　API 版本：${EXPECT_VERSION}"
-          [ -n "$V" ] || { echo "::error::无法读取面板实际版本"; exit 1; }
-          [ "$V" = "$EXPECT_VERSION" ] || {
-            echo "::error::实际版本 ${V} 与 API 版本 ${EXPECT_VERSION} 不一致，中止发布"
-            exit 1
-          }
-          echo "result=match" >> "$GITHUB_OUTPUT"
-
-      - name: 🩺 冒烟测试（启动面板、探活登录页）
-        run: |
-          docker exec "$CONTAINER" bash -c '/etc/init.d/bt start' || true
-          CODE=000
-          for i in $(seq 1 60); do
-            CODE=$(docker exec "$CONTAINER" curl -sk -o /dev/null -w '%{http_code}' \
-              --max-time 5 "http://127.0.0.1:8888/smoke0test/login" 2>/dev/null || echo 000)
-            [ "$CODE" = "200" ] && break
-            sleep 2
-          done
-          echo "登录页 HTTP 状态：${CODE}"
-          [ "$CODE" = "200" ] || {
-            echo "::error::冒烟失败：登录页未返回 200"
-            docker exec "$CONTAINER" bash -c 'tail -n 60 /tmp/btpanel-install.log 2>/dev/null; ps aux | grep -v grep | head -15' || true
-            exit 1
-          }
-          echo "✅ 冒烟通过"
-
-      - name: 🧹 清理容器
-        if: always()
-        run: docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-
-      - name: 📋 输出摘要
-        if: always()
-        run: |
-          if [ "${{ steps.compare.outputs.result }}" = "match" ]; then
-            echo "### 🧪🩺 实装版本与 API 一致（${EXPECT_VERSION}），冒烟通过" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### 🧪🩺 实装验证未通过，中止发布" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  # ---------------------------------------------------------------------------
   # 🏗️ 双架构构建。上下文是仓库根（两个通道共用 shared/build/ 下的构建脚本）。
   # ---------------------------------------------------------------------------
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
-    needs: [detect, verify]
+    needs: detect
     if: needs.detect.outputs.changed == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
@@ -259,7 +170,6 @@ jobs:
           load: true
           provenance: false
           build-args: |
-            INSTALL_URL=${{ env.INSTALL_URL }}
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
             IMAGE_VERSION=${{ needs.detect.outputs.version }}
           tags: baota-release:candidate
@@ -289,7 +199,6 @@ jobs:
             push=true,push-by-digest=true
           provenance: false
           build-args: |
-            INSTALL_URL=${{ env.INSTALL_URL }}
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
             IMAGE_VERSION=${{ needs.detect.outputs.version }}
           cache-from: type=gha,scope=release-${{ matrix.arch }}
