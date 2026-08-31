@@ -152,7 +152,7 @@ jobs:
             set -e
             rm -f /usr/sbin/policy-rc.d
             apt-get update -qq
-            apt-get install -y -qq wget ca-certificates curl > /dev/null
+            apt-get install -y -qq wget ca-certificates curl procps > /dev/null
             cd /root
             # 与官方一致的方式：wget -O install_panel.sh <URL> && bash install_panel.sh
             wget -qO install_panel.sh https://download.bt.cn/install/install_panel.sh
