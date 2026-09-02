@@ -153,7 +153,16 @@ audit_persist_coverage() {
 #  /run 不在持久化范围内，但镜像层可能残留构建期写入的状态
 # ==============================================================================
 prepare_runtime_dirs() {
-    rm -rf /run/* /run/lock/* 2> /dev/null || true
+    # 清理镜像层残留的构建期运行时文件。但 /run/baota 必须保留：
+    # 里面的降级标记（degraded / degraded-critical）由 init-mounts.sh 在本脚本
+    # 运行之前刚写入（/run 是 tmpfs，每次启动全新，不存在跨启动的残留），
+    # 是 healthcheck / boot-history / CI 判断「本次持久化是否完整」的唯一依据。
+    # 若连它一起清掉，最危险的「只读降级」就再也无法被观测到 ——
+    # healthcheck 恒 healthy、启动历史永不记录、CI 也测不出来。
+    for _r in /run/*; do
+        [ "${_r}" = "${RUNTIME_DIR}" ] || rm -rf "${_r}" 2> /dev/null || true
+    done
+    rm -rf /run/lock/* 2> /dev/null || true
     mkdir -p /run/lock /run/sshd /run/dbus "${RUNTIME_DIR}"
     rm -f /var/lib/systemd/random-seed 2> /dev/null || true
 
