@@ -326,9 +326,18 @@ jobs:
           esac
 
           # 「验证 = 推送」的硬证明：远端 manifest 的 config digest 必须等于本地 image ID。
-          # 用 raw JSON 提取，不依赖 buildx 的模板字段
-          REMOTE_CFG=$(docker buildx imagetools inspect --raw "${REPO}@${DIGEST}" \
-              | grep -oE '"digest":"sha256:[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
+          # 用 jq 提取 .config.digest，不能再用 grep 写死 "digest":"..."（冒号后无空格）：
+          # imagetools --raw 返回的 JSON 若带缩进 / 空格就永远匹配不到 → config 为空，
+          # 反而误报「远端与本地不一致」。GH 官方 runner 自带 jq
+          RAW_MANIFEST=$(docker buildx imagetools inspect --raw "${REPO}@${DIGEST}" 2>/dev/null || true)
+          [ -n "${RAW_MANIFEST}" ] \
+              || { echo "::error::无法读取远端 manifest（${REPO}@${DIGEST}）"; exit 1; }
+          REMOTE_CFG=$(printf '%s' "${RAW_MANIFEST}" \
+              | jq -r 'if type == "object" then (.config.digest // "") else "" end' 2>/dev/null || true)
+          if [ -z "${REMOTE_CFG}" ]; then
+              echo "::error::远端 manifest 未解析出 config digest（可能是 OCI index）"
+              exit 1
+          fi
           if [ "${REMOTE_CFG}" != "${LOCAL_ID}" ]; then
               echo "::error::远端镜像与本地验证的不一致（config ${REMOTE_CFG} != ${LOCAL_ID}）"
               exit 1
