@@ -392,8 +392,11 @@ reset_panel_patches() {
 #  和启动器、面板补丁同一个套路：镜像里直接写 /etc 会被用户的旧数据屏蔽。
 #
 #  更新策略刻意不同：
-#    journald  每次比对后重放 —— 它是纯基础设施配置，用户想覆盖请用
-#              /etc/systemd/journald.conf.d/20-*.conf（systemd 原生优先级）
+#    journald  每次比对后重放 —— 它是纯基础设施配置。镜像落盘名为
+#              /etc/systemd/journald.conf.d/baota-size.conf（不带数字前缀）。
+#              systemd 按文件名排序加载、排后面的覆盖同名键；用户想覆盖请另建
+#              一个排在 baota-size.conf 之后的 drop-in（如 zz-my.conf）——
+#              注意别用数字或大写字母开头，它们排在字母 b 之前，会被本文件盖掉
 #    logrotate 仅在缺失时生成 —— 直接改这个文件是用户的正当权利，不该被冲掉
 #
 #  两者都用 cmp 先比对，内容一致就不写，避免无谓的持久化层写入
@@ -403,7 +406,11 @@ setup_log_limits() {
     [ -d "${src}" ] || { warn "未找到 ${src}，跳过日志体积防线配置"; return 0; }
 
     # ① journald 体积上限
-    local jtgt=/etc/systemd/journald.conf.d/10-baota-size.conf
+    # 旧版曾命名为 10-baota-size.conf（/etc 已持久化，升级后的容器里可能残留）。
+    # 10- 排在本文件之前，残留只会重复加载同一份设置、不改变结果，但易误导排查，
+    # 这里顺手清掉（rm 一个不存在的文件是零成本操作）
+    rm -f /etc/systemd/journald.conf.d/10-baota-size.conf 2> /dev/null || true
+    local jtgt=/etc/systemd/journald.conf.d/baota-size.conf
     if [ -f "${src}/log/journald.conf" ]; then
         if ! cmp -s "${src}/log/journald.conf" "${jtgt}" 2> /dev/null; then
             mkdir -p /etc/systemd/journald.conf.d 2> /dev/null

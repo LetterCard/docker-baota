@@ -189,9 +189,9 @@ pass "/tmp 未被 tmpfs 化"
 
 # 日志体积防线：持久化让日志不再随容器销毁而消失，上限与轮转必须就位，
 # 否则日志会静默吃掉整个磁盘 —— 这类问题往往几个月后才暴露，只能靠门禁拦住
-inside test -f /etc/systemd/journald.conf.d/10-baota-size.conf \
+inside test -f /etc/systemd/journald.conf.d/baota-size.conf \
     || fail "journald 体积上限未就位：日志将退回 systemd 默认值（所在文件系统的 10%）"
-inside_sh 'grep -q "^SystemMaxUse=" /etc/systemd/journald.conf.d/10-baota-size.conf' \
+inside_sh 'grep -q "^SystemMaxUse=" /etc/systemd/journald.conf.d/baota-size.conf' \
     || fail "journald drop-in 未设置 SystemMaxUse，等于没有上限"
 pass "journald 体积上限已就位"
 

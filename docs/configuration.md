@@ -173,9 +173,11 @@ data/                         （单挂 ./data:/data，host 侧一目录）
 两道防线的配置源都在镜像的 `/baota/conf/log/`（不在持久化层内，不会被旧数据屏蔽），
 启动期重放。**更新策略刻意不同**：
 
-- **journald** 每次比对后重放 —— 它是纯基础设施配置。想改上限请另建
-  `/etc/systemd/journald.conf.d/20-你的名字.conf`：systemd 按文件名排序加载，
-  编号大的覆盖编号小的，这是 systemd 原生机制，不会被镜像覆盖
+- **journald** 每次比对后重放 —— 它是纯基础设施配置。镜像落盘名为
+  `/etc/systemd/journald.conf.d/baota-size.conf`（不带数字前缀）。想改上限请另建一个
+  文件名排在它之后的 drop-in（如 `zz-my.conf`）：systemd 按文件名排序加载、排后面的
+  覆盖同名键，这是原生机制，不会被镜像覆盖。
+  注意别用数字或大写字母开头 —— 它们排在字母 `b` 之前，你的值会被镜像盖掉
 - **logrotate** 仅在 `/etc/logrotate.d/baota-panel` 不存在时生成 ——
   直接改这个文件是正当需求，不会被冲掉。想恢复默认，删掉它重启容器即可
 

@@ -93,7 +93,7 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 持久化让日志不再随容器销毁而消失，journald 的编译默认值是「所在文件系统的 10%」，
 `data/` 挂在几 TB 存储池上时这个默认值等于没有上限。
 
-- **journald**：每次比对后重放。想覆盖请建 `/etc/systemd/journald.conf.d/20-*.conf`
+- **journald**：每次比对后重放。镜像落盘为 `/etc/systemd/journald.conf.d/baota-size.conf`；想覆盖请另建文件名排在它之后的 drop-in（如 `zz-*.conf`）
   （systemd 按文件名排序加载，编号大的覆盖小的）
 - **logrotate**：仅在 `/etc/logrotate.d/baota-panel` 不存在时生成。
   直接改这个文件是用户的正当权利
