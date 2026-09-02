@@ -358,9 +358,22 @@ inside test -L /usr/local/bin/baota-backup \
 inside baota-backup --list >/dev/null 2>&1 \
     || fail "baota-backup --list 执行失败"
 
-# || true：备份失败时让下面 [ -n ] 给出明确诊断，而不是被 set -e 静默带崩
-BACKUP_PATH=$(inside baota-backup --quiet 2>/dev/null | tail -1 || true)
-[ -n "${BACKUP_PATH}" ] || fail "baota-backup 未输出备份路径"
+# 跑一次完整备份，把完整输出（stdout + stderr）保留到本地文件
+# —— verify_archive 缺关键文件时 die 走 stderr，之前的 `2>/dev/null` 写法
+# 把这条关键诊断吞掉，错误只剩"备份包为空"的黑盒。
+# 现在失败时把整个输出 dump 给 GH 日志，下次 verify 失败能立刻看到缺什么
+if ! inside baota-backup >/tmp/baota-backup.log 2>&1; then
+    echo "----- baota-backup 完整输出 -----"
+    cat /tmp/baota-backup.log
+    echo "----- 输出结束 -----"
+    fail "baota-backup 执行失败（见上方输出）"
+fi
+
+# 从持久化层取最新备份文件 —— 不再解析 baota-backup 的 stdout。
+# 之前用 tail -1 提取路径的写法，在 verify 失败时会把 verify 的
+# echo 行（"✅ 含 xxx"）误当路径，让错误链条完全错乱。
+BACKUP_PATH=$(inside_sh "ls -1t /data/www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
+[ -n "${BACKUP_PATH}" ] || fail "未找到备份文件（baota-backup 报告成功但持久化层没产物）"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
 
 # 自包含检查：包里绝不能出现 www/backup 下的产物，否则下次备份体积翻倍
