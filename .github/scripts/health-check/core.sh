@@ -301,11 +301,16 @@ inside_sh 'echo persist > /etc/_persist_marker'
 inside_sh 'echo persist > /www/_persist_marker'
 inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_marker'
 inside_sh 'echo persist > /www/wwwroot/_persist_marker'
+# 落盘路径语义（容易搞混，写清楚再检查）：
+#   /etc /var      系统层 overlay，upper 在 /data/system/<dir>
+#   /www           数据层 overlay，upper 在 /data/www/www —— www 是 PERSIST_DATA_DIRS
+#                  的一员，upper = PERSIST_DATA_ROOT/<dir>，比直觉多一层 /www
+#   /www/wwwroot   直通 bind，源就是 /data/www/wwwroot（与 overlay upper 平级）
 inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f /data/www/_persist_marker            || fail "/www 写入未落盘"
+inside test -f /data/www/www/_persist_marker               || fail "/www 写入未落盘（overlay upper 应为 /data/www/www）"
 inside test -f /data/www/wwwroot/_persist_marker    || fail "/www/wwwroot 写入未落到 /data/www/wwwroot"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入已落到 /data/www 与 /data/system/<目录>"
+pass "写入已落到 /data/www/www 与 /data/system/<目录>"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \

@@ -131,10 +131,15 @@ step "A3) 混合挂载下写入落点正确"
 inside_sh 'echo mix > /etc/_mix_marker'
 inside_sh 'echo mix > /www/_mix_marker'
 inside_sh 'echo mix > /www/wwwroot/_mix_marker'
+# 落盘路径语义：
+#   /etc        系统层 overlay，upper 在 system/etc/
+#   /www        数据层 overlay，upper 在 data/www/（www 是 PERSIST_DATA_DIRS 的一员，
+#               upper = 数据层根/<dir>，比直觉多一层）—— 不是 data/ 根下
+#   /www/wwwroot 直通 bind，源就是 data/wwwroot/（与 overlay upper 平级）
 [ -f "${WORK_ROOT}/system/etc/_mix_marker" ]   || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}/data/_mix_marker" ]         || fail "/www 写入未落到数据层 data/"
+[ -f "${WORK_ROOT}/data/www/_mix_marker" ]     || fail "/www 写入未落到数据层 upper（data/www/）"
 [ -f "${WORK_ROOT}/data/wwwroot/_mix_marker" ] || fail "/www/wwwroot 写入未落到直通目录 data/wwwroot/"
-pass "写入分别落到 system/ 与 data/"
+pass "写入分别落到 system/、data/www/（overlay upper）与 data/wwwroot/（直通）"
 
 # shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
 for t in $PASSTHROUGH_DIRS; do
