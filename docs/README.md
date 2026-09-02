@@ -33,9 +33,9 @@ docker compose logs -f baota  # 首次登录信息在这里
 
 ## 三个必须先知道的约定
 
-1. **`data/` 一个目录保住全部数据。** 面板在 `data/www/`（对应容器 `/www`），站点在
-   `data/wwwroot/`（对应 `/www/wwwroot`），系统层 `data/system/` 收起 `etc usr var root opt home srv` 的
-   overlay 上层与项目元数据。混合模式会把系统层拆到 `system/` 卷里（见[编排配置详解](configuration.md)）。
+1. **`data/` 一个目录保住全部数据。** `data/www/` 就是容器 `/www` 的持久化层 ——
+   站点在 `data/www/wwwroot/`、备份在 `data/www/backup/`；系统层 `data/system/` 收起
+   `etc usr var root opt home srv` 的 overlay 上层与项目元数据（见[编排配置详解](configuration.md)）。
 2. **不要在面板里点「更新」。** 面板版本由镜像决定，面板内更新会把新版文件
    写进持久化层、永久屏蔽镜像层。镜像升级才是干净的升级路径（见[升级与迁移](upgrade.md)）。
 3. **口令写在 compose 等于公开。** 镜像里没有任何固定口令，首次启动随机生成并
@@ -49,6 +49,6 @@ docker compose logs -f baota  # 首次登录信息在这里
 |---|---|
 | **持久化层 / upper** | 数据层 `/data/<目录>` 或系统层 `/data/system/<目录>`，容器销毁不丢的那部分。只记录「你新建或改过的文件」 |
 | **镜像层 / lower** | 镜像自带的同名目录。换镜像即更新，你从没动过的文件自动跟着变 |
-| **直通挂载** | 少数目录不走 overlay，直接 bind 到宿主机同名目录（站点、备份、MySQL 数据） |
+| **持久化根（数据层）** | `/www` 是一层 overlay，upper 在 `data/www`（站点、备份、MySQL 数据都在里面） |
 | **通道** | stable（稳定线 12.x，每周跟进）与 release（正式版最新，每天跟进） |
 | **降级** | 持久化没挂上或挂成只读。容器照常启动，但**写入会静默丢失**，健康检查会报 unhealthy |

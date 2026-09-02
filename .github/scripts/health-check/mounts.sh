@@ -33,11 +33,6 @@ PERSIST_DATA_DIRS=$(read_default PERSIST_DATA_DIRS)
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_DATA_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_DIRS"; exit 1; }
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
-PASSTHROUGH_DIRS=$(read_default PASSTHROUGH_DIRS)
-# 两层「根」也读真源：直通目录的宿主机侧路径由「数据层根 + 容器内路径去掉 /www」拼出，
-# 从真源派生而不是硬写 /data/www…，以后挪根不会再漏改
-PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
-[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
 
 WORK_ROOT=$(mktemp -d)
 CONTAINER="baota-mounts-$$"
@@ -145,21 +140,14 @@ inside_sh 'echo mix > /etc/_mix_marker'
 inside_sh 'echo mix > /www/_mix_marker'
 inside_sh 'echo mix > /www/wwwroot/_mix_marker'
 # 落盘路径语义：
-#   /etc        系统层 overlay，upper 在 system/etc/
-#   /www        数据层 overlay，upper 在 data/www/ —— 数据层根挂在 data/ 上，
-#               唯一成员 www 的 upper 直接就是 data/www/，与容器内的 /www 对齐
-#   /www/wwwroot 直通 bind，源就是 data/wwwroot/（与 overlay upper 平级）
-[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]   || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}/data/www/_mix_marker" ]     || fail "/www 写入未落到数据层 upper（data/www/）"
-[ -f "${WORK_ROOT}/data/wwwroot/_mix_marker" ] || fail "/www/wwwroot 写入未落到直通目录 data/wwwroot/"
-pass "写入分别落到 system/、data/www/（overlay upper）与 data/wwwroot/（直通）"
-
-# shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
-for t in $PASSTHROUGH_DIRS; do
-    inside_sh "grep -q ' /www${t#/www} ' /proc/mounts" \
-        || fail "直通目录未挂载：${t}（宿主机侧应为 ${PERSIST_DATA_ROOT}${t#/www}）"
-done
-pass "直通目录已挂载：${PASSTHROUGH_DIRS}"
+#   /etc           系统层 overlay，upper 在 system/etc/
+#   /www           数据层 overlay，upper 在 data/www/，与容器内的 /www 对齐
+#   /www/wwwroot   没有独立直通目录，它属于 /www 这一层 overlay，
+#                  落点就是 data/www/wwwroot/（data 挂在 data/ 上）
+[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]         || fail "/etc 写入未落到系统层 system/etc/"
+[ -f "${WORK_ROOT}/data/www/_mix_marker" ]           || fail "/www 写入未落到数据层 upper（data/www/）"
+[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]   || fail "/www/wwwroot 写入未落到 data/www/wwwroot/"
+pass "写入分别落到 system/etc/ 与 data/www/（含 wwwroot）"
 
 step "A4) 销毁容器后重建，数据不丢"
 docker rm -f "$CONTAINER" >/dev/null

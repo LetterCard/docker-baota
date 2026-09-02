@@ -15,7 +15,7 @@
 #      3. 备份落在 www/backup 下却没排除自身，下一次备份把它又装进去
 #
 #  用法：
-#    baota-backup                 在 /data/backup/manual 下生成一份全量备份
+#    baota-backup                 在 /www/backup/manual（宿主 data/www/backup/manual）生成一份全量备份
 #    baota-backup --list          只打印各持久化目录的体积分布，不打包
 #    baota-backup --verify <包>    校验备份包是否完整
 #    baota-backup --stdout        把 tar 流写到标准输出（供宿主机重定向落盘）
@@ -50,31 +50,28 @@ PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
-# 备份产物目录。落在数据层的直通备份目录里，宿主机直接从 data/backup/manual 取走即可
-OUTPUT_DIR="${PERSIST_DATA_ROOT}/backup/manual"
+# 备份产物目录：写在容器内的 /www/backup/manual（/www 是 www 这一层 overlay，
+# 于是落到 upper 的 data/www/backup/manual，宿主机直接从那取走即可）
+OUTPUT_DIR='/www/backup/manual'
 NAME_PREFIX='baota-backup'
 
-# 打包时排除的路径（相对 tar 归档根 = PERSIST_DATA_ROOT 或 PERSIST_SYSTEM_ROOT）：
-#   .baota             项目元数据：overlay 工作目录、并发锁、版本记录、启动历史
-#                      启动时自动重建，跟着备份走只会带来陈旧状态
-#                      （数据层在 PERSIST_DATA_ROOT/.baota，系统层在 PERSIST_SYSTEM_ROOT/.baota，
-#                       两个都会被 --exclude='.baota' 一并排除）
-#   www/.baota         历史遗留：早期版本可能写到 www 子树里的 .baota；现在统一在
-#                      PERSIST_DATA_ROOT/.baota，但保险排除一次（与上面 .baota 互补）
-#   backup/auto        升级前自动快照（entrypoint take_snapshot 写到 PERSIST_DATA_ROOT/backup/auto，
-#                      不再是 www/backup/auto —— 整层归档后归档根变了）。不排除会把它打进本次
-#                      备份、下次再打进来，体积逐次翻倍；它只是升级时的临时回滚点
-#   backup/manual      本脚本自己的产物。不排除会自包含
-#   backup/database    面板「数据库」页产生的备份，同样会自包含
-#   backup/rsync       --rsync 的落点之一（也可以挂独立卷同步到容器外）。
-#                      不排除的话，同步目标会被下一次全量备份装进去，同样自包含
+# 打包时排除的路径。数据层 /www 是 www 这一层 overlay，归档成员是 www/，
+# rsync 又以 /data 为根同步（www/… 同理），所以快照/备份都带 www/ 前缀：
+#   .baota              项目元数据（数据层 /data/.baota、系统层 /data/system/.baota），
+#                       启动时自动重建，跟着备份走只会带来陈旧状态
+#   www/backup/auto     升级前自动快照（entrypoint take_snapshot 写到 /www/backup/auto，
+#                       = upper 的 data/www/backup/auto）。不排除会把它打进本次备份、
+#                       下次再打进来，体积逐次翻倍；它只是升级时的临时回滚点
+#   www/backup/manual   本脚本自己的产物。不排除会自包含
+#   www/backup/database 面板「数据库」页产生的备份，同样会自包含
+#   www/backup/rsync    --rsync 的落点之一（也可以挂独立卷同步到容器外）。
+#                       不排除的话，同步目标会被下一次全量备份装进去，同样自包含
 EXCLUDES=(
     '.baota'
-    'www/.baota'
-    'backup/auto'
-    'backup/manual'
-    'backup/database'
-    'backup/rsync'
+    'www/backup/auto'
+    'www/backup/manual'
+    'www/backup/database'
+    'www/backup/rsync'
 )
 
 # 由 EXCLUDES 派生 tar 参数。排除项只在这里写一次，全量打包与 --rsync 共用，
@@ -171,8 +168,8 @@ show_usage() {
 # ==============================================================================
 #  数据库热转储
 #
-#  /www/server/data（宿主机侧直通源 /data/server/data）在容器运行时被直接复制，
-#  InnoDB 文件可能处于半写状态，
+#  /www/server/data（都在 /www 这层 overlay 的 upper data/www/server/data）在容器
+#  运行时被直接复制，InnoDB 文件可能处于半写状态，
 #  恢复后表损坏。这里在打包前先做一次单事务转储，作为包内的「一致副本」：
 #  恢复时若发现 InnoDB 起不来，导入这份 SQL 即可。
 #
@@ -213,7 +210,7 @@ dump_databases() {
 # 生成包内说明：版本号、时间、目录清单，以及恢复步骤
 write_manifest() {
     local file="$1" image_ver db_note
-    local data_tops='' _d _t _rel _top
+    local data_tops='' _d
 
     image_ver=$(cat /baota/VERSION 2> /dev/null || echo unknown)
     if [ -f "${TMP_DIR}/databases.sql" ]; then
@@ -222,20 +219,10 @@ write_manifest() {
         db_note='未包含 MySQL 转储（容器停止或未安装 MySQL）'
     fi
 
-    # 包内数据层的顶层名字（恢复命令直接用它，写死 www 会在直通目录上漏解）：
-    # 数据层成员 + 每个 PASSTHROUGH_DIRS 去掉 /www 后的第一段（wwwroot / backup / server）
+    # 包内数据层的顶层名字（恢复命令直接用）：数据层成员目前只有 www
+    data_tops=''
     for _d in ${PERSIST_DATA_DIRS}; do
         data_tops="${data_tops} ${_d}"
-    done
-    for _t in ${PASSTHROUGH_DIRS}; do
-        _rel="${_t#/www}"
-        _rel="${_rel#/}"
-        [ -n "${_rel}" ] || continue
-        _top="${_rel%%/*}"
-        case " ${data_tops} " in
-            *" ${_top} "*) ;;
-            *) data_tops="${data_tops} ${_top}" ;;
-        esac
     done
     data_tops="${data_tops# }"
 
@@ -251,27 +238,16 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包内同时含「数据层 ${data_tops}」与「系统层 ${PERSIST_SYSTEM_DIRS}」，
-按你采用的挂载方式解包。数据层与系统层要分别解到各自的落点 ——
-它们在包里是平级的，直接整包解到一处会错位：
+包内数据层内容在 ${data_tops}/ 下（= 容器 /www 这一层 overlay，含 server/panel、
+wwwroot、backup），系统层内容在 etc/usr/var/root/opt/home/srv 下。
+数据层与系统层要解到各自的落点，直接整包解到一处会错位：
 
-【单挂模式 ./data:/data】
+【./data:/data（compose 默认）】
 1. 停止容器：docker compose down
-2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir data
+2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir -p data/system
 3. 解开备份：
-     mkdir -p data/system
      tar xzf $(basename "${2:-本包}") -C data        ${data_tops}            # 数据层
-     tar xzf $(basename "${2:-本包}") -C data/system ${PERSIST_SYSTEM_DIRS}  # 系统层
-4. 启动容器：docker compose up -d && docker compose logs -f baota
-
-【混合模式 ./data:/data + ./system:/data/system】
-1. 停止容器：docker compose down
-2. 移走现有数据：
-     mv data "data.bak-\$(date +%F)" && mkdir data
-     mv system "system.bak-\$(date +%F)" && mkdir system
-3. 解开备份：
-     tar xzf $(basename "${2:-本包}") -C data    ${data_tops}            # 数据层
-     tar xzf $(basename "${2:-本包}") -C system  ${PERSIST_SYSTEM_DIRS}  # 系统层
+     tar xzf $(basename "${2:-本包}") -C data/system etc usr var root opt home srv   # 系统层
 4. 启动容器：docker compose up -d && docker compose logs -f baota
 
 若 MySQL 起不来（热备份时 InnoDB 文件可能半写）：
@@ -303,23 +279,14 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 数据层必须逐个列出成员，不能图省事用 '.' 归档整个数据层根：
-    # 数据层根是 /data 本身，而系统层根 /data/system 是它的子目录，
-    # '.' 会把系统层一起装进来，与下面的 sys_members 重复 —— 体积翻倍，
-    # 恢复时还会出现 www/… 与 system/etc/… 两套路径打架。
-    # 显式列出两类成员，包内路径与「按根整层归档」时完全一致：
-    #   ① PERSIST_DATA_DIRS（www，overlay upper）
-    #   ② PASSTHROUGH_DIRS 的宿主机相对路径（wwwroot / backup / server/data，
-    #      与 www 平级）—— 站点 / 手动备份 / MySQL 数据，都是用户关键数据
+    # 数据层逐个列出成员，不能图省事用 '.' 归档整个数据层根（/data）：
+    # 系统层根 /data/system 是 /data 的子目录，'.' 会把系统层一起装进来，
+    # 与下面的 sys_members 重复 —— 体积翻倍、恢复时路径打架。
+    # 数据层唯一成员 www 是 /www 的整层 overlay upper，里面已含 server/panel、
+    # wwwroot、backup 等全部 /www 内容，归档它一个就够
     data_members=()
     for _d in ${PERSIST_DATA_DIRS}; do
         [ -d "${PERSIST_DATA_ROOT}/${_d}" ] && data_members+=( "${_d}" )
-    done
-    for _t in ${PASSTHROUGH_DIRS}; do
-        _rel="${_t#/www}"     # /www/wwwroot -> /wwwroot
-        _rel="${_rel#/}"      # /wwwroot     -> wwwroot
-        [ -n "${_rel}" ] || continue
-        [ -d "${PERSIST_DATA_ROOT}/${_rel}" ] && data_members+=( "${_rel}" )
     done
 
     sys_members=()
@@ -376,7 +343,7 @@ verify_archive() {
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
     # 关键成员检查：
-    #   wwwroot/             passthrough bind 源（站点目录宿主侧），恢复时必须还原
+    #   www/wwwroot/         站点（/www 这一层 overlay 的内容），恢复时必须还原
     #   www/server/panel/data 面板 overlay 数据层（配置 + 数据库），恢复时必须还原
     #   MANIFEST.txt         备份清单（由 backup.sh 自动生成）
     # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，

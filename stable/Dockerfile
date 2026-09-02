@@ -72,7 +72,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 #
 # 这里只放语言、时区与面板相关变量。
 # PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_DATA_DIRS / PERSIST_SYSTEM_DIRS /
-# PASSTHROUGH_DIRS / AUTO_BACKUP_KEEP 的
+# AUTO_BACKUP_KEEP 的
 # 唯一真源是 shared/conf/defaults.env，不在 ENV 里重复一份 ——
 # 两处定义迟早会漂移，而漂移的表现是「静默丢数据」。
 # 需要覆盖时，直接在 compose 的 environment 里传同名变量即可
@@ -137,7 +137,7 @@ EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 VOLUME ["/data"]
 
 # 两段式启动：
-#   阶段 0 /baota/init-mounts.sh 用静态 busybox 建好 overlay 持久化与直通挂载
+#   阶段 0 /baota/init-mounts.sh 用静态 busybox 建好 overlay 持久化
 #   阶段 1 /baota/entrypoint.sh  做首次初始化，最后 exec 到 CMD（systemd）
 ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
 CMD ["/usr/sbin/init"]

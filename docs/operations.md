@@ -42,7 +42,7 @@
 
 - 面板日志量不小，compose 里已把 Docker 日志限制为 3×10MB
 - 镜像内置 journald 上限与 logrotate 轮转，见[编排配置详解](configuration.md#日志体积防线)
-- MySQL 数据会持续增长，定期清理 `data/backup` 里过期的备份
+- MySQL 数据会持续增长，定期清理 `data/www/backup` 里过期的备份
 - 站点多时注意 `data/www/wwwlogs` 的体积，面板里可开启日志切割
 - 想看 `data/` 的体积分布：`docker exec baota baota-backup --list`
 

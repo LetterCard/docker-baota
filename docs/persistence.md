@@ -37,7 +37,7 @@ home   系统层：用户数据
 srv    系统层：服务数据
 ```
 
-### `/www` 的真实结构
+### `/www` 的真实结构（官方布局）
 
 ```
 /www/server/panel          面板本体、配置、面板数据库
@@ -48,34 +48,32 @@ srv    系统层：服务数据
 /www/wwwlogs               站点日志
 ```
 
-### `data/` 的结构
+### `data/` 的结构（与容器内一一对应）
 
-可写层按职责收进两个子目录，**数据层根就是 `data/` 本身**——overlay upper 落在
-`data/www/`，与容器内的 `/www` 一一对应，没有多余层级；站点/备份/MySQL 三个直通目录
-是它的平级兄弟；**系统层 `system/` 收起其余目录**，与容器内路径一一对应：
+compose 只挂一个 `data` 目录（`./data:/data`）。每个顶层目录各挂一层 overlay，
+upper 直接就是「数据层根/成员名」或「系统层根/成员名」：
 
 ```
-data/www/         ↔ 容器 /www（面板、证书；overlay upper）
-data/wwwroot/     ↔ 容器 /www/wwwroot（站点，直通）
-data/backup/      ↔ 容器 /www/backup（备份，直通）
-data/server/data/ ↔ 容器 /www/server/data（MySQL，直通）
-data/.baota/      ← 数据层工作目录（隐藏目录：并发锁 + overlay workdir）
-data/system/etc/  ↔ 容器 /etc
-data/system/usr/  ↔ 容器 /usr
-data/system/var/  ↔ 容器 /var
-data/system/root/ ↔ 容器 /root
-data/system/opt/  data/system/home/  data/system/srv/
-data/system/.baota/  ← 项目元数据（隐藏目录）
+data/                  ↔ 容器 /data
+├── www/               ↔ 容器 /www（数据层 overlay upper）
+│   ├── server/panel/     面板（增量）
+│   ├── wwwroot/          站点 data/www/wwwroot
+│   ├── backup/           备份 data/www/backup
+│   └── wwwlogs/          站点日志
+├── system/            ↔ 容器 /etc /usr /var …（系统层）
+│   ├── etc/  usr/  var/  root/  opt/  home/  srv/
+│   └── .baota/           项目元数据（隐藏目录）
+└── .baota/               数据层状态（锁 + overlay workdir，隐藏目录）
 ```
 
-站点文件就在 `data/wwwroot/`，MySQL 数据在 `data/server/data/`，
-备份在 `data/backup/`——和面板内布局完全一致，宿主机直接翻看管理。
-系统层目录（`data/system/...`）用户一般不用翻，跨机器迁移/备份时整体带走即可。
+站点就在 `data/www/wwwroot/`，MySQL 数据在 `data/www/server/data/`，
+备份在 `data/www/backup/` —— 和官方路径一致，宿主机直接翻看管理。
+系统层目录（`data/system/...`）用户一般不用翻，迁移 / 备份时整体带走即可。
 
-⚠️ 注意：可写层是「增量」不是「全量」——镜像里已有的文件（如面板本体
-`/www/server/panel`）不在 `data/` 里，只有你新建或改过的文件才会出现。
-**唯一例外是 `wwwroot`**：面板安装时它是空的，站点全是运行期建的，
-所以 `data/wwwroot/` 里的内容就是全部站点，可直接管理。
+⚠️ 注意：overlay 的 upper 是「增量」不是「全量」——镜像里已有的文件
+（如面板本体 `/www/server/panel` 的代码）不在 `data/` 里，只有你新建或改过的文件
+才会出现。而**站点、备份、MySQL 数据全是运行期新建的**，所以在
+`data/www/wwwroot`、`data/www/backup`、`data/www/server/data` 里能看到完整内容。
 
 ---
 
@@ -99,72 +97,19 @@ data/system/.baota/  ← 项目元数据（隐藏目录）
 ### overlay 分层
 
 ```
+/www          ←overlay→  upper = /data/www          （数据层）
+/etc /usr …   ←overlay→  upper = /data/system/<同名> （系统层）
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
-upperdir = /data/<目录>             （数据层：持久化层，容器销毁不丢）
-           或 /data/system/<目录>    （系统层：同上）
-workdir  = /data/.baota/work/<目录>.work
-           或 /data/system/.baota/work/<目录>.work  （内部工作目录，每次启动重建，须与 upper 同盘）
+workdir  = /data/.baota/work/<目录>.work  或  /data/system/.baota/work/<目录>.work
+           （内部工作目录，每次启动重建，须与 upper 同盘）
 ```
 
-容器内看到的仍然是原路径，读写完全无感知。`data/<目录>` 为空时等价于镜像内容，零复制、零膨胀。
+容器内看到的仍然是原路径，读写完全无感知。upper 为空时等价于镜像内容，零复制、零膨胀。
 
 挂载时显式带上 `index=off`，这不是调优而是**正确性要求**：内核文档明确，
 「用同一个 upper 挂载不同的 lower」只有在未启用 `index` / `metacopy` 时才合法——
 而本方案「换镜像升级」的本质就是同一个 upper 换 lower。
 不显式写死的话，是否安全就取决于发行版内核的编译默认值。
-
----
-
-## 📌 直通挂载：三个目录绕过 overlay
-
-`/www/wwwroot`（站点）、`/www/backup`（备份）、`/www/server/data`（宝塔 MySQL 默认数据目录）
-在 overlay 挂载**之后**再以 bind 方式直通到宿主机的同名目录：
-
-```
-/www/wwwroot      <-  /data/wwwroot
-/www/backup       <-  /data/backup
-/www/server/data  <-  /data/server/data
-```
-
-宿主机路径与容器内一一对应（`data/wwwroot/` 就是站点目录，与官方布局一致），
-也不需要任何数据迁移。为什么这三个不走 overlay：
-
-- **宿主机在线读写有内核保证**。内核文档：overlay 挂载期间直接改动底层 upper 属未定义行为；
-  用面板/SSH 管理文件没影响，但用飞牛文件管理、SMB 直接增删站点文件时，直通才有保证
-- **数据库落在普通 ext4**。`/www/server/data` 是宝塔 MySQL 的默认数据目录（面板源码大量引用），
-  数据库是容器里唯一有崩溃恢复语义的组件，不该放在不确定层上
-- **`chattr +i` 行为与真机一致**（面板用它锁 `.user.ini`）
-
-需要时在 compose 的 environment 里把 `PASSTHROUGH_DIRS` 置空即可整体关闭，
-这些目录会回落到 overlay。
-
-播种规则：仅当「镜像内非空」且「宿主机为空」时搬运一次。
-实测镜像里 `/www/wwwroot` 为空（无需播种），`/www/backup` 有 `database/` 与 `site/`
-两个空目录（需要播种），`/www/server/data` 在装 MySQL 前根本不存在。
-播种被打断时会在目标目录留下 `.baota-seeding` 标记，下次启动自动清理重来。
-
-### 为什么 `/www/server/panel/data` 不在直通列表里
-
-它装着面板配置与面板数据库（SQLite），看起来是最该被精确保护的东西，
-**但仍然让它在 overlay 上更好**，理由是：
-
-- overlay 的核心保证是「你没动过的文件，升级后自动用新镜像的版本」。
-  `panel/data` 里除了你的数据，还有镜像自带的默认配置。一旦直通，宿主机目录
-  会把镜像里的同名内容**整个遮蔽**，新版镜像新增或修正的默认配置文件
-  就再也进不来了 —— 这条保证直接失效
-- 反过来看，你的数据在 overlay 上一样安全：改动过的文件永远以你为准
-- SQLite 在 overlay 上工作正常（文件锁与 WAL 都作用在 upper 的真实文件上）。
-  它和 MySQL 不同：MySQL 有崩溃恢复语义，才需要落在普通 ext4 上
-
-如果你更看重「备份就是复制目录、不必依赖 `tar --xattrs`」，可以自己加进去：
-
-```yaml
-environment:
-  PASSTHROUGH_DIRS: "/www/wwwroot /www/backup /www/server/data /www/server/panel/data"
-```
-
-首次启动时会自动把镜像里的内容播种过去，数据不会丢；
-代价就是上面第一条 —— 面板默认配置不再随镜像升级。
 
 ---
 
@@ -220,8 +165,7 @@ environment:
 此外，任何持久化失败 / 只读降级都会写入 `/run/baota/degraded` 标记；
 关键目录（`etc`/`var`/`www`）出问题额外写 `/run/baota/degraded-critical`。
 这两个标记是 healthcheck 的第一段判据，会让容器直接显示 unhealthy，
-**改告警文案不会影响门禁**。降级记录同时追加到 `data/system/.baota/boot-history.log`
-（单挂模式在 `data/system/.baota/`，混合模式在 `system/.baota/`），
+**改告警文案不会影响门禁**。降级记录同时追加到 `data/system/.baota/boot-history.log`，
 便于事后回答「从哪次启动开始不对的」。
 
 ---
@@ -249,13 +193,13 @@ overlay 把「删除」和「替换」记在持久化层里，形式有两种：
 
 ## ⛔ 硬约束
 
-**持久化根（数据层 `/data`、系统层 `/data/system`）必须落在宿主机的 ext4 / btrfs / xfs 上。**
+**持久化根（`data/`，含数据层 `data/www` 与系统层 `data/system`）必须落在宿主机的
+ext4 / btrfs / xfs 上。**
 
 放到 SMB / NFS 网络共享、exFAT / NTFS 移动盘、或 macOS / Windows 的宿主机目录上，
 overlay 会「挂载成功但降级为只读」，之后所有写入静默失败。容器启动时会实测写入并明确告警。
 
 另外 overlay 的 upperdir 不能位于 overlay 之上，所以持久化根不能放在容器可写层里——
-必须用 bind mount（**混合模式用单独的 `./system` 目录承载系统层**，与数据层分开管理，
-但同样要落在 ext4 / btrfs / xfs 上，避免用户误把整份数据挂到坏文件系统）。
+必须用 bind mount 或 Docker 卷挂进来。
 
 最后一条：容器必须 `privileged`。要 mount overlay、要跑 systemd，缺一不可。

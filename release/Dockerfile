@@ -92,7 +92,7 @@ EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 VOLUME ["/data"]
 
 # 两段式启动：
-#   阶段 0 /baota/init-mounts.sh 用静态 busybox 建好 overlay 持久化与直通挂载
+#   阶段 0 /baota/init-mounts.sh 用静态 busybox 建好 overlay 持久化
 #   阶段 1 /baota/entrypoint.sh  做首次初始化，最后 exec 到 CMD（systemd）
 ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
 CMD ["/usr/sbin/init"]

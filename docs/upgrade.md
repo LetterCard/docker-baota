@@ -23,35 +23,36 @@ docker compose logs -f baota
 （语义见[持久化原理](persistence.md#为什么换镜像后数据不会丢)）。
 
 **自动快照**：容器检测到镜像版本变化时，会在启动阶段（此时面板和数据库尚未拉起，
-数据处于静止态）自动把面板配置 `/www/server/panel/data` 复制到 `data/backup/auto/`，
+数据处于静止态）自动把面板配置 `/www/server/panel/data` 复制到 `data/www/backup/auto/`，
 默认保留最近 3 份。降级同样会快照，并输出醒目告警——宝塔不提供降级迁移，
 旧版代码读取新版数据库可能出现功能异常，但容器**不会拒绝启动**：出故障时能起来比什么都重要。
 
 快照是**一份完整目录**（不是压缩包），用 `cp -a` 生成：比打包快，且 `cp -a` 天然保留
 扩展属性，回滚时反向复制回去即可。
 
-两种挂载模式的宿主机路径**完全一致**（数据层根都是容器内的 `/data`，对应宿主机 `data/`）：
+宿主机路径与容器内路径一一对应（`/www` 这一层 overlay 的 upper 就是 `data/www/`）：
 
 ```bash
 # 1) 看看有哪些快照
-ls -1t data/backup/auto/
+ls -1t data/www/backup/auto/
 
 # 2) 必须先停容器：运行期间直接改 overlay 的 upper 属未定义行为
 docker compose down
 
 # 3) 替换 —— 面板配置的 upper 就在 data/www/server/panel/data
 rm -rf data/www/server/panel/data
-cp -a data/backup/auto/baota-<版本>-<时间>  data/www/server/panel/data
+cp -a data/www/backup/auto/baota-<版本>-<时间>  data/www/server/panel/data
 
 docker compose up -d
 ```
 
-> **路径为什么能对齐**：数据层根就是容器内的 `/data`，`/www` 的 overlay upper
-> 直接落在 `/data/www`，与容器内的 `/www` 一一对应 —— 宿主机上的
-> `data/www/server/panel/data` 就是容器里的 `/www/server/panel/data`，没有多余层级。
+> **路径为什么能对齐**：`/www` 的 overlay upper 直接落在 `data/www/`，与容器内的
+> `/www` 一一对应 —— 宿主机上的 `data/www/server/panel/data` 就是容器里的
+> `/www/server/panel/data`，没有多余层级。
 >
-> 升级快照只覆盖面板配置，**不覆盖站点与数据库** —— 它们走直通目录，
-> 换镜像时不会被写到，另有更好的备份手段（面板内备份、`baota-backup`）。
+> 升级快照只覆盖面板配置，**不覆盖站点与数据库** —— 它们虽是 `/www` 这一层
+> overlay 的内容，但镜像里这些目录为空，换镜像（换 lower）动不到它们；
+> 另有更好的备份手段（面板内备份、`baota-backup`）。
 
 ### ✅ 升级后验证
 

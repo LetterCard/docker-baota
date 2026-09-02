@@ -36,7 +36,7 @@ baota-docker/
 │   │   ├── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
 │   │   └── log/               日志体积防线的配置源
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
-│       ├── init-mounts.sh     阶段 0：并发锁 + overlay 持久化 + 直通挂载
+│       ├── init-mounts.sh     阶段 0：并发锁 + overlay 持久化
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
 │       ├── patch-panel.sh     面板定制补丁（构建期执行、运行期每次启动复位）
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
@@ -54,7 +54,7 @@ baota-docker/
 - **构建上下文是仓库根**：`docker build -f stable/Dockerfile .`
 - **运行期脚本一律放 `/baota`**。它不属于任何持久化目录，永远跟随当前镜像。
   旧版放 `/opt/baota`，而 `/opt` 是持久化目录——还原备份时旧脚本副本会反过来屏蔽新镜像
-- **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PASSTHROUGH_DIRS` /
+- **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` /
   `CRITICAL_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
   `health-check/` 下的三套检查脚本也从该文件解析，不再硬编码一份
@@ -119,7 +119,7 @@ CI 专用的 `.github/scripts/health-check/` 目录随 `.github` 整体被 `.doc
 ### ① `health-check/core.sh` —— 功能检查，两阶段共 19 项
 
 **A 阶段（全新数据卷）**
-systemd 就绪 / overlay 挂载数与可写性 / 直通目录挂载 / `/tmp` 未被 tmpfs 化 /
+systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
 journald 上限 / logrotate 配置 / 生产 healthcheck 脚本 / 关键文件路径 / pyenv 模块 /
 面板与任务双进程 / 安全入口 / 版本号 / 首启随机凭据 / 写入落盘 / 开机自启 /
 禁用更新补丁 / 防火墙关闭 / SSH 与 bt 命令 / 备份工具

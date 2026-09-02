@@ -25,12 +25,13 @@ allowed-tools: Read,Bash,Grep,Glob
 
 ```
 /data（宿主机 data/，bind mount）
- ├── etc usr var www root opt home srv   ← overlay 的 upperdir，只存增量
- │     lower = 镜像内同名目录（换镜像即更新）
- │     upper = /data/<目录>（容器销毁不丢）
- └── .baota/                             ← 元数据：work/ lock image-version boot-history.log
-
-直通挂载（bind，绕过 overlay）：/www/wwwroot  /www/backup  /www/server/data
+ ├── www/          ← 容器 /www 的整层 overlay upper（lower=镜像 /www）
+ │    ├── server/panel/   面板（增量）
+ │    ├── wwwroot/        站点 data/www/wwwroot
+ │    └── backup/         备份 data/www/backup
+ ├── system/       ← 系统层根：etc usr var root opt home srv 的 upperdir
+ │    └── .baota/  ← 元数据：work/ lock image-version boot-history.log
+ └── .baota/       ← 数据层状态（lock + overlay workdir）
 
 启动链：/busybox sh /baota/init-mounts.sh  →  bash /baota/entrypoint.sh  →  systemd
 ```
@@ -40,7 +41,7 @@ allowed-tools: Read,Bash,Grep,Glob
 ## 🔴 红线（违反会静默丢数据或让坏镜像上线）
 
 1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
-   `PASSTHROUGH_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`。
+   `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`。
    不要往 Dockerfile `ENV` 或 CI 脚本里再抄一份 —— 漂移的表现是静默丢数据。
 2. **运行期脚本必须放 `/baota`**，不能放 `/opt`、`/etc`、`/var` 等持久化目录。
    放进持久化目录 = 用户还原备份时旧脚本反过来屏蔽新镜像。
@@ -62,7 +63,7 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
 | `shared/build/panel.sh` | 官方脚本安装宝塔 + 防火墙复位 + 清 swap + 账号链路预热 |
 | `shared/build/services.sh` | 面板补丁、systemd 复位、启动器副本、目录基线、删构建脚本 |
-| `shared/scripts/init-mounts.sh` | 阶段 0：并发锁 → overlay → 直通 → 交棒 |
+| `shared/scripts/init-mounts.sh` | 阶段 0：并发锁 → overlay 持久化 → 交棒 |
 | `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏 → 快照 → 补丁复位 → 首启初始化 → exec systemd |
 | `shared/scripts/patch-panel.sh` | 禁用面板内更新（幂等，每次启动重放） |
 | `shared/scripts/healthcheck.sh` | 三段判据：降级标记 / 磁盘水位 / 面板端口 |

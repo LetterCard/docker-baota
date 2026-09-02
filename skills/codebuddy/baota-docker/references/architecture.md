@@ -23,33 +23,27 @@
 清理与挂载都在 `flock` 独占锁的保护下，同一时刻不可能有另一个实例在用。
 锁由内核持有、容器死亡自动释放，非正常退出不会留下死锁。
 
-## 直通挂载的三个目录
+## `/www` 是整层 overlay（没有直通）
 
-`/www/wwwroot`（站点）、`/www/backup`（备份）、`/www/server/data`（MySQL 数据）
-在 overlay 之后 bind 到宿主机同名目录：
+`/www` 整体是一层 overlay，upper 直接是 `data/www/`，宿主机目录与容器内
+一一对应：`data/www/server/panel`、`data/www/wwwroot`（站点）、
+`data/www/backup`（备份）、`data/www/server/data`（MySQL）。
 
-- 内核文档：overlay 挂载期间直接改动 upper 属未定义行为。用户从宿主机
-  （SMB / 文件管理 App）增删站点文件时，直通才有保证
-- 数据库是容器里唯一有崩溃恢复语义的组件，不该放在不确定层上
-- `chattr +i` 在直通目录上行为与真机一致（面板用它锁 `.user.ini`）
-
-顺序要求：必须先挂完 `/www` 的 overlay，再 bind 子目录，反过来会被覆盖。
-
-播种：仅当「镜像内非空」且「宿主机为空」时搬运一次；被打断时留下
-`.baota-seeding` 标记，下次启动清理重来。
+没有为站点 / 备份 / MySQL 做独立的直通 bind：它们虽在 overlay upper 里，
+但镜像中这些目录基本为空（纯运行期数据），换镜像（换 lower）不会动到它们。
+宿主若要直接改站点文件，写 `data/www/wwwroot` 即可 —— 数据在磁盘上仍是
+普通目录，风险点只在「删除镜像自带文件」这类需要 whiteout 的操作上，
+对纯运行期目录无影响。
 
 ## 启动链与阶段划分
 
 ```
 ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
   └─ 0. flock 独占锁
-  └─ 1. 旧版结构迁移（/data/<dir>/upper → /data/<dir>）
-  └─ 2. 暂存 Docker 注入的 /etc/{hosts,resolv.conf,hostname}
-  └─ 3. 逐个 mount overlay（index=off）+ 可写性实测
-  └─ 4. 直通挂载
-  └─ 5. 旧版 /opt/baota 遗留检查（只提示不删）
-  └─ 6. 还原 Docker 动态文件
-  └─ 7. exec bash /baota/entrypoint.sh
+  └─ 1. 暂存 Docker 注入的 /etc/{hosts,resolv.conf,hostname}
+  └─ 2. 逐个 mount overlay（index=off）+ 可写性实测（/www → data/www，系统层 → data/system/<dir>）
+  └─ 3. 还原 Docker 动态文件
+  └─ 4. exec bash /baota/entrypoint.sh
        └─ check_panel_files       面板被写坏时给明确指引
        └─ prepare_runtime_dirs    /run 复位，/var/run → /run
        └─ refresh_consistency     mtab / machine-id / 时区，变了才写
@@ -79,8 +73,9 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 
 快照在 entrypoint 里做是有意的：此刻 systemd 尚未拉起面板与数据库，数据处于静止态。
 
-只快照 `www/server/panel/data` 的理由：三个直通目录换镜像时被 bind 完全遮蔽，
-新镜像对它们没有任何写入路径。唯一「对不上」的是新版面板代码 + 旧版面板数据库（SQLite）。
+只快照 `www/server/panel/data` 的理由：站点 / MySQL / 备份虽是 /www 这层 overlay
+的内容，但镜像里它们为空，换镜像（换 lower）动不到；唯一「对不上」的是
+新版面板代码 + 旧版面板数据库（SQLite）。
 
 ## 启动器刷新（copy-up 陷阱）
 

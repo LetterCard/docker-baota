@@ -97,33 +97,19 @@ services:
       # PANEL_SAFE_PATH: ""         # 不写/留空 → 随机 8 位，见面板地址
       # ROOT_PASSWORD: ""           # 不写/留空 → 随机 12 位，见首次启动日志
 
-    # ---- 💾 持久化：两种挂载方式，二选一（默认①）----
-    # 持久化按职责拆两层：
-    #   数据层  data/www/       面板（overlay upper，对应容器内的 /www，没有多余层级）
-    #           data/wwwroot/   站点（直通，对应容器内的 /www/wwwroot）
-    #           data/backup/    面板备份（直通，对应 /www/backup）
-    #           data/server/    MySQL 数据（直通，对应 /www/server/data）
-    #   系统层  data/system/    etc usr var root opt home srv 的 overlay 上层
-    #   元数据  data/system/.baota/  overlay 工作目录、并发锁、版本记录、启动历史
-    # 各目录与容器内一一对应，备份/迁移命令两种模式通用。
+    # ---- 💾 持久化：只挂一个 data（./data:/data），目录与容器内一一对应 ----
+    #   data/www/        = 容器 /www 的持久化层（overlay upper）
+    #                      server/panel 面板、wwwroot 站点（data/www/wwwroot）、
+    #                      backup 备份、wwwlogs —— 都在里面，没有多余层级
+    #   data/system/     = etc usr var root opt home srv 的 overlay upper
+    #   data/.baota      = 数据层状态（锁 + overlay workdir，隐藏）
+    # 站点就在 data/www/wwwroot/，备份在 data/www/backup/，与官方路径一致。
     #
-    # ① 单挂（默认，最简单）：一个 data/ 保住全部数据
     #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
-    # ② 混合挂载（更稳）：数据层与系统层都用 bind（各一个目录，便于分开管理）
-    #    ./data 给站点/面板/备份，./system 给系统层 overlay 上层。
-    #    启用②：注释掉下面的 volumes 整块，取消「混合挂载」那段注释即可。
-    #    ⚠️ 无论哪种：放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」、写入静默失败；
-    #       容器启动时会实测一次并告警，看到告警立刻换位置。
+    #   ⚠️ 放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」、写入静默失败；
+    #      容器启动时会实测一次并告警，看到告警立刻换位置。
     volumes:
       - ./data:/data
-
-    # ② 混合挂载（取消注释即可，同时注释掉上面的 volumes 整块）：
-    #    数据层在 ./data（bind，飞牛文件管理可直接看到站点/面板/备份），
-    #    系统层在 ./system（bind，单独一个目录，便于和站点数据分开管理）。
-    #    系统层根 /data/system 是数据层根 /data 的子路径，Docker 按路径深度后挂覆盖先挂。
-    # volumes:
-    #   - ./data:/data
-    #   - ./system:/data/system
 
     # 用 Docker 自带的默认 bridge 网络，不额外创建项目专属网络：
     # 单容器部署没有容器间用名字互访的需求，少一层网络更干净。

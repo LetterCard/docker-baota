@@ -5,27 +5,34 @@
 
 ---
 
-## [未发布] — 数据层布局对齐 + 结构与可维护性重构
+## [未发布] — 持久化布局改为「/www 整层 overlay」+ 结构与可维护性重构
 
-### ⚠️ 数据层宿主机路径对齐（从旧镜像升级必读）
+### ⚠️ 持久化布局（官方路径对齐，全新部署请从空 data/ 开始）
 
-数据层根从 `/data/www` 上提为 `/data`：`/www` 的 overlay upper 直接落在
-`data/www/`（对应容器 `/www`），站点 / 备份 / MySQL 三个直通目录改为与它平级的
-`data/wwwroot/`、`data/backup/`、`data/server/data/` —— 宿主机目录与容器内路径
-一一对应，不再出现「www 套 www」的多余层级。
+`/www` 现在是**一整层 overlay**，upper 直接就是 `data/www/`：
 
-- **旧数据无需手动搬**：`init-mounts.sh` 检测到旧布局（`data/www/.baota` 存在）
-  会在启动时自动迁移并打日志；迁移用 `cp -a` 复制、校验后再删源，中断可重来
-- 混合挂载的第一处挂载从 `./data:/data/www` 改为 `./data:/data`
-  （系统层根 `/data/system` 是它的子路径，Docker 后挂覆盖先挂）
-- `baota-backup` 打包改为逐个列出数据层成员，不再整根归档 ——
-  否则会把嵌套在数据层里的系统层一起装进去（体积翻倍）；
-  `--rsync` 整层同步时自动排除嵌套的系统层
-- 备份恢复命令相应更新：数据层解到 `data/`、系统层解到 `data/system/`（单挂）
-  或 `system/`（混合），以各备份包内 MANIFEST.txt 为准
+```
+data/www/             = 容器 /www 的持久化层
+  ├─ server/panel/        面板（增量）
+  ├─ wwwroot/             站点 data/www/wwwroot
+  ├─ backup/              备份 data/www/backup
+  └─ wwwlogs/
+data/system/          = etc usr var root opt home srv 的 overlay upper
+data/.baota           = 数据层状态（锁 + overlay workdir）
+```
 
-以下为结构与可维护性重构部分（持久化方案、挂载顺序、启动链保持原样），
-重点是让项目能长期维护，并把「备份」从文档里的手工命令变成镜像内的工具。
+宿主机目录与容器内路径一一对应，站点就在 `data/www/wwwroot/`，不再有
+「www 套 www」或直通目录的平级碎片。compose 只挂一个 `./data:/data`。
+
+同时移除：
+- **直通挂载机制**（`PASSTHROUGH_DIRS` 与 bind 播种逻辑整个删除）——
+  `/www` 整体一层 overlay，站点 / 备份 / MySQL 都落在 `data/www/` 下
+- **旧数据自动迁移逻辑**（`migrate_old_layout` / `migrate_data_layout`）——
+  不做跨版本布局迁移；从旧版升级请按 docs/upgrade.md 手工迁移或全新起 data/
+- 系统层的 `data/system` 不再作为可拆分的「混合挂载」宣传
+
+> ⚠️ 已用旧布局（data/www/www 或直通式 data/wwwroot）跑过的 data/ 与本版不兼容，
+> 升级前请用旧版 `baota-backup` 先打一份完整备份，再按 docs/upgrade.md 恢复。
 
 ### ✨ 新增
 
@@ -38,10 +45,8 @@
   - 生成后自动自校验，并拒绝自包含的包
   - 附带 `--list`（体积分布）、`--verify`、`--stdout`、`--keep` 子命令
   - 容器运行中且能连上 MySQL 时，自动附加一份 `--single-transaction` 一致性转储
-- **启动报告归档**：持久化降级记录追加到 `data/.baota/boot-history.log`
+- **启动报告归档**：持久化降级记录追加到 `data/system/.baota/boot-history.log`
   （原来只写在 tmpfs 的 `/run`，重启就没了，事后无从追溯）
-- **直通目录播种自愈**：播种被打断时留下 `.baota-seeding` 标记，下次启动清理重来，
-  不再留下半份副本又被「非空」判定为已完成
 - **配置真源新增 `CRITICAL_DIRS`**：关键目录列表不再是代码里的硬编码
 - **`baota-backup --rsync <目录>` 增量同步**：`data/` 大了以后全量打包很慢，
   增量模式之后只传变化部分。用 `-aAX` 保留权限、ACL 与扩展属性，

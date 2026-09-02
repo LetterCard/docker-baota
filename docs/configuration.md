@@ -70,7 +70,6 @@
 | `PERSIST_DATA_DIRS` | `www` | 数据层需要 overlay 持久化的顶层目录 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（`www` 属于数据层，不在这里） |
 | `CRITICAL_DIRS` | `etc var www` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录 |
-| `PASSTHROUGH_DIRS` | `/www/wwwroot /www/backup /www/server/data` | 绕过 overlay 直通到宿主机的目录（都在数据层内），置空即整体关闭 |
 | `DISK_MIN_AVAIL_MB` | `1024` | 健康检查的磁盘告警线：数据层或系统层可用空间低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 同上：已用百分比达到此值即 unhealthy |
 | `AUTO_BACKUP_KEEP` | `3` | 升级 / 降级前自动快照的保留份数，`0` 关闭 |
@@ -89,32 +88,29 @@
 
 | 配置项 | 默认值 | 用途 | 如何修改 |
 |---|---|---|---|
-| `volumes`（单挂） | `./data:/data` | 一个 `data/` 保住全部数据：面板在 `data/www`、站点在 `data/wwwroot`、系统层在 `data/system` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
-| `volumes`（混合） | `./data:/data` + `./system:/data/system` | 数据层用 bind（可见、可 SMB）、系统层也用 bind（单独一个 `./system` 目录，便于和站点数据分开管理） | 见下 |
+| `volumes` | `./data:/data` | 一个 `data/` 保住全部数据：`/www` 的持久化在 `data/www/`（面板/站点/备份都在里面）、系统层在 `data/system/` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
 
-冒号**右侧的容器内路径（`/data`、`/data/system`）不要改**；左侧可以是相对路径（相对
+冒号**右侧的容器内路径（`/data`）不要改**；左侧可以是相对路径（相对
 compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在 ext4 / btrfs / xfs 上
 （飞牛存储池就是，直接可用）。原理详见[持久化原理](persistence.md)。
 
-两种挂载方式的容器内结构完全一致：
+宿主机的目录结构（与容器内路径一一对应）：
 
 ```
-data/                         （单挂 ./data:/data，host 侧一目录）
-├── www/                      ← 面板（overlay upper，对应容器内的 /www）
-├── wwwroot/                  ← 站点（直通，对应容器内的 /www/wwwroot）
-├── backup/                   ← 面板备份（直通，对应 /www/backup）
-├── server/data/              ← MySQL 数据（直通，对应 /www/server/data）
-├── .baota/                   ← 数据层工作目录（并发锁 + overlay workdir）
-└── system/                   ← etc usr var root opt home srv 的 overlay 上层
-    └── .baota/               ← 项目元数据（锁、版本记录、启动历史），两挂载模式都持久化
-
-# 混合模式（./data:/data  +  ./system:/data/system）：
-#   host 侧 ./data      → 容器 /data         （数据层根，bind，飞牛文件管理可直接看到站点/面板）
-#   host 侧 ./system    → 容器 /data/system  （系统层根；它是 /data 的子路径，后挂覆盖先挂）
+data/                         （./data:/data，host 侧一目录）
+├── www/                      ← 容器 /www 的 overlay upper
+│   ├── server/panel/             面板
+│   ├── wwwroot/                  ← 站点 data/www/wwwroot
+│   ├── backup/                   ← 备份 data/www/backup
+│   └── wwwlogs/
+├── system/                   ← etc usr var root opt home srv 的 overlay upper
+│   └── .baota/               ← 项目元数据（锁、版本记录、启动历史）
+└── .baota/                   ← 数据层状态（锁 + overlay workdir）
 ```
 
-`data/system/.baota/`（单挂时 `data/system/.baota/`）是项目元数据目录（隐藏），备份时用一条
-`--exclude='.baota'` 全部排除（`baota-backup` 已自动排除）：
+`data/system/.baota/` 是项目元数据目录（隐藏），备份时用一条
+`--exclude='.baota'` 全部排除（`baota-backup` 已自动排除）；`data/.baota/`
+是数据层状态（并发锁 + overlay workdir），同样被排除：
 
 | 文件/目录 | 用途 |
 |---|---|
@@ -126,7 +122,7 @@ data/                         （单挂 ./data:/data，host 侧一目录）
 ## 自动快照（升级前）
 
 容器发现镜像版本变化时，会在启动阶段（面板与数据库尚未拉起、数据处于静止态）
-自动把面板数据 `/www/server/panel/data` 打包到 `data/backup/auto/`，通常几十 MB，秒级完成。
+自动把面板数据 `/www/server/panel/data` 打包到 `data/www/backup/auto/`，通常几十 MB，秒级完成。
 
 | 环境变量 | 默认值 | 用途 |
 |---|---|---|
@@ -134,19 +130,20 @@ data/                         （单挂 ./data:/data，host 侧一目录）
 
 **为什么只快照这一个目录**（实测确证，见[持久化原理](persistence.md#为什么换镜像后数据不会丢)）：
 
-站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 是**直通挂载** ——
-换镜像时新镜像的内容被 bind mount 完全遮蔽，对它们不存在任何写入路径，动不到。
-会变的是 overlay 目录：面板代码与默认配置自动换成新版。于是升级后唯一「对不上」的地方就是
-**新版面板代码 + 旧版面板数据库**（SQLite，升级时可能做 schema 迁移）。快照它，升级失败就能
-回到「旧代码 + 旧库」的原始组合。
+站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 都在 `/www`
+这一层 overlay 里，但镜像自带的 `/www/wwwroot`、`/www/server/data`、`/www/backup`
+基本是空的 —— 站点 / MySQL / 备份都是运行期写进 upper 的，换镜像不会动到它们。
+会变的是面板代码与默认配置（在镜像 lower 层），自动换成新版。于是升级后唯一
+「对不上」的地方就是 **新版面板代码 + 旧版面板数据库**（SQLite，升级时可能做
+schema 迁移）。快照它，升级失败就能回到「旧代码 + 旧库」的原始组合。
 
 | 目录 | 换镜像时 | 需要快照吗 |
 |---|---|---|
-| `/www/server/panel/` 代码 | 来自新镜像，自动更新 | 不需要（换回旧镜像即可） |
-| `/www/server/panel/data/` | 保留旧版，**被新版代码读取** | **需要** ← 唯一风险点 |
-| `/www/wwwroot`（直通） | bind 遮蔽，完全不碰 | 不需要 |
-| `/www/server/data`（直通） | bind 遮蔽，完全不碰 | 不需要 |
-| `/www/backup`（直通） | bind 遮蔽，完全不碰 | 绝对不能（会自包含） |
+| `/www/server/panel/` 代码 | 来自新镜像 lower，自动更新 | 不需要（换回旧镜像即可） |
+| `/www/server/panel/data/` | 保留旧版（upper），**被新版代码读取** | **需要** ← 唯一风险点 |
+| `/www/wwwroot` | 镜像里为空，lower 更新不碰它 | 不需要 |
+| `/www/server/data` | 镜像里为空（装 MySQL 才有），不碰 | 不需要 |
+| `/www/backup` | 只存运行期产物，不碰 | 绝对不能（会自包含） |
 
 > 补充：上面说的「MySQL 数据不碰」有一个例外 —— 如果新镜像跨了 MySQL 大版本
 > （例如 5.7 → 8.0），MySQL 首次启动会就地升级数据文件，**该过程不可回退**。

@@ -50,7 +50,7 @@ docker exec -it baota bt 5         # 重置面板口令
 ## 😱 升级后面板功能异常
 
 先看日志里有没有「检测到镜像降级」。`data/system/.baota/image-version` 记录着上次启动的镜像版本，
-`data/backup/auto/` 里有升级前的面板数据快照。
+`data/www/backup/auto/` 里有升级前的面板数据快照。
 按[恢复](backup-restore.md#恢复)流程用升级前的完整备份包回滚最干净。
 
 ## 🗑️ 想彻底重来

@@ -1,9 +1,9 @@
 # 💾 备份与恢复
 
-所有状态都在持久化层里：单挂模式在一个 `data/` 目录（数据层就铺在 `data/` 下 ——
-`data/www` 面板、`data/wwwroot` 站点、`data/backup` 备份…，系统层在 `data/system`），
-混合模式拆成 `data/`（数据层）与 `system/`（系统层）。备份工具 `baota-backup` 自动兼容两种挂载方式，
-且包内不含宿主机绝对路径，所以恢复到任何机器、任何挂载方式都不受影响。
+所有状态都在持久化层里：一个 `data/` 目录（compose 默认 `./data:/data`）——
+`/www` 的持久化在 `data/www/`（面板 / 站点 / 备份 / MySQL 都在里面），系统层在 `data/system/`。
+备份工具 `baota-backup` 直接打整份 `data/`，包内不含宿主机绝对路径，
+所以恢复到任何机器、任何目录都不受影响。
 
 ---
 
@@ -20,8 +20,8 @@
 
 > **全量打包 vs `--rsync`**：两者保留的元数据等价（都保 xattrs），恢复效果也一样。
 > 区别在效率与形态 —— 全量打包每次产出一份自包含的 `.tgz`，可离线归档；
-> `--rsync` 之后每次只传变化部分，快得多，但目标里**始终只有最新一份**
-> （它是镜像同步，不是版本化备份）。要留历史请用 NAS 快照，或定期把同步目标归档。
+> `--rsync` 之后每次只传变化部分，快得多，但目标里**始终只有最新一份**。
+> 要留历史请用 NAS 快照，或定期把同步目标归档。
 
 建议：**日常靠面板备份救急，动镜像、动机器之前一定打一份完整 `data/` 备份。**
 
@@ -39,7 +39,7 @@
 镜像内置，软链到 `/usr/local/bin/baota-backup`，在宿主机上直接 exec：
 
 ```bash
-# 生成一份全量备份，落在 data/backup/manual/ 下，并自动自校验
+# 生成一份全量备份，落在 /www/backup/manual（宿主 data/www/backup/manual）下，并自动自校验
 docker exec baota baota-backup
 
 # 只看体积分布，不打包（回答「我的 data 被什么占满了」）
@@ -52,15 +52,15 @@ docker exec baota baota-backup --keep 5
 docker exec baota baota-backup --stdout > "baota-backup-$(date +%F).tgz"
 
 # 校验已有备份包
-docker exec baota baota-backup --verify /data/backup/manual/baota-backup-20260902-101500.tgz
+docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902-101500.tgz
 ```
 
-备份包落在宿主机的 `data/backup/manual/`，用飞牛「文件管理」就能看到、拷走。
+备份包落在宿主机的 `data/www/backup/manual/`，用飞牛「文件管理」就能看到、拷走。
 
 它替你绕开手工 tar 的三个坑：
 
-1. **自动排除** `.baota`、`backup/auto`、`backup/manual`、`backup/database`、`backup/rsync` ——
-   漏掉 `backup/auto` 会把上一次的升级快照打进本次备份，体积逐次翻倍
+1. **自动排除** `.baota`、`www/backup/auto`、`www/backup/manual`、`www/backup/database`、
+   `www/backup/rsync` —— 漏掉 `auto` 会把上一次的升级快照打进本次备份，体积逐次翻倍
    （实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）
 2. **自动加 `--xattrs`**，保住 overlay 的目录替换标记
 3. **生成后自动自校验**，并拒绝自包含的包
@@ -77,13 +77,12 @@ docker exec baota baota-backup --verify /data/backup/manual/baota-backup-2026090
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
-# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data（包含 www 子树 + wwwroot +
-#    backup + server/data 等 passthrough bind 源，整体才是完整的可恢复数据）
+# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/（www/ + system/ + 顶层 .baota 除外）
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
-    -C data --exclude='.baota' --exclude='backup/auto' \
-             --exclude='backup/manual' --exclude='backup/database' \
-             --exclude='backup/rsync' .
+    -C data --exclude='.baota' --exclude='www/backup/auto' \
+             --exclude='www/backup/manual' --exclude='www/backup/database' \
+             --exclude='www/backup/rsync' .
 
 # 3) 启动
 docker compose up -d
@@ -91,14 +90,12 @@ docker compose up -d
 
 💡 要点：
 
-- `-C data` 让包内路径保持相对（`www/...` 与 `system/...`），恢复到任何机器、任何目录都不受绝对路径影响。
-  **混合挂载模式下不能用这一条**（`data/` 只对应数据层），请改用下面的「恢复」小节按层解包
-- `--exclude='.baota'`：项目元数据目录（工作目录、并发锁、版本记录、启动历史，
-  单挂时位于 `data/system/.baota`），排除后启动时自动重建
-- `--exclude='backup/auto'`：升级自动快照就存在这里（init-mounts 把 /www/backup 播种后，
-  entrypoint 的 take_snapshot 写在 PERSIST_DATA_ROOT/backup/auto），**必须排除** ——
-  否则会把上一次的快照打进本次备份、下次再打进来，体积逐次翻倍
-- 站点多、数据库大时，耗时主要花在 `data/server/data`（MySQL 数据目录），属正常
+- `-C data` 让包内路径保持相对（`www/...` 与 `system/...`），恢复到任何机器、任何目录都不受绝对路径影响
+- `--exclude='.baota'`：项目元数据 / 数据层状态（`data/.baota` 与 `data/system/.baota`），
+  排除后启动时自动重建
+- `--exclude='www/backup/*'`：升级快照、本工具产物、面板备份、rsync 同步目标，
+  都在 `data/www/backup/` 下，**必须排除**，否则自包含、体积逐次翻倍
+- 站点多、数据库大时，耗时主要花在 `data/www/server/data`（MySQL 数据目录），属正常
 - 想看体积分布：`docker exec baota baota-backup --list`
 
 ---
@@ -127,7 +124,7 @@ docker exec baota baota-backup --rsync /backup
 
 ```
 /backup/
-├── data/            ← 数据层（面板 / 站点 / 数据库 / 备份）
+├── data/            ← data/（面板 / 站点 / 数据库 / 备份；系统层单独同步到 data/system）
 ├── system/          ← 系统层（etc usr var root opt home srv）
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
@@ -137,7 +134,7 @@ docker exec baota baota-backup --rsync /backup
 - 用的是 `-aAX`：保留权限、ACL 与**扩展属性**（overlay 的 `trusted.overlay.opaque`
   标记全靠它保住），与全量打包的 `--xattrs` 等价
 - 不用挂独立卷也行 —— 同步到 `/www/backup/rsync` 同样可以（该路径已被排除，
-  不会自包含）。但那样仍在数据层所在的盘上：**只能防误删，防不了盘坏**。
+  不会自包含）。但那样仍在 data 所在的盘上：**只能防误删，防不了盘坏**。
   正经备份请放到另一块盘
 - 带 `--delete`，目标会严格对齐源。目标若非空且不像本工具之前的产物
   （缺少 `data/` 与 `system/` 两个子目录），命令会直接拒绝执行，避免误删
@@ -148,21 +145,10 @@ docker exec baota baota-backup --rsync /backup
 `cp -a` 保留一切（含扩展属性），所以恢复比解 tar 更直接：
 
 ```bash
-# 单挂模式（./data:/data）
 docker compose down
 mv data "data.bak-$(date +%F)" && mkdir -p data/system
 cp -a /backup/data/.   data/
 cp -a /backup/system/. data/system/
-docker compose up -d && docker compose logs -f baota
-```
-
-```bash
-# 混合模式（./data:/data + ./system:/data/system）
-docker compose down
-mv data "data.bak-$(date +%F)" && mkdir data
-mv system "system.bak-$(date +%F)" && mkdir system
-cp -a /backup/data/.   data/
-cp -a /backup/system/. system/
 docker compose up -d && docker compose logs -f baota
 ```
 
@@ -171,9 +157,9 @@ docker compose up -d && docker compose logs -f baota
 ## 🔎 验证备份（别跳过）
 
 ```bash
-docker exec baota baota-backup --verify /data/backup/manual/baota-backup-*.tgz
+docker exec baota baota-backup --verify /www/backup/manual/baota-backup-*.tgz
 # 或者宿主机侧：
-tar tzf baota-backup-*.tgz | grep -E 'wwwroot/|server/data/|www/server/panel/data/' | head
+tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|www/server/panel/data/' | head
 ```
 
 能看到站点、数据库、面板配置这三类路径才算完整。**只有恢复过一次的备份才算备份**，
@@ -183,32 +169,15 @@ tar tzf baota-backup-*.tgz | grep -E 'wwwroot/|server/data/|www/server/panel/dat
 
 ## ♻️ 恢复
 
-### 单挂模式（`./data:/data`）
-
 ```bash
 docker compose down
 
 # 现有 data 先改名而不是直接删，新包有问题还能退回
 mv data "data.bak-$(date +%F)" && mkdir -p data/system
-# 数据层（www/ wwwroot/ backup/ server/）解到 data/，系统层（etc/usr/...）解到 data/system/
-tar xzf baota-backup-2026-08-31.tgz -C data        www wwwroot backup server
+
+# 数据层（www/ = 面板+站点+备份+MySQL）解到 data/，系统层解到 data/system/
+tar xzf baota-backup-2026-08-31.tgz -C data        www
 tar xzf baota-backup-2026-08-31.tgz -C data/system etc usr var root opt home srv
-
-docker compose up -d && docker compose logs -f baota
-```
-
-### 混合模式（`./data:/data` + `./system:/data/system`）
-
-```bash
-docker compose down
-
-# 两层分别改名，新包有问题都能退回
-mv data "data.bak-$(date +%F)" && mkdir data
-mv system "system.bak-$(date +%F)" && mkdir system
-
-# 数据层（www/ wwwroot/ backup/ server/）解到 data/，系统层（etc/usr/...）解到 system/
-tar xzf baota-backup-2026-08-31.tgz -C data   www wwwroot backup server
-tar xzf baota-backup-2026-08-31.tgz -C system etc usr var root opt home srv
 
 docker compose up -d && docker compose logs -f baota
 ```
@@ -230,7 +199,7 @@ docker exec -i baota mysql < /path/to/databases.sql
 
 **数据在哪**
 - 飞牛「文件管理」→ 进入你创建 baota 项目时选的存储池目录 → 里面有 `data` 文件夹
-- 网站、数据库、设置全在里面
+- 网站、数据库、设置全在里面（站点在 `data/www/wwwroot/`）
 
 **方法一：飞牛快照（最省事，点一下，宝塔不用停）** ⭐ 推荐
 1. 「文件管理」里右键 `data` 文件夹
@@ -240,7 +209,7 @@ docker exec -i baota mysql < /path/to/databases.sql
 
 **方法二：容器内备份（保留 overlay 元数据，不用停容器）**
 1. 飞牛「Docker」→ `baota` 容器 →「终端」→ 执行 `baota-backup`
-2. 备份包出现在 `data/backup/manual/`
+2. 备份包出现在 `data/www/backup/manual/`
 3. 用「文件管理」把它复制到另一块硬盘
 
 **方法三：复制 / 压缩文件夹（直观，但会丢扩展属性）**
@@ -250,10 +219,6 @@ docker exec -i baota mysql < /path/to/databases.sql
 > 停一下只是让数据存整齐，复制完马上能启。
 > ⚠️ 这种方式不保留 overlay 扩展属性，恢复后被替换过的目录可能出现内容合并。
 > 要最稳妥请用方法一。
-
-**恢复**
-- 快照：右键 `data` → 「快照」→「恢复」（混合模式下 `system` 也要一起快照）
-- 备份包：停止容器 → 把备份的 `data` 覆盖回去（混合模式还要覆盖 `system`）→ 启动
 
 **多久备一次**
 - 升级、迁移、大改设置前必做；平时可每周 / 每月一次快照

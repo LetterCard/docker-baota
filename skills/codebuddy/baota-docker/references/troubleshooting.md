@@ -16,7 +16,7 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 |---|---|---|
 | `degraded-critical` 存在 | `etc`/`var`/`www` 持久化失败或只读降级 | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
 | `degraded` 存在 | 非关键目录未持久化 | 同上，功能受损但不丢核心数据 |
-| 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/backup`、`data/www/wwwlogs`；`baota-backup --list` 看分布 |
+| 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/www/backup`、`data/www/wwwlogs`；`baota-backup --list` 看分布 |
 | 面板端口无响应 | 面板未启动 / 端口被改 | `docker exec baota bt status`；检查 compose 端口映射与 `port.pl` 是否一致 |
 
 ### 日志里出现「持久化层挂载成功但不可写」
@@ -71,7 +71,7 @@ API 层入口（BTPanel/__init__.py 的 upgrade_panel 等）挡不住。
 ### 升级后面板功能异常
 
 先看日志有没有「检测到镜像降级」。`data/system/.baota/image-version` 记录上次启动的镜像版本，
-`data/backup/auto/` 里有升级前快照。最干净的做法是用升级前的完整备份包走恢复流程。
+`data/www/backup/auto/` 里有升级前快照。最干净的做法是用升级前的完整备份包走恢复流程。
 
 > MySQL 跨大版本升级（5.7 → 8.0）会就地升级数据文件，**该过程不可回退**。
 > 跨大版本前先在面板内做一次完整数据库备份。
@@ -124,4 +124,4 @@ cat data/system/.baota/boot-history.log
 失败时会打印容器日志尾部 150 行，先 `[init]` 的 WARN，再看 `[entrypoint]`。
 
 新增检查项时注意：**不要靠 grep 中文告警文案判断**，读 `/run/baota/degraded*` 标记文件。
-`PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PASSTHROUGH_DIRS` 从 `shared/conf/defaults.env` 解析，不要在本脚本里硬编码。
+`PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PERSIST_DATA_ROOT` 等从 `shared/conf/defaults.env` 解析，不要在本脚本里硬编码。

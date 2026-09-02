@@ -1,7 +1,7 @@
 #!/busybox sh
 # shellcheck shell=sh  # 本文件必须保持 POSIX（busybox 解释），shebang 不被 shellcheck 识别，需显式声明方言
 # ==============================================================================
-#  [阶段 0] 早期初始化 —— 并发锁 → overlay 持久化 → 直通挂载 → 移交阶段 1
+#  [阶段 0] 早期初始化 —— 并发锁 → overlay 持久化 → 移交阶段 1
 #
 #  解释器用 busybox 而非 bash：本脚本要给 /usr 挂 overlay，万一持久化层里的
 #  /usr 被写坏，Debian 的 usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失，
@@ -13,7 +13,7 @@
 #
 #  可用环境变量（真源见 /baota/defaults.env）：
 #    PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_DATA_DIRS /
-#    PERSIST_SYSTEM_DIRS / CRITICAL_DIRS / PASSTHROUGH_DIRS / STAGE2
+#    PERSIST_SYSTEM_DIRS / CRITICAL_DIRS / STAGE2
 #
 #  日志约定：[init] 普通信息，[init][WARN] 告警
 # ==============================================================================
@@ -32,7 +32,6 @@ PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
-PASSTHROUGH_DIRS="${PASSTHROUGH_DIRS:-/www/wwwroot /www/backup /www/server/data}"
 STAGE2="${STAGE2:-/baota/entrypoint.sh}"
 
 # 这几个目录一旦持久化失败，数据会静默丢失 —— 必须让 healthcheck 可见
@@ -50,18 +49,14 @@ PROBE=.persist-writable-probe
 # 所以 work 只能放在对应持久化层内、且必须与 upper 同盘：
 #   数据层 work -> /data/.baota/work
 #   系统层 work -> /data/system/.baota/work
-# 项目元数据（并发锁 / 版本记录 / 启动历史）收进系统层的 .baota，
-# 无论单挂还是混合挂载模式都能持久化
 DATA_WORK_ROOT="${PERSIST_DATA_ROOT}/.baota/work"
 SYS_WORK_ROOT="${PERSIST_SYSTEM_ROOT}/.baota/work"
-STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
-LOCK_FILE="${STATE_DIR}/lock"
-# 两层各一把锁，而不是只锁系统层：
-# 混合挂载模式下数据层与系统层可能落在完全不同的位置，
-# 「数据层共享、系统层各自独立」这种配置下，只有数据层这把锁能拦住
-# 两个容器同时挂同一个 upper 的情况
+# 数据层状态（锁 + workdir）落在数据层根的 .baota；项目元数据（版本记录 /
+# 启动历史）收进系统层的 .baota，两者都随对应层持久化
 DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
 DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
+STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
+LOCK_FILE="${STATE_DIR}/lock"
 
 # 运行态标记目录。/run 是 tmpfs：每次启动重新评估，不会残留上次的状态。
 # 供 compose healthcheck 与 CI 健康检查判定「本次启动的持久化是否完整」。
@@ -105,9 +100,8 @@ mark_critical() {
 #    - fd 8 / fd 9 会被后续 exec 继承，锁在容器整个生命周期内保持
 #
 #  数据层与系统层各一把锁（fd 8 / fd 9）：
-#    单挂模式下两者落在同一个 bind 里，第二把锁是冗余的但无害；
-#    混合挂载模式下两层可能在不同位置，两把锁才能真正覆盖
-#    「只共享了其中一层」的误配置
+#    单挂模式下两者落在同一个 data 目录里，第二把锁是冗余的但无害；
+#    用户若把系统层单独 bind 到别的目录，两把锁才能各自覆盖一层
 # ==============================================================================
 
 # 单层加锁。参数：$1=状态目录 $2=锁文件 $3=fd 号 $4=层名（仅用于日志）
@@ -156,8 +150,7 @@ _lock_layer() {
         warn "  持有者：${_owner}"
         warn '  同一份持久化层不可被两个容器同时挂载（内核 EBUSY / 行为未定义），'
         warn '  为避免数据损坏，本次启动已中止。'
-        warn '  常见原因：stable 与 release 两个 compose 用了同一个 data 目录，'
-        warn '            或混合挂载模式下某一层被两个容器指到了同一位置。'
+        warn '  常见原因：stable 与 release 两个 compose 用了同一个 data 目录。'
         warn "  确认没有其它实例在跑之后，删除 ${_lock} 再启动。"
         warn '=============================================================='
         return 1
@@ -185,138 +178,13 @@ acquire_lock() {
 }
 
 # ==============================================================================
-#  1. 旧版结构自动迁移（一次性）
+#  1. overlay 分层持久化
 #
-#  早期版本的可写层在 /data/<dir>/upper，现在直接就是 /data/<dir>，
-#  检测到 upper 就把内容并入新位置、清掉旧结构。
-#
-#  www 例外：upper 里的 wwwroot 是过期的播种副本，必须丢弃，
-#  否则会把用户已删除的站点文件「复活」。
-# ==============================================================================
-migrate_old_layout() {
-    _dir="$1"
-    # 旧版（单挂 ./data:/data）把上层放在 /data/<dir>/upper
-    _old_root="${PERSIST_ROOT_OLD:-/data}"
-    _old="${_old_root}/${_dir}/upper"
-    [ -d "${_old}" ] || return 0
-
-    # 新版按职责收进数据层或系统层
-    case " ${PERSIST_DATA_DIRS} " in
-        *" ${_dir} "*) _root="${PERSIST_DATA_ROOT}" ;;
-        *)            _root="${PERSIST_SYSTEM_ROOT}" ;;
-    esac
-    _new="${_root}/${_dir}"
-
-    if [ "${_dir}" = 'www' ] && [ -n "$(ls -A "${_new}/wwwroot" 2> /dev/null)" ]; then
-        log "检测到独立站点目录 ${_new}/wwwroot，丢弃 upper 里的旧 wwwroot 副本"
-        rm -rf "${_old}/wwwroot"
-    fi
-
-    log "检测到旧版持久化结构，正在迁移 ${_old} -> ${_new}"
-    mkdir -p "${_new}" 2> /dev/null || true
-    if ! cp -a "${_old}/." "${_new}/" 2> /dev/null; then
-        warn "迁移失败：${_old} 的内容未能并入 ${_new}，请手动处理后再启动"
-        mark_degraded "旧版结构迁移失败：${_dir}"
-        return 1
-    fi
-
-    rm -rf "${_old}"
-    rm -rf "${_old_root}/${_dir}/work"
-    rm -f "${_old_root}/${_dir}/.wwwroot-initialized"
-    log "已迁移 /${_dir} 的持久化数据到 ${_new}"
-}
-
-# ==============================================================================
-#  1b. 数据层布局迁移（/data/www 根 -> /data 根，一次性）
-#
-#  旧版数据层根是 /data/www，而数据层唯一的持久化成员也叫 www，
-#  于是 overlay upper 落在 /data/www/www —— 宿主机上多出一层「www 套 www」，
-#  与容器内的 /www 对不上。现在数据层根上提到 /data，upper 就是 /data/www。
-#
-#  要搬的四处：
-#    overlay upper  /data/www/www          -> /data/www
-#    直通 站点      /data/www/wwwroot      -> /data/wwwroot
-#    直通 备份      /data/www/backup       -> /data/backup
-#    直通 MySQL     /data/www/server/data  -> /data/server/data
-#  另有 v2 的数据层状态目录 /data/www/.baota —— 里面只有并发锁与 overlay workdir，
-#  都是每次启动重建的临时内容，v3 里对应 /data/.baota，直接删掉不搬运。
-#
-#  ★ 判据用 /data/www/.baota，不用 /data/www/www：
-#    /data/www/www 在 v3 里理论上可能由面板自建（极罕见），误判会把它拍平；
-#    而 /data/www/.baota 只有「数据层根 = /data/www」时的 acquire_lock 才会建，
-#    是可靠的旧布局指纹，且 v1 / v2 都成立。
-#
-#  ★ 用 cp -a + rm -rf，不用 mv：
-#    cp -a 与目标目录合并，中途失败不丢数据，下个启动周期还能重来；
-#    mv 一旦中断就留下半份数据，无法自动恢复。
-# ==============================================================================
-migrate_data_layout() {
-    # 数据层根仍停在 /data/www 时不迁移（用户自己覆盖成旧值，尊重他的配置）
-    [ "${PERSIST_DATA_ROOT}" = '/data/www' ] && return 0
-    # 旧布局指纹：数据层状态目录留在旧位置
-    [ -d '/data/www/.baota' ] || return 0
-
-    log '检测到旧版数据层布局（data/www 下多一层 www），正在迁移到新布局'
-
-    # ① v2 的数据层状态目录只有锁与 workdir，都是每次启动重建的临时内容
-    rm -rf '/data/www/.baota' 2> /dev/null || true
-
-    # ② 新布局的落点先建好
-    mkdir -p "${DATA_STATE_DIR}" '/data/www' '/data/wwwroot' '/data/backup' \
-             '/data/server/data' 2> /dev/null || true
-
-    # ③ 三个直通目录：整体搬到与 /data/www 平级的新位置
-    _moved=0
-    for _pair in '/data/www/wwwroot:/data/wwwroot' \
-                 '/data/www/backup:/data/backup' \
-                 '/data/www/server/data:/data/server/data'; do
-        _old="${_pair%%:*}"
-        _new="${_pair#*:}"
-        [ -d "${_old}" ] || continue
-        # 空目录说明用户从未往里写过东西，直接删，不留空壳
-        if [ -z "$(ls -A "${_old}" 2> /dev/null)" ]; then
-            rm -rf "${_old}" 2> /dev/null || true
-            continue
-        fi
-        if cp -a "${_old}/." "${_new}/" 2> /dev/null; then
-            rm -rf "${_old}" 2> /dev/null || true
-            log "已迁移 ${_old} -> ${_new}"
-            _moved=1
-        else
-            warn "迁移失败：${_old} 的内容未能并入 ${_new}，请手动处理后再启动"
-            mark_degraded "数据层布局迁移失败：${_old}"
-        fi
-    done
-
-    # ④ overlay upper：内容上提一层到 /data/www。
-    #    必须在直通目录搬完之后做，否则会把旧直通目录又复制进新 upper
-    if [ -d '/data/www/www' ]; then
-        if cp -a '/data/www/www/.' '/data/www/' 2> /dev/null; then
-            rm -rf '/data/www/www' 2> /dev/null || true
-            log '已迁移 /data/www/www -> /data/www（与容器内的 /www 对齐）'
-            _moved=1
-        else
-            warn '迁移失败：/data/www/www 的内容未能并入 /data/www，请手动处理后再启动'
-            mark_degraded '数据层布局迁移失败：/data/www/www'
-        fi
-    fi
-
-    # ⑤ 清掉旧布局遗留的空壳（/data/www/server 只是为挂 data 建的父目录）。
-    #    ④ 若已把面板内容拷回来，这里自然删不掉，无害
-    rmdir '/data/www/server' 2> /dev/null || true
-
-    if [ "${_moved}" = '1' ]; then
-        log '数据层布局迁移完成：宿主机目录已与容器内路径对齐'
-    fi
-    return 0
-}
-
-# ==============================================================================
-#  2. overlay 分层持久化
-#
+#    /www              ←overlay→  upper = /data/www
+#    /etc /usr /var…   ←overlay→  upper = /data/system/<同名>
 #    lowerdir = 镜像内的同名目录（随镜像升级而更新）
-#    upperdir = /data/<dir> 或 /data/system/<dir>（与容器内路径同名，容器销毁不丢）
-#    workdir  = /data/.baota/work/<dir>.work 或 /data/system/.baota/work/<dir>.work（内部元数据，须与 upper 同文件系统）
+#    workdir  = /data/.baota/work/<dir>.work 或 /data/system/.baota/work/<dir>.work
+#               （内部工作目录，须与 upper 同文件系统）
 #
 #  ★ index=off 是必须的，不是优化：
 #    内核文档 Overlay Filesystem 明确——「用同一个 upper 挂载不同的 lower」
@@ -389,116 +257,15 @@ mount_persist() {
 }
 
 # ==============================================================================
-#  3. 直通挂载（宿主机高频管理的目录绕过 overlay）
-#
-#  为什么这几个目录不走 overlay：
-#    - 内核文档：overlay 挂载期间直接改动底层（upper）目录属未定义行为。
-#      用户从宿主机（SMB / 文件管理 App）增删站点文件时，走 overlay 没有保证。
-#    - /www/server/data 是宝塔 MySQL 的默认数据目录（面板源码中大量引用）。
-#      数据库是容器里唯一有崩溃恢复语义的组件，不该放在不确定层上。
-#    - chattr +i 在直通目录上行为与真机一致（面板用它锁 .user.ini）。
-#
-#  关键点：宿主机路径与容器路径一一对应（/www/wwwroot -> /data/wwwroot），
-#  因此不新增顶层目录、不改备份方式、不需要数据搬迁。
-#
-#  顺序要求：必须先挂完 /www 的 overlay，再 bind 子目录，
-#  反过来会被 overlay 挂载覆盖。
-# ==============================================================================
-seed_passthrough() {
-    _target="$1"
-    _upper="$2"
-
-    # 播种：仅当「镜像内非空」且「宿主机为空」时搬运一次。
-    # 实测：镜像里 /www/wwwroot 为空（无需播种）；
-    #       /www/backup 有 database/ 与 site/ 两个空目录（需要播种）；
-    #       /www/server/data 在装 MySQL 前根本不存在。
-    [ -z "$(ls -A "${_upper}" 2> /dev/null)" ] || return 0
-    [ -n "$(ls -A "${_target}" 2> /dev/null)" ] || return 0
-
-    # 播种中的标记：上次若被中断（断电 / 强杀），这里能识别并重来，
-    # 而不是留下一个半份副本、又因为「非空」被判定为已完成
-    _marker="${_upper}/.baota-seeding"
-    if [ -e "${_marker}" ]; then
-        warn "上次播种未完成，清理后重来：${_upper}"
-        rm -rf "${_upper:?}/"* "${_upper:?}/.[!.]"* 2> /dev/null || true
-    fi
-    : > "${_marker}" 2> /dev/null || true
-
-    log "播种 ${_target} -> ${_upper}"
-    if cp -a "${_target}/." "${_upper}/" 2> /dev/null; then
-        rm -f "${_marker}" 2> /dev/null || true
-        return 0
-    fi
-
-    warn "播种失败：${_target}（容器仍会启动，该目录内容为空）"
-    rm -rf "${_upper:?}/"* "${_upper:?}/.[!.]"* 2> /dev/null || true
-    return 1
-}
-
-mount_passthrough() {
-    _target="$1"
-    # 直通目录都在数据层内：/www/wwwroot -> /data/wwwroot
-    _upper="${PERSIST_DATA_ROOT}${_target#/www}"
-
-    [ -d "${_target}" ] || mkdir -p "${_target}" 2> /dev/null || true
-    if [ ! -d "${_target}" ]; then
-        warn "直通目标不存在且无法创建：${_target}"
-        return 1
-    fi
-
-    if ! mkdir -p "${_upper}" 2> /dev/null; then
-        warn "无法创建 ${_upper}：${PERSIST_DATA_ROOT} 不可写，${_target} 回落到 overlay"
-        return 1
-    fi
-
-    seed_passthrough "${_target}" "${_upper}"
-
-    if mount -o bind "${_upper}" "${_target}" 2> /dev/null; then
-        log "直通挂载 ${_target} <- ${_upper}"
-        return 0
-    fi
-
-    warn "直通挂载失败：${_target}（回落到 overlay，功能不受影响）"
-    return 1
-}
-
-# ==============================================================================
 #  入口
 # ==============================================================================
 main() {
     # ---- 0. 并发锁（抢不到就中止，不做任何挂载）----
     acquire_lock || exit 1
 
-    # ---- 1. 旧版结构迁移 ----
-    for _dir in ${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS}; do
-        migrate_old_layout "${_dir}" || true
-    done
-
-    # ---- 1b. 数据层布局迁移（旧版 /data/www 根 -> 现在的 /data 根）----
-    # 必须在 overlay 挂载之前跑：挂载之后 /data/www 就是 upper，动不得了
-    migrate_data_layout
-
-    # 旧版把 overlay 工作目录放在 /data/.work，新版收进 .baota/work。
-    # 此时尚未挂载任何 overlay 且已持锁，删除是安全的
-    if [ -d /data/.work ]; then
-        if rm -rf /data/.work 2> /dev/null; then
-            log "已清理旧版工作目录 /data/.work（新版使用 .baota/work）"
-        else
-            warn "无法清理旧版工作目录 /data/.work，可手动删除"
-        fi
-    fi
-
-    # 旧版把项目元数据放在 /data/.baota，新版收进系统层的 .baota。
-    # 迁移它（含 image-version / boot-history），避免升级时丢失版本记录而误判「首次使用」
-    if [ -d /data/.baota ] && [ ! -d "${STATE_DIR}" ]; then
-        mkdir -p "${STATE_DIR}" 2> /dev/null || true
-        if cp -a /data/.baota/. "${STATE_DIR}/" 2> /dev/null; then
-            log "已迁移项目元数据 /data/.baota -> ${STATE_DIR}"
-            rm -rf /data/.baota
-        fi
-    fi
-
-    # ---- 2. 暂存 Docker 动态注入的文件 ----
+    # ---- 1. 暂存 Docker 动态注入的文件 ----
+    # Docker 会把 hosts / resolv.conf / hostname bind 到 /etc 下，随后的 overlay
+    # 会盖住这些子挂载；先把内容取出，挂完 overlay 再写回（见第 3 步）
     rm -rf "${DOCKER_META}"
     mkdir -p "${DOCKER_META}"
     for _f in ${DOCKER_FILES}; do
@@ -507,7 +274,7 @@ main() {
         fi
     done
 
-    # ---- 3. overlay 持久化 ----
+    # ---- 2. overlay 持久化 ----
     _failed=0
     for _dir in ${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS}; do
         if ! mount_persist "${_dir}"; then
@@ -521,23 +288,7 @@ main() {
         warn '存在未持久化的目录，容器仍会启动，但销毁后这些目录的数据会丢失'
     fi
 
-    # ---- 4. 直通挂载 ----
-    for _t in ${PASSTHROUGH_DIRS}; do
-        [ -n "${_t}" ] || continue
-        mount_passthrough "${_t}" || true
-    done
-
-    # ---- 5. 旧版遗留检查：持久化层里的镜像脚本副本 ----
-    # 旧版把引导脚本放在 /opt/baota（/opt 是持久化目录）。还原备份时
-    # 这些副本会被一起搬回来，反过来永久屏蔽新镜像的同名脚本。
-    # 新版脚本已迁到 /baota（非持久化），这里只做提示，不自动删除
-    if [ -d /data/opt/baota ]; then
-        warn "检测到 /data/opt/baota —— 旧版遗留在持久化层里的镜像脚本副本"
-        warn '  它会屏蔽新镜像的同名脚本，导致补丁与引导逻辑停留在旧版'
-        warn '  新版脚本位于 /baota（不在持久化层内），可直接删除该目录后重启'
-    fi
-
-    # ---- 6. 还原 Docker 动态文件 ----
+    # ---- 3. 还原 Docker 动态文件 ----
     # 写回内容而非重新 bind，效果等价且更简单。
     # 这里失败也不中断启动：持久化层只读时，至少还能进容器看日志排查
     for _f in ${DOCKER_FILES}; do
@@ -549,7 +300,7 @@ main() {
     done
     rm -rf "${DOCKER_META}"
 
-    # ---- 7. 交给阶段 1 ----
+    # ---- 4. 交给阶段 1 ----
     if [ -f "${STAGE2}" ] && [ -x /bin/bash ]; then
         exec /bin/bash "${STAGE2}" "$@"
     fi
