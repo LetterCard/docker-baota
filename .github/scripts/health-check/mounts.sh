@@ -192,6 +192,12 @@ if [ "$found" = 1 ]; then
 elif docker logs "$CONTAINER" 2>&1 | grep -q '本次不会持久化'; then
     # 兜底：容器退得比轮询更快时，退而求其次看启动日志里的降级告警
     pass "只读持久化根已被识别（启动日志有降级告警）"
+elif is_running && docker exec "$CONTAINER" sh -c ': > /data/.ro-probe 2>/dev/null'; then
+    # 区分两种失败：挂载没真正只读 vs 镜像的降级识别失效。
+    # volume 的 :ro 在个别 runner（容器化 runner / 无 ro 传播的嵌套 Docker）下
+    # 可能不生效，此时容器按可写正常启动 —— 门禁测的是镜像对只读的响应，
+    # 该结果不反映镜像本身，不能误导成「最危险的失效模式失去了防护」
+    fail "只读挂载未生效：容器内 /data 仍可写（runner 未执行 volume :ro），本次门禁结果无效"
 else
     fail "只读持久化根既没写 degraded-critical、日志里也没有降级告警 —— 最危险的失效模式失去了防护"
 fi
