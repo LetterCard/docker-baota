@@ -84,13 +84,17 @@ wait_panel_http() {
     port=$(inside_cat /www/server/panel/data/port.pl)
     [ -n "$port" ] || fail "无法确定面板端口"
     while [ "$tries" -lt 60 ]; do
+        # curl 失败时 -w 仍输出 000；`|| echo 000` 会追加第二行 000，
+        # 使 [ != "000" ] 恒真 —— 等待循环形同虚设。改用 || true + case
         code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
-                "http://127.0.0.1:${port}/" 2>/dev/null || echo 000)
-        [ "$code" != "000" ] && break
+                "http://127.0.0.1:${port}/" 2>/dev/null || true)
+        case "$code" in ''|000) ;; *) break ;; esac
         tries=$((tries + 1))
         sleep 2
     done
-    [ "$code" != "000" ] || fail "面板端口 ${port} 在 120 秒内没有响应"
+    case "$code" in
+        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
+    esac
 }
 
 assert_no_degraded() {

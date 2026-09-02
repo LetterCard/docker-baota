@@ -110,18 +110,25 @@ wait_systemd() {
 }
 
 # 面板进程由 systemd 拉起，需要等一会儿才会监听端口
+#
+# ⚠️ curl 失败时 -w '%{http_code}' 依然会输出 000，若写成 `|| echo 000`，
+#    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
+#    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
+#    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
 wait_panel_http() {
     local port code="" tries=0
     port=$(inside_cat /www/server/panel/data/port.pl)
     [ -n "$port" ] || fail "无法确定面板端口"
     while [ "$tries" -lt 60 ]; do
-        code=$(inside curl -skf -o /dev/null -w '%{http_code}' --max-time 5 \
-                "http://127.0.0.1:${port}/" 2>/dev/null || echo 000)
-        if [ "$code" != "000" ]; then break; fi
+        code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+                "http://127.0.0.1:${port}/" 2>/dev/null || true)
+        case "$code" in ''|000) ;; *) break ;; esac
         tries=$((tries + 1))
         sleep 2
     done
-    [ "$code" != "000" ] || fail "面板端口 ${port} 在 120 秒内没有响应"
+    case "$code" in
+        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
+    esac
 }
 
 # 只读降级是本方案最危险的失效模式：挂载会「成功」，但所有写入静默丢失。
@@ -237,17 +244,17 @@ URL="http://127.0.0.1:${PORT}${SAFE}/login"
 # 宝塔对 127.0.0.1 无 cookie 的探测会判为「陌生 IP」返回 404（防爆破特性，
 # 进程实际在监听），故面板可访问性以「非 000、非 5xx」判定，与 /baota/
 # healthcheck.sh 语义一致；端口/进程真挂时才返回 000 或 5xx
-CODE=$(inside curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" || echo 000)
+CODE=$(inside curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true)
 case "$CODE" in
-    000|5*) fail "登录页 ${URL} 返回 ${CODE}（面板未响应或 5xx）" ;;
+    ''|000|5*) fail "登录页 ${URL} 返回 ${CODE:-000}（面板未响应或 5xx）" ;;
     *)      pass "登录页 ${URL} 返回 ${CODE}（面板在响应）" ;;
 esac
 
 # 裸 /login 不应返回 200，否则说明安全入口没生效
 BARE=$(inside curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-        "http://127.0.0.1:${PORT}/login" || echo 000)
+        "http://127.0.0.1:${PORT}/login" 2>/dev/null || true)
 [ "$BARE" != "200" ] || fail "安全入口未生效（裸 /login 返回 200）"
-pass "安全入口已生效（裸 /login 返回 ${BARE}）"
+pass "安全入口已生效（裸 /login 返回 ${BARE:-000}）"
 
 step "A7) 校验面板版本号"
 # 首选面板自身的 public.version()，失败则回退读 menu.json 的 version 字段
@@ -346,7 +353,8 @@ inside test -L /usr/local/bin/baota-backup \
 inside baota-backup --list >/dev/null 2>&1 \
     || fail "baota-backup --list 执行失败"
 
-BACKUP_PATH=$(inside baota-backup --quiet 2>/dev/null | tail -1)
+# || true：备份失败时让下面 [ -n ] 给出明确诊断，而不是被 set -e 静默带崩
+BACKUP_PATH=$(inside baota-backup --quiet 2>/dev/null | tail -1 || true)
 [ -n "${BACKUP_PATH}" ] || fail "baota-backup 未输出备份路径"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
 

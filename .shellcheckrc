@@ -7,13 +7,13 @@
 # 检查级别由 make lint 的 `shellcheck -S warning` 控制（CI 只卡「会出错的代码」）；
 # .shellcheckrc 本身不支持 severity 指令，这里仅作说明。style 级（[ ]→[[ ]]、加引号、
 # 加花括号）是品味问题，老脚本已有大量，全改无功能收益且易引入回归。
-# shell=bash
 
-# 本项目的解释器约定：
-#   init-mounts.sh  → busybox sh（POSIX）
+# 本项目的解释器约定（方言由各文件自己决定，rc 里不写 shell= 指令——
+# 实测 rc 级 shell=bash 会盖过「不被识别的 shebang」，让 busybox 脚本按 bash 检查）：
+#   init-mounts.sh  → busybox sh（POSIX，文件内有 shellcheck shell=sh 指令，
+#                      因为 #!/busybox sh 这个 shebang shellcheck 不认识）
+#   healthcheck.sh  → /bin/sh（POSIX，shebang 可被识别）
 #   其余            → bash
-# 由脚本自身的 shebang 决定，这里不强制
-# shell=bash
 
 # 允许 source 在运行时才存在的文件（/baota/defaults.env 由 Docker COPY 提供）
 enable=all

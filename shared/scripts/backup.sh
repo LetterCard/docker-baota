@@ -159,7 +159,9 @@ show_usage() {
     echo
     echo '磁盘水位：'
     for _m in "${PERSIST_DATA_ROOT}" "${PERSIST_SYSTEM_ROOT}"; do
-        df -Ph "${_m}" | awk -v r="${_m}" 'NR==1 || NR==2 {print "  "r": "$0}'
+        # || true：目录缺失 / df 失败时保持 --list 可用（这本来就是排障工具），
+        # 而不是让 pipefail + set -e 把整条命令带崩
+        df -Ph "${_m}" | awk -v r="${_m}" 'NR==1 || NR==2 {print "  "r": "$0}' || true
     done
 }
 

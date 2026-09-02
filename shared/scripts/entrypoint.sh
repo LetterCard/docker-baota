@@ -500,8 +500,11 @@ archive_boot_report() {
         return 0
     fi
 
-    # 两个标记文件可能只存在一个，cat 对缺失文件会报错但不影响另一个
-    detail=$(cat "${DEGRADED_CRITICAL}" "${DEGRADED}" 2> /dev/null | tr -s '\n' ' ')
+    # 两个标记文件可能只存在一个，cat 对缺失文件会报错但不影响另一个。
+    # 必须 || true：cat 对缺失文件返回非零，配合 pipefail 会让这行赋值
+    # 以失败收场，set -e 直接把整个 entrypoint 带崩 —— 本该「记录降级」的
+    # 逻辑反而变成容器起不来
+    detail=$(cat "${DEGRADED_CRITICAL}" "${DEGRADED}" 2> /dev/null | tr -s '\n' ' ' || true)
     [ -n "${detail}" ] || return 0
 
     stamp=$(date '+%F %T')
