@@ -65,7 +65,7 @@
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
-| `PERSIST_DATA_ROOT` | `/data/www` | 数据层根目录（面板 / 站点 / 数据库 / 备份） |
+| `PERSIST_DATA_ROOT` | `/data` | 数据层根目录（面板 / 站点 / 数据库 / 备份） |
 | `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc/usr/var/root/opt/home/srv 的 overlay 上层） |
 | `PERSIST_DATA_DIRS` | `www` | 数据层需要 overlay 持久化的顶层目录 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（`www` 属于数据层，不在这里） |
@@ -79,8 +79,8 @@
 > 想提前预警就调大，例如 `DISK_MIN_AVAIL_MB: 10240`（10GB）。
 > 改这两个值不需要重建镜像，重建容器即可生效。
 
-> 数据层与系统层可以挂到同一个宿主机目录（单挂 `./data:/data`，容器内数据层在
-> `/data/www`、系统层在 `/data/system`），也可以各挂各的（混合模式，见下）。
+> 数据层与系统层可以挂到同一个宿主机目录（单挂 `./data:/data`，容器内数据层根就是
+> `/data`、系统层根在 `/data/system`），也可以各挂各的（混合模式，见下）。
 > 两种方式的容器内路径完全一致，备份 / 迁移命令无需区分。
 
 ## 持久化与数据目录
@@ -89,10 +89,10 @@
 
 | 配置项 | 默认值 | 用途 | 如何修改 |
 |---|---|---|---|
-| `volumes`（单挂） | `./data:/data` | 一个 `data/` 保住全部数据：数据层在 `data/www`、系统层在 `data/system` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
-| `volumes`（混合） | `./data:/data/www` + `./system:/data/system` | 数据层用 bind（可见、可 SMB）、系统层也用 bind（单独一个 `./system` 目录，便于和站点数据分开管理） | 见下 |
+| `volumes`（单挂） | `./data:/data` | 一个 `data/` 保住全部数据：面板在 `data/www`、站点在 `data/wwwroot`、系统层在 `data/system` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
+| `volumes`（混合） | `./data:/data` + `./system:/data/system` | 数据层用 bind（可见、可 SMB）、系统层也用 bind（单独一个 `./system` 目录，便于和站点数据分开管理） | 见下 |
 
-冒号**右侧的容器内路径（`/data/www`、`/data/system`）不要改**；左侧可以是相对路径（相对
+冒号**右侧的容器内路径（`/data`、`/data/system`）不要改**；左侧可以是相对路径（相对
 compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在 ext4 / btrfs / xfs 上
 （飞牛存储池就是，直接可用）。原理详见[持久化原理](persistence.md)。
 
@@ -100,16 +100,17 @@ compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在
 
 ```
 data/                         （单挂 ./data:/data，host 侧一目录）
-├── www/                      ← 面板、站点、数据库、备份；其下 .baota 是数据层的 overlay 工作目录
-│   ├── wwwroot/
-│   ├── server/{panel,data}/
-│   └── backup/
+├── www/                      ← 面板（overlay upper，对应容器内的 /www）
+├── wwwroot/                  ← 站点（直通，对应容器内的 /www/wwwroot）
+├── backup/                   ← 面板备份（直通，对应 /www/backup）
+├── server/data/              ← MySQL 数据（直通，对应 /www/server/data）
+├── .baota/                   ← 数据层工作目录（并发锁 + overlay workdir）
 └── system/                   ← etc usr var root opt home srv 的 overlay 上层
     └── .baota/               ← 项目元数据（锁、版本记录、启动历史），两挂载模式都持久化
 
-# 混合模式（./data:/data/www  +  ./system:/data/system）：
-#   host 侧 ./data      → 容器 /data/www    （bind，用户可在飞牛文件管理里直接看到站点/面板）
-#   host 侧 ./system    → 容器 /data/system  （单独一个目录，便于和站点数据分开管理）
+# 混合模式（./data:/data  +  ./system:/data/system）：
+#   host 侧 ./data      → 容器 /data         （数据层根，bind，飞牛文件管理可直接看到站点/面板）
+#   host 侧 ./system    → 容器 /data/system  （系统层根；它是 /data 的子路径，后挂覆盖先挂）
 ```
 
 `data/system/.baota/`（单挂时 `data/system/.baota/`）是项目元数据目录（隐藏），备份时用一条
@@ -125,7 +126,7 @@ data/                         （单挂 ./data:/data，host 侧一目录）
 ## 自动快照（升级前）
 
 容器发现镜像版本变化时，会在启动阶段（面板与数据库尚未拉起、数据处于静止态）
-自动把面板数据 `/www/server/panel/data` 打包到 `data/www/backup/auto/`，通常几十 MB，秒级完成。
+自动把面板数据 `/www/server/panel/data` 打包到 `data/backup/auto/`，通常几十 MB，秒级完成。
 
 | 环境变量 | 默认值 | 用途 |
 |---|---|---|

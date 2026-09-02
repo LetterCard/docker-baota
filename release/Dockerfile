@@ -88,7 +88,7 @@ RUN bash /opt/baota/build/services.sh
 # 面板 8888、phpMyAdmin 888、HTTP 80/443、SSH 22、MySQL 3306、FTP 20/21 及被动端口
 EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 
-# 持久化层：挂载这一个目录即可保住全部数据（数据层 data/www + 系统层 data/system）
+# 持久化层：挂载这一个目录即可保住全部数据（数据层铺在 data/ 下，系统层在 data/system）
 VOLUME ["/data"]
 
 # 两段式启动：

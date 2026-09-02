@@ -15,7 +15,7 @@
 #      3. 备份落在 www/backup 下却没排除自身，下一次备份把它又装进去
 #
 #  用法：
-#    baota-backup                 在 /data/www/backup/manual 下生成一份全量备份
+#    baota-backup                 在 /data/backup/manual 下生成一份全量备份
 #    baota-backup --list          只打印各持久化目录的体积分布，不打包
 #    baota-backup --verify <包>    校验备份包是否完整
 #    baota-backup --stdout        把 tar 流写到标准输出（供宿主机重定向落盘）
@@ -45,12 +45,12 @@ if [ -f /baota/defaults.env ]; then
     . /baota/defaults.env
 fi
 
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data/www}"
+PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
-# 备份产物目录。落在数据层持久化目录里，宿主机直接从 data/www/backup/manual 取走即可
+# 备份产物目录。落在数据层的直通备份目录里，宿主机直接从 data/backup/manual 取走即可
 OUTPUT_DIR="${PERSIST_DATA_ROOT}/backup/manual"
 NAME_PREFIX='baota-backup'
 
@@ -171,7 +171,8 @@ show_usage() {
 # ==============================================================================
 #  数据库热转储
 #
-#  data/www/server/data 在容器运行时被直接复制，InnoDB 文件可能处于半写状态，
+#  /www/server/data（宿主机侧直通源 /data/server/data）在容器运行时被直接复制，
+#  InnoDB 文件可能处于半写状态，
 #  恢复后表损坏。这里在打包前先做一次单事务转储，作为包内的「一致副本」：
 #  恢复时若发现 InnoDB 起不来，导入这份 SQL 即可。
 #
@@ -212,6 +213,7 @@ dump_databases() {
 # 生成包内说明：版本号、时间、目录清单，以及恢复步骤
 write_manifest() {
     local file="$1" image_ver db_note
+    local data_tops='' _d _t _rel _top
 
     image_ver=$(cat /baota/VERSION 2> /dev/null || echo unknown)
     if [ -f "${TMP_DIR}/databases.sql" ]; then
@@ -219,6 +221,23 @@ write_manifest() {
     else
         db_note='未包含 MySQL 转储（容器停止或未安装 MySQL）'
     fi
+
+    # 包内数据层的顶层名字（恢复命令直接用它，写死 www 会在直通目录上漏解）：
+    # 数据层成员 + 每个 PASSTHROUGH_DIRS 去掉 /www 后的第一段（wwwroot / backup / server）
+    for _d in ${PERSIST_DATA_DIRS}; do
+        data_tops="${data_tops} ${_d}"
+    done
+    for _t in ${PASSTHROUGH_DIRS}; do
+        _rel="${_t#/www}"
+        _rel="${_rel#/}"
+        [ -n "${_rel}" ] || continue
+        _top="${_rel%%/*}"
+        case " ${data_tops} " in
+            *" ${_top} "*) ;;
+            *) data_tops="${data_tops} ${_top}" ;;
+        esac
+    done
+    data_tops="${data_tops# }"
 
     cat > "${file}" <<EOF
 baota-backup 备份清单
@@ -232,23 +251,27 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包内同时含「数据层 www/」与「系统层 etc usr var root opt home srv/」，
-按你采用的挂载方式解包：
+本包内同时含「数据层 ${data_tops}」与「系统层 ${PERSIST_SYSTEM_DIRS}」，
+按你采用的挂载方式解包。数据层与系统层要分别解到各自的落点 ——
+它们在包里是平级的，直接整包解到一处会错位：
 
 【单挂模式 ./data:/data】
 1. 停止容器：docker compose down
 2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir data
-3. 解开备份：tar xzf $(basename "${2:-本包}") -C data
+3. 解开备份：
+     mkdir -p data/system
+     tar xzf $(basename "${2:-本包}") -C data        ${data_tops}            # 数据层
+     tar xzf $(basename "${2:-本包}") -C data/system ${PERSIST_SYSTEM_DIRS}  # 系统层
 4. 启动容器：docker compose up -d && docker compose logs -f baota
 
-【混合模式 ./data:/data/www + ./system:/data/system】
+【混合模式 ./data:/data + ./system:/data/system】
 1. 停止容器：docker compose down
 2. 移走现有数据：
      mv data "data.bak-\$(date +%F)" && mkdir data
      mv system "system.bak-\$(date +%F)" && mkdir system
 3. 解开备份：
-     tar xzf $(basename "${2:-本包}") -C data   'www'            # 仅数据层
-     tar xzf $(basename "${2:-本包}") -C system --exclude='www'  # 仅系统层
+     tar xzf $(basename "${2:-本包}") -C data    ${data_tops}            # 数据层
+     tar xzf $(basename "${2:-本包}") -C system  ${PERSIST_SYSTEM_DIRS}  # 系统层
 4. 启动容器：docker compose up -d && docker compose logs -f baota
 
 若 MySQL 起不来（热备份时 InnoDB 文件可能半写）：
@@ -272,7 +295,7 @@ EOF
 #      tar 默认不带 xattrs，丢了它恢复后该目录会与镜像内容合并，
 #      而不是保持你替换后的样子
 #
-#  分两段 -C（数据层 /data/www 与系统层 /data/system）让包内路径保持相对，
+#  分两段 -C（数据层 /data 与系统层 /data/system）让包内路径保持相对，
 #  恢复到任何机器、任何目录都不受绝对路径影响
 # ==============================================================================
 # 收集确实存在的持久化目录。全量打包、--stdout、--rsync 三处共用：
@@ -280,11 +303,25 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 数据层：归档整个 PERSIST_DATA_ROOT（不只 www 子树）
-    # www/wwwroot 等 PASSTHROUGH_DIRS 的宿主机路径（/data/www/wwwroot、
-    # /data/www/backup、/data/www/server/data）也在数据层根下，与 www 平级，
-    # 也是用户关键数据（站点 / 手动备份 / MySQL），必须一起进包
-    data_members=('.')
+    # 数据层必须逐个列出成员，不能图省事用 '.' 归档整个数据层根：
+    # 数据层根是 /data 本身，而系统层根 /data/system 是它的子目录，
+    # '.' 会把系统层一起装进来，与下面的 sys_members 重复 —— 体积翻倍，
+    # 恢复时还会出现 www/… 与 system/etc/… 两套路径打架。
+    # 显式列出两类成员，包内路径与「按根整层归档」时完全一致：
+    #   ① PERSIST_DATA_DIRS（www，overlay upper）
+    #   ② PASSTHROUGH_DIRS 的宿主机相对路径（wwwroot / backup / server/data，
+    #      与 www 平级）—— 站点 / 手动备份 / MySQL 数据，都是用户关键数据
+    data_members=()
+    for _d in ${PERSIST_DATA_DIRS}; do
+        [ -d "${PERSIST_DATA_ROOT}/${_d}" ] && data_members+=( "${_d}" )
+    done
+    for _t in ${PASSTHROUGH_DIRS}; do
+        _rel="${_t#/www}"     # /www/wwwroot -> /wwwroot
+        _rel="${_rel#/}"      # /wwwroot     -> wwwroot
+        [ -n "${_rel}" ] || continue
+        [ -d "${PERSIST_DATA_ROOT}/${_rel}" ] && data_members+=( "${_rel}" )
+    done
+
     sys_members=()
     for _d in ${PERSIST_SYSTEM_DIRS}; do
         [ -d "${PERSIST_SYSTEM_ROOT}/${_d}" ] && sys_members+=( "${_d}" )
@@ -312,7 +349,7 @@ build_archive() {
     local -a extra=()
     [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
 
-    # 数据层（/data/www）与系统层（/data/system）分两段打包，
+    # 数据层（/data）与系统层（/data/system）分两段打包，
     # 包内路径仍为 www/... 与 etc/...，恢复时不受挂载方式影响
     tar --xattrs --xattrs-include='trusted.overlay.*' \
         "${EXCLUDE_ARGS[@]}" \
@@ -452,6 +489,21 @@ rsync_sync() {
     for _e in "${EXCLUDES[@]}"; do
         rargs+=( "--exclude=${_e}" )
     done
+
+    # --rsync 是整层同步（打包那条路径已经改成逐个列成员，不受影响），
+    # 而数据层根 /data 里含嵌套的系统层根 /data/system。不排除就会把系统层
+    # 同步进 dest/data，与下面 system 那一段重复，恢复时路径还会打架。
+    # 只有两层真的嵌套时才加这条排除 —— 用户把两层挂到不相关路径时保持原样。
+    # 前导 / 是 rsync 的锚定写法：只匹配传输根下的这一项，不会误伤同名子目录
+    case "${PERSIST_SYSTEM_ROOT}" in
+        "${PERSIST_DATA_ROOT}/"*)
+            _nested="${PERSIST_SYSTEM_ROOT#"${PERSIST_DATA_ROOT}"/}"
+            if [ -n "${_nested}" ]; then
+                rargs+=( "--exclude=/${_nested}" )
+                log "增量同步 已排除嵌套在数据层内的系统层目录：${_nested}"
+            fi
+            ;;
+    esac
 
     log "增量同步 数据层 ${PERSIST_DATA_ROOT} -> ${dest}/data"
     rsync "${rargs[@]}" "${PERSIST_DATA_ROOT}/" "${dest}/data/" \

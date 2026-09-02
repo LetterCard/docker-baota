@@ -20,7 +20,7 @@ docker compose logs -f baota   # 首次登录信息在这里
 overlay 上层与项目元数据）。两者也可拆成两个挂载（混合模式，见[编排配置详解](docs/configuration.md)）。
 删容器、重建、升级都不丢。
 
-**唯一硬要求：持久化根（数据层 `/data/www`、系统层 `/data/system`）必须在 ext4 / btrfs / xfs 上**
+**唯一硬要求：持久化根（数据层 `/data`、系统层 `/data/system`）必须在 ext4 / btrfs / xfs 上**
 （飞牛存储池就是，直接可用）。放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」，写入静默失败。
 
 ---
@@ -61,9 +61,9 @@ overlay 上层与项目元数据）。两者也可拆成两个挂载（混合模
 
 ## 三个必须先知道的约定
 
-1. **`data/` 一个目录保住全部数据。** 数据层 `data/www/` 直接对应容器 `/www`（站点就在
-   `data/www/wwwroot/`），系统层 `data/system/` 收起 `etc usr var root opt home srv` 八个目录的
-   overlay 上层与项目元数据。混合模式会把系统层拆到独立的 `system/` 卷里（见[编排配置详解](docs/configuration.md)）。
+1. **`data/` 一个目录保住全部数据。** 面板在 `data/www/`（直接对应容器 `/www`），站点在
+   `data/wwwroot/`（对应 `/www/wwwroot`），系统层 `data/system/` 收起 `etc usr var root opt home srv`
+   八个目录的 overlay 上层与项目元数据。混合模式会把系统层拆到独立的 `system/` 卷里（见[编排配置详解](docs/configuration.md)）。
 2. **不要在面板里点「更新」。** 面板版本由镜像决定，面板内更新会把新版文件写进
    持久化层、永久屏蔽镜像层。镜像升级才是干净的升级路径。
 3. **口令写在 compose 等于公开。** 镜像里没有任何固定口令，首次启动随机生成并打印到日志；
@@ -78,8 +78,8 @@ overlay 上层与项目元数据）。两者也可拆成两个挂载（混合模
 
 ```
 lowerdir = 镜像内的同名目录（换镜像即更新）
-upperdir = /data/www/<目录>     或  /data/system/<目录>
-workdir  = /data/www/.baota/work/<目录>.work   或  /data/system/.baota/work/<目录>.work
+upperdir = /data/<目录>     或  /data/system/<目录>
+workdir  = /data/.baota/work/<目录>.work   或  /data/system/.baota/work/<目录>.work
 ```
 
 **你从没动过的文件跟镜像走，你改过的文件跟持久化层走** —— 和真机升级的语义一致。
@@ -99,7 +99,7 @@ make health-upgrade           # 升级 / 降级路径（版本护栏 + 快照 + 
 make health-all               # 一次跑全上面三套
 make lint                     # shellcheck + bash -n + YAML 语法
 
-docker exec baota baota-backup              # 全量备份（落在 data/www/backup/manual/）
+docker exec baota baota-backup              # 全量备份（落在 data/backup/manual/）
 docker exec baota baota-backup --list       # 体积分布 + 磁盘水位
 docker exec baota baota-backup --rsync /backup  # 增量同步（首次全量，之后只传变化）
 make reset-system CONFIRM=yes               # 重置系统层，数据层不受影响

@@ -131,7 +131,7 @@ journald 上限 / logrotate 配置 / 生产 healthcheck 脚本 / 关键文件路
 
 功能检查全程只用「命名卷 + 单挂」一种挂载方式，这套补上它测不到的两类场景：
 
-**A 阶段（混合挂载：`./data:/data/www` + `./system:/data/system`）**
+**A 阶段（混合挂载：`./data:/data` + `./system:/data/system`）**
 两层目录在宿主机上各归各位 / 系统层无多余的 `www` 目录（构建期漂移回归）/
 写入落点正确 / 重建后不丢数据
 

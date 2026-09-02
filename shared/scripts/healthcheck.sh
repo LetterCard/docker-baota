@@ -28,14 +28,15 @@
 #
 # 磁盘水位查的是「持久化根」。用户一旦覆盖 PERSIST_DATA_ROOT /
 # PERSIST_SYSTEM_ROOT，这里的路径必须跟着变 ——
-# 写死 /data/www 会导致目录不存在 → 被判成 disk_ok=0 → 容器永远 unhealthy，
-# 而且现象与「磁盘真的满了」完全无法区分，是最难排查的一类故障
+# 写死路径（比如旧版的 /data/www）会导致目录不存在 → 被判成 disk_ok=0
+# → 容器永远 unhealthy，而且现象与「磁盘真的满了」完全无法区分，
+# 是最难排查的一类故障
 # ------------------------------------------------------------------------------
 if [ -f /baota/defaults.env ]; then
     . /baota/defaults.env
 fi
 
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data/www}"
+PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 DISK_MIN_AVAIL_MB="${DISK_MIN_AVAIL_MB:-1024}"
 DISK_MAX_USED_PCT="${DISK_MAX_USED_PCT:-95}"

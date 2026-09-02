@@ -24,17 +24,17 @@ docker compose up -d
 docker compose logs -f baota  # 首次登录信息在这里
 ```
 
-数据落在 `docker-compose.yml` 同级的 `data/` 目录里（数据层 `data/www/` 与系统层 `data/system/`），
+数据落在 `docker-compose.yml` 同级的 `data/` 目录里（数据层就铺在 `data/` 下，系统层在 `data/system/`），
 删容器、重建、换镜像都不丢。也可拆成混合挂载（见[编排配置详解](configuration.md)）。
-唯一硬要求：**持久化根（数据层 `/data/www`、系统层 `/data/system`）必须在 ext4 / btrfs / xfs 上**
+唯一硬要求：**持久化根（数据层 `/data`、系统层 `/data/system`）必须在 ext4 / btrfs / xfs 上**
 （飞牛存储池就是，直接可用）。
 
 ---
 
 ## 三个必须先知道的约定
 
-1. **`data/` 一个目录保住全部数据。** 数据层 `data/www/` 对应容器 `/www`（站点就在
-   `data/www/wwwroot/`），系统层 `data/system/` 收起 `etc usr var root opt home srv` 的
+1. **`data/` 一个目录保住全部数据。** 面板在 `data/www/`（对应容器 `/www`），站点在
+   `data/wwwroot/`（对应 `/www/wwwroot`），系统层 `data/system/` 收起 `etc usr var root opt home srv` 的
    overlay 上层与项目元数据。混合模式会把系统层拆到 `system/` 卷里（见[编排配置详解](configuration.md)）。
 2. **不要在面板里点「更新」。** 面板版本由镜像决定，面板内更新会把新版文件
    写进持久化层、永久屏蔽镜像层。镜像升级才是干净的升级路径（见[升级与迁移](upgrade.md)）。
@@ -47,7 +47,7 @@ docker compose logs -f baota  # 首次登录信息在这里
 
 | 词 | 含义 |
 |---|---|
-| **持久化层 / upper** | 数据层 `/data/www/<目录>` 或系统层 `/data/system/<目录>`，容器销毁不丢的那部分。只记录「你新建或改过的文件」 |
+| **持久化层 / upper** | 数据层 `/data/<目录>` 或系统层 `/data/system/<目录>`，容器销毁不丢的那部分。只记录「你新建或改过的文件」 |
 | **镜像层 / lower** | 镜像自带的同名目录。换镜像即更新，你从没动过的文件自动跟着变 |
 | **直通挂载** | 少数目录不走 overlay，直接 bind 到宿主机同名目录（站点、备份、MySQL 数据） |
 | **通道** | stable（稳定线 12.x，每周跟进）与 release（正式版最新，每天跟进） |

@@ -19,7 +19,7 @@
 
 ### workdir 为什么用固定名 + 启动时清理
 
-内核要求 workdir 与 upperdir 同文件系统，所以数据层放在 `/data/www/.baota/work/`、系统层放在 `/data/system/.baota/work/`。
+内核要求 workdir 与 upperdir 同文件系统，所以数据层放在 `/data/.baota/work/`、系统层放在 `/data/system/.baota/work/`。
 清理与挂载都在 `flock` 独占锁的保护下，同一时刻不可能有另一个实例在用。
 锁由内核持有、容器死亡自动释放，非正常退出不会留下死锁。
 

@@ -24,7 +24,7 @@ if [ -f /baota/defaults.env ]; then
     . /baota/defaults.env
 fi
 
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data/www}"
+PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"

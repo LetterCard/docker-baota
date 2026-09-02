@@ -8,7 +8,7 @@
 #    core.sh   19 项功能检查（面板 / 凭据 / 补丁 / 备份 / 日志防线 …），
 #              全程只用「命名卷 + 单挂 /data」这一种挂载方式
 #    本脚本            只补两件它没覆盖、但同样致命的事：
-#                      A) 混合挂载（./data:/data/www + ./system:/data/system）
+#                      A) 混合挂载（./data:/data + ./system:/data/system）
 #                         能否正常启动、写入落点是否正确、重建后是否不丢
 #                      B) 持久化根被挂成只读时，是否真的被识别为降级
 #                        （「挂载成功但写入静默丢失」是本方案最危险的失效模式）
@@ -34,6 +34,10 @@ PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_DATA_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_DIRS"; exit 1; }
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
 PASSTHROUGH_DIRS=$(read_default PASSTHROUGH_DIRS)
+# 两层「根」也读真源：直通目录的宿主机侧路径由「数据层根 + 容器内路径去掉 /www」拼出，
+# 从真源派生而不是硬写 /data/www…，以后挪根不会再漏改
+PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
+[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
 
 WORK_ROOT=$(mktemp -d)
 CONTAINER="baota-mounts-$$"
@@ -82,14 +86,17 @@ wait_systemd() {
     esac
 }
 
-# 混合挂载的启动参数：数据层与系统层各一个 bind 目录
+# 混合挂载的启动参数：数据层与系统层各一个 bind 目录。
+# 数据层根就是 /data 本身，所以第一处挂 ./data:/data；
+# 系统层根 /data/system 是它的子路径，第二处后挂覆盖先挂（Docker 按路径深度排序），
+# 于是 etc/usr/var… 与 .baota 落在 system/ 上，而 www/wwwroot/backup/server 落在 data/ 上
 start_mixed() {
     docker run -d --name "$CONTAINER" \
         --privileged \
         --tmpfs /run --tmpfs /run/lock \
         --shm-size=512m \
         --stop-signal=SIGRTMIN+3 \
-        -v "${WORK_ROOT}/data:/data/www" \
+        -v "${WORK_ROOT}/data:/data" \
         -v "${WORK_ROOT}/system:/data/system" \
         "$IMAGE" >/dev/null || fail "混合挂载模式下容器无法启动"
 }
@@ -139,8 +146,8 @@ inside_sh 'echo mix > /www/_mix_marker'
 inside_sh 'echo mix > /www/wwwroot/_mix_marker'
 # 落盘路径语义：
 #   /etc        系统层 overlay，upper 在 system/etc/
-#   /www        数据层 overlay，upper 在 data/www/（www 是 PERSIST_DATA_DIRS 的一员，
-#               upper = 数据层根/<dir>，比直觉多一层）—— 不是 data/ 根下
+#   /www        数据层 overlay，upper 在 data/www/ —— 数据层根挂在 data/ 上，
+#               唯一成员 www 的 upper 直接就是 data/www/，与容器内的 /www 对齐
 #   /www/wwwroot 直通 bind，源就是 data/wwwroot/（与 overlay upper 平级）
 [ -f "${WORK_ROOT}/system/etc/_mix_marker" ]   || fail "/etc 写入未落到系统层 system/etc/"
 [ -f "${WORK_ROOT}/data/www/_mix_marker" ]     || fail "/www 写入未落到数据层 upper（data/www/）"
@@ -150,7 +157,7 @@ pass "写入分别落到 system/、data/www/（overlay upper）与 data/wwwroot/
 # shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
 for t in $PASSTHROUGH_DIRS; do
     inside_sh "grep -q ' /www${t#/www} ' /proc/mounts" \
-        || fail "直通目录未挂载：${t}（宿主机侧应为 /data/www${t#/www}）"
+        || fail "直通目录未挂载：${t}（宿主机侧应为 ${PERSIST_DATA_ROOT}${t#/www}）"
 done
 pass "直通目录已挂载：${PASSTHROUGH_DIRS}"
 

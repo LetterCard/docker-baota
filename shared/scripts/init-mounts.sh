@@ -28,7 +28,7 @@ if [ -f /baota/defaults.env ]; then
     . /baota/defaults.env
 fi
 
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data/www}"
+PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
@@ -227,11 +227,96 @@ migrate_old_layout() {
 }
 
 # ==============================================================================
+#  1b. 数据层布局迁移（/data/www 根 -> /data 根，一次性）
+#
+#  旧版数据层根是 /data/www，而数据层唯一的持久化成员也叫 www，
+#  于是 overlay upper 落在 /data/www/www —— 宿主机上多出一层「www 套 www」，
+#  与容器内的 /www 对不上。现在数据层根上提到 /data，upper 就是 /data/www。
+#
+#  要搬的四处：
+#    overlay upper  /data/www/www          -> /data/www
+#    直通 站点      /data/www/wwwroot      -> /data/wwwroot
+#    直通 备份      /data/www/backup       -> /data/backup
+#    直通 MySQL     /data/www/server/data  -> /data/server/data
+#  另有 v2 的数据层状态目录 /data/www/.baota —— 里面只有并发锁与 overlay workdir，
+#  都是每次启动重建的临时内容，v3 里对应 /data/.baota，直接删掉不搬运。
+#
+#  ★ 判据用 /data/www/.baota，不用 /data/www/www：
+#    /data/www/www 在 v3 里理论上可能由面板自建（极罕见），误判会把它拍平；
+#    而 /data/www/.baota 只有「数据层根 = /data/www」时的 acquire_lock 才会建，
+#    是可靠的旧布局指纹，且 v1 / v2 都成立。
+#
+#  ★ 用 cp -a + rm -rf，不用 mv：
+#    cp -a 与目标目录合并，中途失败不丢数据，下个启动周期还能重来；
+#    mv 一旦中断就留下半份数据，无法自动恢复。
+# ==============================================================================
+migrate_data_layout() {
+    # 数据层根仍停在 /data/www 时不迁移（用户自己覆盖成旧值，尊重他的配置）
+    [ "${PERSIST_DATA_ROOT}" = '/data/www' ] && return 0
+    # 旧布局指纹：数据层状态目录留在旧位置
+    [ -d '/data/www/.baota' ] || return 0
+
+    log '检测到旧版数据层布局（data/www 下多一层 www），正在迁移到新布局'
+
+    # ① v2 的数据层状态目录只有锁与 workdir，都是每次启动重建的临时内容
+    rm -rf '/data/www/.baota' 2> /dev/null || true
+
+    # ② 新布局的落点先建好
+    mkdir -p "${DATA_STATE_DIR}" '/data/www' '/data/wwwroot' '/data/backup' \
+             '/data/server/data' 2> /dev/null || true
+
+    # ③ 三个直通目录：整体搬到与 /data/www 平级的新位置
+    _moved=0
+    for _pair in '/data/www/wwwroot:/data/wwwroot' \
+                 '/data/www/backup:/data/backup' \
+                 '/data/www/server/data:/data/server/data'; do
+        _old="${_pair%%:*}"
+        _new="${_pair#*:}"
+        [ -d "${_old}" ] || continue
+        # 空目录说明用户从未往里写过东西，直接删，不留空壳
+        if [ -z "$(ls -A "${_old}" 2> /dev/null)" ]; then
+            rm -rf "${_old}" 2> /dev/null || true
+            continue
+        fi
+        if cp -a "${_old}/." "${_new}/" 2> /dev/null; then
+            rm -rf "${_old}" 2> /dev/null || true
+            log "已迁移 ${_old} -> ${_new}"
+            _moved=1
+        else
+            warn "迁移失败：${_old} 的内容未能并入 ${_new}，请手动处理后再启动"
+            mark_degraded "数据层布局迁移失败：${_old}"
+        fi
+    done
+
+    # ④ overlay upper：内容上提一层到 /data/www。
+    #    必须在直通目录搬完之后做，否则会把旧直通目录又复制进新 upper
+    if [ -d '/data/www/www' ]; then
+        if cp -a '/data/www/www/.' '/data/www/' 2> /dev/null; then
+            rm -rf '/data/www/www' 2> /dev/null || true
+            log '已迁移 /data/www/www -> /data/www（与容器内的 /www 对齐）'
+            _moved=1
+        else
+            warn '迁移失败：/data/www/www 的内容未能并入 /data/www，请手动处理后再启动'
+            mark_degraded '数据层布局迁移失败：/data/www/www'
+        fi
+    fi
+
+    # ⑤ 清掉旧布局遗留的空壳（/data/www/server 只是为挂 data 建的父目录）。
+    #    ④ 若已把面板内容拷回来，这里自然删不掉，无害
+    rmdir '/data/www/server' 2> /dev/null || true
+
+    if [ "${_moved}" = '1' ]; then
+        log '数据层布局迁移完成：宿主机目录已与容器内路径对齐'
+    fi
+    return 0
+}
+
+# ==============================================================================
 #  2. overlay 分层持久化
 #
 #    lowerdir = 镜像内的同名目录（随镜像升级而更新）
-#    upperdir = /data/www/<dir> 或 /data/system/<dir>（与容器内路径同名，容器销毁不丢）
-#    workdir  = /data/www/.baota/work/<dir>.work 或 /data/system/.baota/work/<dir>.work（内部元数据，须与 upper 同文件系统）
+#    upperdir = /data/<dir> 或 /data/system/<dir>（与容器内路径同名，容器销毁不丢）
+#    workdir  = /data/.baota/work/<dir>.work 或 /data/system/.baota/work/<dir>.work（内部元数据，须与 upper 同文件系统）
 #
 #  ★ index=off 是必须的，不是优化：
 #    内核文档 Overlay Filesystem 明确——「用同一个 upper 挂载不同的 lower」
@@ -272,7 +357,7 @@ mount_persist() {
         warn "overlay 挂载失败：/${_dir} 本次不会持久化"
         warn '  常见原因：'
         warn '    1) 容器未以 --privileged 运行（挂载 overlay 需要 CAP_SYS_ADMIN）'
-        warn '    2) 持久化根（/data/www 或 /data/system）本身位于 overlay 之上（例如落在容器可写层里）'
+        warn '    2) 持久化根（/data 或 /data/system）本身位于 overlay 之上（例如落在容器可写层里）'
         warn '    3) 宿主机内核未启用 overlayfs'
         warn '  与「挂载成功但只读」不同，这种情况文件系统层面直接拒绝挂载'
         mark_degraded "${_dir}: overlay 挂载失败"
@@ -296,7 +381,7 @@ mount_persist() {
     fi
 
     warn "/${_dir} 的持久化层挂载成功但不可写，本次不会持久化"
-    warn "  原因通常是持久化根（/data/www 或 /data/system）位于 virtiofs / NFS / 9p 等文件系统"
+    warn "  原因通常是持久化根（/data 或 /data/system）位于 virtiofs / NFS / 9p 等文件系统"
     warn "  请让持久化根落在 ext4 / xfs / btrfs 上，或改用 Docker 管理的 volume"
     rm -f "${_lower}/${PROBE}" 2> /dev/null || true
     mark_degraded "${_dir}: 挂载成功但不可写"
@@ -313,7 +398,7 @@ mount_persist() {
 #      数据库是容器里唯一有崩溃恢复语义的组件，不该放在不确定层上。
 #    - chattr +i 在直通目录上行为与真机一致（面板用它锁 .user.ini）。
 #
-#  关键点：宿主机路径与容器路径一一对应（/www/wwwroot -> /data/www/wwwroot），
+#  关键点：宿主机路径与容器路径一一对应（/www/wwwroot -> /data/wwwroot），
 #  因此不新增顶层目录、不改备份方式、不需要数据搬迁。
 #
 #  顺序要求：必须先挂完 /www 的 overlay，再 bind 子目录，
@@ -352,7 +437,7 @@ seed_passthrough() {
 
 mount_passthrough() {
     _target="$1"
-    # 直通目录都在数据层内：/www/wwwroot -> /data/www/wwwroot
+    # 直通目录都在数据层内：/www/wwwroot -> /data/wwwroot
     _upper="${PERSIST_DATA_ROOT}${_target#/www}"
 
     [ -d "${_target}" ] || mkdir -p "${_target}" 2> /dev/null || true
@@ -388,6 +473,10 @@ main() {
     for _dir in ${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS}; do
         migrate_old_layout "${_dir}" || true
     done
+
+    # ---- 1b. 数据层布局迁移（旧版 /data/www 根 -> 现在的 /data 根）----
+    # 必须在 overlay 挂载之前跑：挂载之后 /data/www 就是 upper，动不得了
+    migrate_data_layout
 
     # 旧版把 overlay 工作目录放在 /data/.work，新版收进 .baota/work。
     # 此时尚未挂载任何 overlay 且已持锁，删除是安全的

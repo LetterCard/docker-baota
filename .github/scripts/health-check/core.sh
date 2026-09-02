@@ -38,6 +38,12 @@ PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
 ALL_PERSIST_DIRS="${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS}"
 PASSTHROUGH_DIRS=$(read_default PASSTHROUGH_DIRS)
+# 两层「根」也一起读真源：落盘路径全部由根 + 成员名拼出来。
+# 之前脚本里硬写 /data/www/…，改成从真源派生，以后挪根不会再漏改
+PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
+PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
+[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
+[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 
 pass() { echo "  ✅ $*"; }
 step() { echo; echo "🩺 ==== $* ===="; }
@@ -164,20 +170,20 @@ EXPECT_MOUNTS=$(echo "$ALL_PERSIST_DIRS" | wc -w | tr -d ' ')
     || fail "overlay 挂载数 ${MOUNTED}，期望至少 ${EXPECT_MOUNTS} 个"
 pass "overlay 挂载 ${MOUNTED} 个，无只读告警"
 
-# 数据层目录落在 /data/www/<dir>，系统层目录落在 /data/system/<dir>
+# 数据层目录落在「数据层根/<dir>」，系统层落在「系统层根/<dir>」
 for d in $ALL_PERSIST_DIRS; do
     case " $PERSIST_DATA_DIRS " in
-        *" $d "*) m="/data/www/${d}" ;;
-        *)            m="/data/system/${d}" ;;
+        *" $d "*) m="${PERSIST_DATA_ROOT}/${d}" ;;
+        *)            m="${PERSIST_SYSTEM_ROOT}/${d}" ;;
     esac
     inside test -d "$m" || fail "持久化目录缺失：${m}"
 done
 pass "${EXPECT_MOUNTS} 个持久化目录齐备"
 
-# 直通目录都在数据层内，宿主机侧路径为 /data/www${t#/www}
+# 直通目录都在数据层内，宿主机侧路径为「数据层根${t#/www}」
 for t in $PASSTHROUGH_DIRS; do
     inside_sh "grep -q ' /www${t#/www} ' /proc/mounts" \
-        || fail "直通目录未挂载：${t}（宿主机侧应为 /data/www${t#/www}）"
+        || fail "直通目录未挂载：${t}（宿主机侧应为 ${PERSIST_DATA_ROOT}${t#/www}）"
 done
 pass "直通目录已挂载：${PASSTHROUGH_DIRS}"
 
@@ -303,14 +309,15 @@ inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_m
 inside_sh 'echo persist > /www/wwwroot/_persist_marker'
 # 落盘路径语义（容易搞混，写清楚再检查）：
 #   /etc /var      系统层 overlay，upper 在 /data/system/<dir>
-#   /www           数据层 overlay，upper 在 /data/www/www —— www 是 PERSIST_DATA_DIRS
-#                  的一员，upper = PERSIST_DATA_ROOT/<dir>，比直觉多一层 /www
-#   /www/wwwroot   直通 bind，源就是 /data/www/wwwroot（与 overlay upper 平级）
+#   /www           数据层 overlay，upper 就在 /data/www —— 数据层根是 /data，
+#                  唯一成员 www 的 upper = PERSIST_DATA_ROOT/<dir> = /data/www，
+#                  与容器内的 /www 一一对应，没有多一层
+#   /www/wwwroot   直通 bind，源是 /data/wwwroot（与 overlay upper /data/www 平级）
 inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f /data/www/www/_persist_marker               || fail "/www 写入未落盘（overlay upper 应为 /data/www/www）"
-inside test -f /data/www/wwwroot/_persist_marker    || fail "/www/wwwroot 写入未落到 /data/www/wwwroot"
+inside test -f /data/www/_persist_marker                   || fail "/www 写入未落盘（overlay upper 应为 /data/www）"
+inside test -f /data/wwwroot/_persist_marker               || fail "/www/wwwroot 写入未落到 /data/wwwroot"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入已落到 /data/www/www 与 /data/system/<目录>"
+pass "写入已落到 /data/www 与 /data/system/<目录>"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
@@ -372,7 +379,8 @@ fi
 # 从持久化层取最新备份文件 —— 不再解析 baota-backup 的 stdout。
 # 之前用 tail -1 提取路径的写法，在 verify 失败时会把 verify 的
 # echo 行（"✅ 含 xxx"）误当路径，让错误链条完全错乱。
-BACKUP_PATH=$(inside_sh "ls -1t /data/www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
+# 备份落在直通目录 /www/backup 下，其宿主机侧源是「数据层根/backup」
+BACKUP_PATH=$(inside_sh "ls -1t ${PERSIST_DATA_ROOT}/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
 [ -n "${BACKUP_PATH}" ] || fail "未找到备份文件（baota-backup 报告成功但持久化层没产物）"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
 

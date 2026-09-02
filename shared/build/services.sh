@@ -43,7 +43,7 @@ if [ -f "${BAOTA_DIR}/defaults.env" ]; then
 fi
 
 # ---- 入参兜底：仅在 defaults.env 缺失时生效，值与真源保持一致 ----
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data/www}"
+PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"

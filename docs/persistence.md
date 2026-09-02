@@ -50,11 +50,16 @@ srv    系统层：服务数据
 
 ### `data/` 的结构
 
-可写层按职责收进两个子目录，**数据层 `www/` 与用户唯一关心的面板/站点/数据库对应，
-系统层 `system/` 收起其余目录**，与容器内路径一一对应：
+可写层按职责收进两个子目录，**数据层根就是 `data/` 本身**——overlay upper 落在
+`data/www/`，与容器内的 `/www` 一一对应，没有多余层级；站点/备份/MySQL 三个直通目录
+是它的平级兄弟；**系统层 `system/` 收起其余目录**，与容器内路径一一对应：
 
 ```
-data/www/         ↔ 容器 /www（面板、数据库、备份、证书、站点）
+data/www/         ↔ 容器 /www（面板、证书；overlay upper）
+data/wwwroot/     ↔ 容器 /www/wwwroot（站点，直通）
+data/backup/      ↔ 容器 /www/backup（备份，直通）
+data/server/data/ ↔ 容器 /www/server/data（MySQL，直通）
+data/.baota/      ← 数据层工作目录（隐藏目录：并发锁 + overlay workdir）
 data/system/etc/  ↔ 容器 /etc
 data/system/usr/  ↔ 容器 /usr
 data/system/var/  ↔ 容器 /var
@@ -63,14 +68,14 @@ data/system/opt/  data/system/home/  data/system/srv/
 data/system/.baota/  ← 项目元数据（隐藏目录）
 ```
 
-站点文件就在 `data/www/wwwroot/`，MySQL 数据在 `data/www/server/data/`，
-备份在 `data/www/backup/`——和面板内布局完全一致，宿主机直接翻看管理。
+站点文件就在 `data/wwwroot/`，MySQL 数据在 `data/server/data/`，
+备份在 `data/backup/`——和面板内布局完全一致，宿主机直接翻看管理。
 系统层目录（`data/system/...`）用户一般不用翻，跨机器迁移/备份时整体带走即可。
 
 ⚠️ 注意：可写层是「增量」不是「全量」——镜像里已有的文件（如面板本体
 `/www/server/panel`）不在 `data/` 里，只有你新建或改过的文件才会出现。
 **唯一例外是 `wwwroot`**：面板安装时它是空的，站点全是运行期建的，
-所以 `data/www/wwwroot/` 里的内容就是全部站点，可直接管理。
+所以 `data/wwwroot/` 里的内容就是全部站点，可直接管理。
 
 ---
 
@@ -95,9 +100,9 @@ data/system/.baota/  ← 项目元数据（隐藏目录）
 
 ```
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
-upperdir = /data/www/<目录>         （数据层：持久化层，容器销毁不丢）
+upperdir = /data/<目录>             （数据层：持久化层，容器销毁不丢）
            或 /data/system/<目录>    （系统层：同上）
-workdir  = /data/www/.baota/work/<目录>.work
+workdir  = /data/.baota/work/<目录>.work
            或 /data/system/.baota/work/<目录>.work  （内部工作目录，每次启动重建，须与 upper 同盘）
 ```
 
@@ -116,12 +121,12 @@ workdir  = /data/www/.baota/work/<目录>.work
 在 overlay 挂载**之后**再以 bind 方式直通到宿主机的同名目录：
 
 ```
-/www/wwwroot      <-  /data/www/wwwroot
-/www/backup       <-  /data/www/backup
-/www/server/data  <-  /data/www/server/data
+/www/wwwroot      <-  /data/wwwroot
+/www/backup       <-  /data/backup
+/www/server/data  <-  /data/server/data
 ```
 
-宿主机路径**完全不变**（`data/www/wwwroot/` 就是站点目录，与官方布局一致），
+宿主机路径与容器内一一对应（`data/wwwroot/` 就是站点目录，与官方布局一致），
 也不需要任何数据迁移。为什么这三个不走 overlay：
 
 - **宿主机在线读写有内核保证**。内核文档：overlay 挂载期间直接改动底层 upper 属未定义行为；
@@ -244,7 +249,7 @@ overlay 把「删除」和「替换」记在持久化层里，形式有两种：
 
 ## ⛔ 硬约束
 
-**持久化根（数据层 `/data/www`、系统层 `/data/system`）必须落在宿主机的 ext4 / btrfs / xfs 上。**
+**持久化根（数据层 `/data`、系统层 `/data/system`）必须落在宿主机的 ext4 / btrfs / xfs 上。**
 
 放到 SMB / NFS 网络共享、exFAT / NTFS 移动盘、或 macOS / Windows 的宿主机目录上，
 overlay 会「挂载成功但降级为只读」，之后所有写入静默失败。容器启动时会实测写入并明确告警。

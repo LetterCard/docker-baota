@@ -99,10 +99,13 @@ services:
 
     # ---- 💾 持久化：两种挂载方式，二选一（默认①）----
     # 持久化按职责拆两层：
-    #   数据层  data/www/    面板、数据库、备份、证书 + 站点（data/www/wwwroot）
-    #   系统层  data/system/  etc usr var root opt home srv 的 overlay 上层
+    #   数据层  data/www/       面板（overlay upper，对应容器内的 /www，没有多余层级）
+    #           data/wwwroot/   站点（直通，对应容器内的 /www/wwwroot）
+    #           data/backup/    面板备份（直通，对应 /www/backup）
+    #           data/server/    MySQL 数据（直通，对应 /www/server/data）
+    #   系统层  data/system/    etc usr var root opt home srv 的 overlay 上层
     #   元数据  data/system/.baota/  overlay 工作目录、并发锁、版本记录、启动历史
-    # 两层路径与容器内一一对应，没有多余层级，备份/迁移命令两种模式通用。
+    # 各目录与容器内一一对应，备份/迁移命令两种模式通用。
     #
     # ① 单挂（默认，最简单）：一个 data/ 保住全部数据
     #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
@@ -115,10 +118,11 @@ services:
       - ./data:/data
 
     # ② 混合挂载（取消注释即可，同时注释掉上面的 volumes 整块）：
-    #    数据层在 ./data（bind，飞牛文件管理可直接看到站点/面板），
+    #    数据层在 ./data（bind，飞牛文件管理可直接看到站点/面板/备份），
     #    系统层在 ./system（bind，单独一个目录，便于和站点数据分开管理）。
+    #    系统层根 /data/system 是数据层根 /data 的子路径，Docker 按路径深度后挂覆盖先挂。
     # volumes:
-    #   - ./data:/data/www
+    #   - ./data:/data
     #   - ./system:/data/system
 
     # 用 Docker 自带的默认 bridge 网络，不额外创建项目专属网络：
@@ -143,7 +147,7 @@ services:
     # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，三段：
     #   1) /run/baota/degraded-critical 不存在 —— etc/var/www 任一持久化失败
     #      或只读降级时由 init-mounts 写入，让失效在 compose ps 里直接可见；
-    #   2) /data/www 与 /data/system 磁盘水位 —— 任一可用 < 1GB 或已用 ≥ 95% 即 unhealthy，
+    #   2) /data 与 /data/system 磁盘水位 —— 任一可用 < 1GB 或已用 ≥ 95% 即 unhealthy，
     #      满盘前在 docker ps / 飞牛 UI 上就能看到，而不是等 MySQL 崩；
     #   3) 面板端口可访问 —— 端口可能被用户改掉，从 port.pl 现读，http 失败再试 https。
     # 判据要调整就改脚本（可单独执行测试），compose 这边不用动。
