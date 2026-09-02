@@ -120,7 +120,7 @@ docker compose logs -f baota
 
 1. **面板端口**：新机器的端口映射要和 `data/www/server/panel/data/port.pl` 里的值对得上
 2. **架构**：amd64 与 arm64 的镜像不通用。跨架构迁移（例如 x86 换 ARM 飞牛）时，
-   编译好的 nginx / php / MySQL 二进制就躺在 `data/usr` 与 `data/www/server` 里，
+   编译好的 nginx / php / MySQL 二进制就躺在 `data/system/usr` 与 `data/www/server` 里，
    迁移过去起不来。**跨架构迁移只搬业务数据**：在新机器上全新启动，
    再用面板导入站点文件与数据库备份
 3. **文件系统**：新位置必须是 ext4 / btrfs / xfs，否则持久化层会降级为只读（见[硬约束](persistence.md#硬约束)）

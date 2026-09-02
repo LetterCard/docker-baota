@@ -48,7 +48,7 @@ PROBE=.persist-writable-probe
 
 # overlay 要求 workdir 与 upperdir 位于同一文件系统（内核硬性要求），
 # 所以 work 只能放在对应持久化层内、且必须与 upper 同盘：
-#   数据层 work -> /data/www/.baota/work
+#   数据层 work -> /data/.baota/work
 #   系统层 work -> /data/system/.baota/work
 # 项目元数据（并发锁 / 版本记录 / 启动历史）收进系统层的 .baota，
 # 无论单挂还是混合挂载模式都能持久化

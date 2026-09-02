@@ -268,7 +268,7 @@ jobs:
 
       # 上面 19 项只覆盖了「命名卷 + 单挂 /data」一种挂载方式。
       # 这里补两类同样致命、但那边测不到的场景：
-      #   混合挂载（./data:/data/www + ./system:/data/system）能否正常工作
+      #   混合挂载（./data:/data + ./system:/data/system）能否正常工作
       #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
       - name: 🧪 验证 2/3：挂载方式与降级场景
         run: bash .github/scripts/health-check/run.sh mounts "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.value }}-${{ matrix.arch }}"

@@ -144,7 +144,8 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 # 会丢什么：已安装的面板插件（panel/plugin，可从软件商店重装）
 # 不受影响：站点、MySQL 数据、备份、证书（都在 panel 之外）
 #
-# 面板代码路径两种挂载模式差一层（数据层 upper 的位置不同），与升级快照同理
+# 面板代码路径：两种挂载模式下数据层根都是 data/，面板 upper 就在 data/www/server/panel，
+# 不再需要区分挂载方式（旧版单挂曾在 data/www/www 下多套一层，逻辑已简化）
 reset-panel: ## 重置面板代码到镜像版本：make reset-panel CONFIRM=yes
 	@[ "$(CONFIRM)" = "yes" ] || { \
 	    echo '⚠️  面板代码将重置回当前镜像的版本：'; \
@@ -160,7 +161,7 @@ reset-panel: ## 重置面板代码到镜像版本：make reset-panel CONFIRM=yes
 	}
 	@set -eu; \
 	cd "$(CHANNEL_DIR)"; \
-	if [ -d system ]; then PANEL=data/www/server/panel; else PANEL=data/www/www/server/panel; fi; \
+	PANEL=data/www/server/panel; \
 	if [ ! -d "$$PANEL" ]; then \
 	    echo "未找到面板目录：$$PANEL。容器还没启动过，或挂载方式不是这两种。"; \
 	    exit 1; \

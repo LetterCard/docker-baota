@@ -21,10 +21,13 @@ allowed-tools: Read,Bash,Grep,Glob
 
 ```
 /data（宿主机 data/，bind mount）
- ├── etc usr var www root opt home srv   ← overlay 的 upperdir，只存增量
- │     lower = 镜像内同名目录（换镜像即更新）
- │     upper = /data/<目录>（容器销毁不丢）
- └── .baota/                             ← 元数据：work/ lock image-version boot-history.log
+ ├── www/          ← 容器 /www 的 overlay upperdir（面板，只存增量；lower=镜像 /www）
+ ├── wwwroot/      ← 直通 bind 源（= 容器 /www/wwwroot，站点）
+ ├── backup/       ← 直通 bind 源（= 容器 /www/backup，备份）
+ ├── server/data/  ← 直通 bind 源（= 容器 /www/server/data，MySQL）
+ ├── system/       ← 系统层根：etc usr var root opt home srv 的 upperdir
+ │    └── .baota/  ← 元数据：work/ lock image-version boot-history.log
+ └── .baota/       ← 数据层状态（lock + overlay workdir）
 
 直通挂载（bind，绕过 overlay）：/www/wwwroot  /www/backup  /www/server/data
 
