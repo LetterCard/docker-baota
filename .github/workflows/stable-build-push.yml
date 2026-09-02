@@ -1,7 +1,7 @@
 name: 🚀 stable：构建并发布镜像
 
 # ==============================================================================
-#  🚀 [stable 通道] 多架构构建 → 17 项健康检查 → 发布到 DockerHub
+#  🚀 [stable 通道] 多架构构建 → 19 项健康检查 → 发布到 DockerHub
 #
 #    与 release 通道（release-build-push.yml）的区别：
 #      - 版本来源：stable/VERSION（version job 每次运行时自动探测校准）
@@ -165,9 +165,36 @@ jobs:
             echo "| 结果 | ${TEXT} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ---------------------------------------------------------------------------
+  # 🧹 静态检查：shellcheck + 语法 + YAML
+  #
+  # 本地 `make lint` 在没装 shellcheck 时会「跳过」，等于这道检查长期没人真正跑过。
+  # 放到 CI 里先装工具再跑，脚本质量才有持续保障。
+  #
+  # 与版本探测无关，所以**无条件运行**：即使本次不发布镜像，
+  # 代码问题也能在当天被发现，而不是等到下次发布才暴露
+  # ---------------------------------------------------------------------------
+  lint:
+    name: 🧹 静态检查（shellcheck + 语法 + YAML）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔧 安装检查工具
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y shellcheck python3-yaml
+          shellcheck --version
+          python3 -c "import yaml; print('PyYAML ok')"
+
+      - name: 🧹 shellcheck + 语法 + YAML 检查
+        run: make lint
+
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
-    needs: version
+    needs: [version, lint]
     # 定时触发时只在探测到新版本才构建，否则每周都要空跑一整轮双架构构建
     # （单次约 40 分钟，还要重复覆盖 DockerHub 上已有的同一个标签）。
     # 手动触发则总是构建，方便在不改版本号的情况下重建镜像。
@@ -222,8 +249,26 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
-      - name: 🩺 发布前健康检查（未通过则不推送）
-        run: bash .github/scripts/health-check.sh "baota:candidate" "${{ needs.version.outputs.value }}"
+      - name: 🩺 功能检查（19 项，未通过则不推送）
+        run: |
+          bash .github/scripts/health-check/run.sh core \
+            "baota:candidate" "${{ needs.version.outputs.value }}"
+
+      # 上面 19 项只覆盖了「命名卷 + 单挂 /data」一种挂载方式。
+      # 这里补两类同样致命、但那边测不到的场景：
+      #   混合挂载（./data:/data/www + ./system:/data/system）能否正常工作
+      #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
+      - name: 🧪 挂载方式与降级场景检查（未通过则不推送）
+        run: bash .github/scripts/health-check/run.sh mounts "baota:candidate"
+
+      # 版本护栏、升级前快照、面板启动器刷新这三段**只在镜像版本变化时执行**，
+      # 全新卷永远走不到 —— 上面两套检查都覆盖不到。
+      # 这里通过改写持久化层里的版本记录，把「升级」与「降级」两条分支都跑一遍，
+      # 确认快照真的生成（且内容完整）、启动器真的被刷新、降级不会阻断启动
+      - name: 🔼 升级与降级路径检查（未通过则不推送）
+        run: |
+          bash .github/scripts/health-check/run.sh upgrade \
+            "baota:candidate" "${{ needs.version.outputs.value }}"
 
       - name: 🔑 登录 DockerHub
         uses: docker/login-action@v4.6.0

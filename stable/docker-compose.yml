@@ -12,8 +12,10 @@
 #  💾 数据默认存在本文件同级的 data/ 目录（飞牛项目就落在存储池上，直接用）；
 #  要换盘就改成绝对路径，例如 /vol2/baota/data。
 #
-#  🔌 端口：fnOS 占用 80/443/22，这里分别挪到 8080/8443/2222；
-#        需要宿主机 80/443 时的改法见 README「端口说明」。
+#  🔌 端口：fnOS 占用 80/443/22，这里分别挪到 8880/8443/2222；
+#        需要宿主机 80/443 时的改法见 docs/getting-started.md。
+#
+#  📖 逐项说明见 docs/configuration.md，备份见 docs/backup-restore.md
 # ==============================================================================
 name: baota
 
@@ -65,6 +67,16 @@ services:
         hard: 65535
       nproc: 65535
 
+    # ---- ⚙️ 资源上限（强烈建议 NAS 用户取消注释设置）----
+    # 不设上限：MySQL / php-fpm 内存失控时会拖垮整机上的其他服务。
+    # 内存怎么算：宿主机总内存 - 系统与其他服务占用 - 1G 余量
+    #   例：8G 机器、飞牛占 2G → 给 4g 左右
+    # ⚠️ 先设好 limit 再装 MySQL：宝塔按「容器看到的内存」自动调大 buffer pool，
+    #    装完请在面板「数据库 → 设置」压到 limit 的 25%~50%
+    #    详见 docs/operations.md「资源上限与规划」
+    # mem_limit: 4g
+    # cpus: 2.0
+
     # ---- 🔑 首次启动的初始凭据 ----
     # 镜像里不含固定口令（root 锁定，面板口令只是构建期占位）。
     # 下面四项不写或留空 = 全随机，启动后 docker compose logs 就能拿到：
@@ -72,7 +84,7 @@ services:
     #   PANEL_PASSWORD    随机 12 位，见首次启动日志
     #   PANEL_SAFE_PATH   随机 8 位，见面板地址 /login 前那一段
     #   ROOT_PASSWORD     随机 12 位，见首次启动日志
-    # 想自己指定就取消注释填写，详见 README「首次登录凭据」。
+    # 想自己指定就取消注释填写，详见 docs/getting-started.md「首次登录凭据」。
     # 口令写在本文件等于公开，既要固定又要保密请改用同目录的 .env。
     #
     # ★ 这些只在首次启动（data/ 为空）生效，之后再改这里无效，改用：
@@ -85,18 +97,29 @@ services:
       # PANEL_SAFE_PATH: ""         # 不写/留空 → 随机 8 位，见面板地址
       # ROOT_PASSWORD: ""           # 不写/留空 → 随机 12 位，见首次启动日志
 
-    # ---- 💾 持久化：一个 data 目录保住 8 个核心目录 ----
-    # data/<目录名> 就是容器内同名目录的可写层，路径一一对应，没有多余层级：
-    #   data/etc  data/usr  data/var  data/root  data/opt  data/home  data/srv
-    #   data/www          面板、数据库、备份、证书 + 站点
-    #   data/www/wwwroot  站点文件，和面板内布局完全一致
-    # data/.work/ 是 overlay 内部工作目录（隐藏、几十 KB），备份时排除即可。
+    # ---- 💾 持久化：两种挂载方式，二选一（默认①）----
+    # 持久化按职责拆两层：
+    #   数据层  data/www/    面板、数据库、备份、证书 + 站点（data/www/wwwroot）
+    #   系统层  data/system/  etc usr var root opt home srv 的 overlay 上层
+    #   元数据  data/system/.baota/  overlay 工作目录、并发锁、版本记录、启动历史
+    # 两层路径与容器内一一对应，没有多余层级，备份/迁移命令两种模式通用。
     #
-    # 唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
-    # 放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」，写入静默失败；
-    # 容器启动时会实测一次并告警，看到告警立刻换位置。
+    # ① 单挂（默认，最简单）：一个 data/ 保住全部数据
+    #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
+    # ② 混合挂载（更稳）：数据层与系统层都用 bind（各一个目录，便于分开管理）
+    #    ./data 给站点/面板/备份，./system 给系统层 overlay 上层。
+    #    启用②：注释掉下面的 volumes 整块，取消「混合挂载」那段注释即可。
+    #    ⚠️ 无论哪种：放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」、写入静默失败；
+    #       容器启动时会实测一次并告警，看到告警立刻换位置。
     volumes:
       - ./data:/data
+
+    # ② 混合挂载（取消注释即可，同时注释掉上面的 volumes 整块）：
+    #    数据层在 ./data（bind，飞牛文件管理可直接看到站点/面板），
+    #    系统层在 ./system（bind，单独一个目录，便于和站点数据分开管理）。
+    # volumes:
+    #   - ./data:/data/www
+    #   - ./system:/data/system
 
     # 用 Docker 自带的默认 bridge 网络，不额外创建项目专属网络：
     # 单容器部署没有容器间用名字互访的需求，少一层网络更干净。
@@ -104,27 +127,30 @@ services:
     network_mode: bridge
 
     ports:
+      # ⚠️ 面板端口以面板里的设置为准（port.pl）。在面板里改了端口之后，
+      #    必须同步改这里的左侧端口再重建容器，否则外面访问不通
       - "8888:8888"     # 面板
-      - "888:888"       # phpMyAdmin
-      - "8080:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
+      - "888:888"       # phpMyAdmin（数据库 Web 入口，别直接暴露到公网）
+      - "8880:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
       - "8443:443"      # 站点 HTTPS（宿主机 443 被 fnOS 占用）
-      - "2222:22"       # SSH（root 口令见首启日志，非必要建议注释掉本行）
-      - "3306:3306"     # MySQL
+      # 以下端口默认关闭，按需取消注释。暴露在公网前请先做好访问控制。
+      # - "2222:22"      # SSH（root 口令见首启日志，非必要默认关闭）
+      # - "3306:3306"     # MySQL（不需要从外部连就默认关闭）
       # FTP 主动 + 被动端口。被动端口范围大，非必要不开。
       # - "20-21:20-21"
       # - "39000-40000:39000-40000"
 
-    # 面板端口可能被用户在面板里改掉，所以从 port.pl 现读；
-    # 面板开了 HTTPS 也能探到，故 http 失败再试 https。
+    # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，三段：
+    #   1) /run/baota/degraded-critical 不存在 —— etc/var/www 任一持久化失败
+    #      或只读降级时由 init-mounts 写入，让失效在 compose ps 里直接可见；
+    #   2) /data/www 与 /data/system 磁盘水位 —— 任一可用 < 1GB 或已用 ≥ 95% 即 unhealthy，
+    #      满盘前在 docker ps / 飞牛 UI 上就能看到，而不是等 MySQL 崩；
+    #   3) 面板端口可访问 —— 端口可能被用户改掉，从 port.pl 现读，http 失败再试 https。
+    # 判据要调整就改脚本（可单独执行测试），compose 这边不用动。
     # 注意：探活命令里绝不能出现面板进程名，否则会被 bt 脚本的 ps|grep 误判成
     # 「面板已在运行」而跳过启动。
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          p=$$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888);
-          curl -skf -o /dev/null "http://127.0.0.1:$$p/"
-          || curl -skf -o /dev/null "https://127.0.0.1:$$p/"
+      test: [CMD, /baota/healthcheck.sh]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -136,3 +162,4 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+

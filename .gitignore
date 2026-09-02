@@ -15,6 +15,13 @@ data/
 # 运行期日志
 *.log
 
-# 备份产物（README「备份与恢复」生成的压缩包）
-baota-backup-*.tgz
-baota-data.tgz
+# 备份产物（tar 打出来的包，无论是在宿主机还是容器内生成的）
+*.tgz
+
+# 密钥与本地环境（口令不要写进 docker-compose.yml，改用同目录的 .env）
+.env
+.env.*
+!.env.example
+
+# 本地测试残留
+.tmp-*

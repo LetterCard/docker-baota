@@ -11,9 +11,12 @@ name: 📦 release：检查并发布正式版
 #    - 发布 <版本> 与 latest 两个标签（stable 只发精确版本标签）
 #
 #  流程（每天自动跑一次，也可手动触发）：
+#    🧹 lint        静态检查（shellcheck + 语法 + YAML），无条件运行，
+#                   与是否有新版本无关
 #    🔍 detect      get_version API 取最新版号，与 release/VERSION 比对；
 #                   一致 → 结束；不一致 → 进入构建
-#    🏗️ build       双架构构建 → 17 项健康检查 → 按 digest 推送
+#    🏗️ build       双架构构建 → 三套健康检查 → 按 digest 推送
+#                   （19 项功能检查 / 挂载与降级场景 / 升级与降级路径）
 #    🚀 publish     合并 digest → 打 repo:<版本> 与 repo:latest
 #    ✏️ writeback   把「实际推送的版本号」回写 release/VERSION，供下次比对
 #
@@ -21,7 +24,7 @@ name: 📦 release：检查并发布正式版
 #    - release/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
 #    - 构建失败时 VERSION 不动，下次运行会自动重试同一版本
 #    - 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈
-#    - 官方安装脚本若被改坏，构建阶段（安装宝塔 + 17 项健康检查）会失败中断，
+#    - 官方安装脚本若被改坏，构建阶段（安装宝塔 + 19 项健康检查）会失败中断，
 #      latest 不会指向坏镜像
 #
 #  🔑 所需仓库 Secrets：
@@ -129,11 +132,38 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # 🧹 静态检查：shellcheck + 语法 + YAML
+  #
+  # 本地 `make lint` 在没装 shellcheck 时会「跳过」，等于这道检查长期没人真正跑过。
+  # 放到 CI 里先装工具再跑，脚本质量才有持续保障。
+  #
+  # 与版本探测无关，所以**无条件运行**：即使今天没有新版本、不发布镜像，
+  # 代码问题也能当天被发现，而不是拖到下次发布才暴露
+  # ---------------------------------------------------------------------------
+  lint:
+    name: 🧹 静态检查（shellcheck + 语法 + YAML）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔧 安装检查工具
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y shellcheck python3-yaml
+          shellcheck --version
+          python3 -c "import yaml; print('PyYAML ok')"
+
+      - name: 🧹 shellcheck + 语法 + YAML 检查
+        run: make lint
+
+  # ---------------------------------------------------------------------------
   # 🏗️ 双架构构建。上下文是仓库根（两个通道共用 shared/build/ 下的构建脚本）。
   # ---------------------------------------------------------------------------
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
-    needs: detect
+    needs: [detect, lint]
     if: needs.detect.outputs.changed == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
@@ -178,7 +208,22 @@ jobs:
 
       - name: 🩺 发布前健康检查
         run: |
-          bash .github/scripts/health-check.sh \
+          bash .github/scripts/health-check/run.sh core \
+            "baota-release:candidate" "${{ needs.detect.outputs.version }}"
+      # 上面 19 项只覆盖了「命名卷 + 单挂 /data」一种挂载方式。
+      # 这里补两类同样致命、但那边测不到的场景：
+      #   混合挂载（./data:/data/www + ./system:/data/system）能否正常工作
+      #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
+      - name: 🧪 挂载方式与降级场景检查（未通过则不推送）
+        run: bash .github/scripts/health-check/run.sh mounts "baota-release:candidate"
+
+      # 版本护栏、升级前快照、面板启动器刷新这三段**只在镜像版本变化时执行**，
+      # 全新卷永远走不到 —— 上面两套检查都覆盖不到。
+      # 这里通过改写持久化层里的版本记录，把「升级」与「降级」两条分支都跑一遍，
+      # 确认快照真的生成（且内容完整）、启动器真的被刷新、降级不会阻断启动
+      - name: 🔼 升级与降级路径检查（未通过则不推送）
+        run: |
+          bash .github/scripts/health-check/run.sh upgrade \
             "baota-release:candidate" "${{ needs.detect.outputs.version }}"
 
       - name: 🔑 登录 DockerHub

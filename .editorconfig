@@ -1,0 +1,46 @@
+# ==============================================================================
+#  编辑器统一约定（EditorConfig）
+#
+#  编辑器 / IDE 会自动读取本文件，保证换行、缩进、编码与结尾空行一致，
+#  避免「只是换了个编辑器就产生一大片 diff」。
+#  https://editorconfig.org
+# ==============================================================================
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Shell：4 空格缩进，不用 tab（tab 在 heredoc 与 case 里容易出问题）
+[*.sh]
+indent_style = space
+indent_size = 4
+
+# env / conf 配置文件
+[*.env]
+indent_size = 4
+
+[*.service]
+indent_size = 4
+
+# YAML / CI 工作流：2 空格是社区惯例，且缩进有语义，必须严格
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Markdown：行尾双空格是有意的换行语义，不要裁掉
+[*.md]
+trim_trailing_whitespace = false
+indent_size = 2
+
+# Makefile：规则体必须是真 tab，不能改成空格
+[Makefile]
+indent_style = tab
+
+# Dockerfile
+[Dockerfile]
+indent_size = 4

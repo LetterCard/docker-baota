@@ -5,20 +5,36 @@
 #  用 -f 指定各自的 Dockerfile。shared/ 下的构建脚本、运行期脚本与 systemd unit
 #  都是镜像的一部分，必须留在上下文中。
 #
-#  作用：减小上下文体积；防止把 CI / 本地专用的东西打进生产镜像。
+#  作用：减小上下文体积；防止把 CI / 文档 / 本地专用的东西打进生产镜像。
 # ==============================================================================
 
-# 版本控制与 CI（CI 专用的健康检查脚本在 .github/scripts/ 下，一并排除）
+# 版本控制
 .git
+
+# CI（发布前健康检查脚本在 .github/scripts/ 下，一并排除）
 .github
+
+# 项目文档与 AI 技能包（镜像内不需要）
+*.md
+docs/
+skills/
+
+# 工程化配置（镜像内不需要）
+.editorconfig
+.shellcheckrc
+Makefile
+CHANGELOG.md
 
 # 运行期数据与本地产物
 data/
 *.log
+*.tgz
 .DS_Store
 
-# 项目文档（镜像内不需要）
-*.md
+# 密钥与本地环境（绝不能进镜像）
+.env
+.env.*
+!.env.example
 
 # 各通道的编排与版本号文件（镜像内不需要；Dockerfile 本身必须留在上下文中）
 stable/docker-compose.yml

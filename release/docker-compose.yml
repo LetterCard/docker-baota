@@ -3,11 +3,11 @@
 #
 #  与 stable/docker-compose.yml 只有一处不同：image 标签。
 #    release 通道发布 <版本> 与 latest 两个标签，latest 永远指向最新的正式版
-#    （由 release-build-push.yml 每天自动构建发布）。
+#    （由 .github/workflows/release-build-push.yml 每天自动构建发布）。
 #    想锁定版本防意外升级，把 latest 改成具体版本号即可。
 #
 #  其余配置（持久化、端口、安全、探活、日志）与 stable 完全一致，
-#  逐项的原理说明与注意事项见 stable/docker-compose.yml 与 README。
+#  逐项的原理说明与注意事项见 stable/docker-compose.yml 与 docs/。
 # ==============================================================================
 name: baota
 
@@ -44,10 +44,20 @@ services:
         hard: 65535
       nproc: 65535
 
+    # ---- ⚙️ 资源上限（强烈建议 NAS 用户取消注释设置）----
+    # 不设上限：MySQL / php-fpm 内存失控时会拖垮整机上的其他服务。
+    # 内存怎么算：宿主机总内存 - 系统与其他服务占用 - 1G 余量
+    #   例：8G 机器、飞牛占 2G → 给 4g 左右
+    # ⚠️ 先设好 limit 再装 MySQL：宝塔按「容器看到的内存」自动调大 buffer pool，
+    #    装完请在面板「数据库 → 设置」压到 limit 的 25%~50%
+    #    详见 docs/operations.md「资源上限与规划」
+    # mem_limit: 4g
+    # cpus: 2.0
+
     # ---- 🔑 首次启动的初始凭据（只在 data/ 为空时生效）----
     #   四项不写或留空 = 全随机，启动后 docker compose logs 即可拿到：
     #   PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
-    #   口令写在本文件等于公开，既要固定又要保密请改用同目录的 .env。
+    #   口令写在本文件等于公开，既要固定又要保密请改用同目录的 .env
     environment:
       TZ: Asia/Shanghai
       # PANEL_USER: baota
@@ -55,35 +65,52 @@ services:
       # PANEL_SAFE_PATH: ""
       # ROOT_PASSWORD: ""
 
-    # ---- 💾 持久化：一个 data 目录保住 8 个核心目录 ----
-    #   ⚠️ data 必须在 ext4 / btrfs / xfs 上，否则会「挂载成功但只读」、
-    #      写入静默失败（容器启动时会实测一次并告警）。
+    # ---- 💾 持久化：两种挂载方式，二选一（默认①）----
+    # 持久化按职责拆两层：
+    #   数据层  data/www/    面板、数据库、备份、证书 + 站点（data/www/wwwroot）
+    #   系统层  data/system/  etc usr var root opt home srv 的 overlay 上层
+    #   元数据  data/system/.baota/  overlay 工作目录、并发锁、版本记录、启动历史
+    # 两层路径与容器内一一对应；无论哪种挂载方式，备份/迁移命令都通用。
+    #
+    # ① 单挂（默认，最简单）：一个 data/ 保住全部数据
+    #   ⚠️ data 必须在 ext4 / btrfs / xfs 上，否则会「挂载成功但只读」、写入静默失败
+    #      （容器启动时会实测一次并告警）
+    # ② 混合挂载（更稳）：数据层与系统层都用 bind（各一个目录，便于分开管理）
+    #    ./data 给站点/面板/备份，./system 给系统层 overlay 上层。
+    #    启用②：注释掉下面的 volumes 整块，取消「混合挂载」那段注释即可。
     volumes:
       - ./data:/data
+
+    # ② 混合挂载（取消注释即可，同时注释掉上面的 volumes 整块）：
+    #    数据层在 ./data（bind，飞牛文件管理可直接看到站点/面板），
+    #    系统层在 ./system（bind，单独一个目录，便于和站点数据分开管理）。
+    # volumes:
+    #   - ./data:/data/www
+    #   - ./system:/data/system
 
     network_mode: bridge
 
     ports:
+      # ⚠️ 面板端口以面板里的设置为准（port.pl）。在面板里改了端口之后，
+      #    必须同步改这里的左侧端口再重建容器，否则外面访问不通
       - "8888:8888"     # 面板
-      - "888:888"       # phpMyAdmin
-      - "8080:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
+      - "888:888"       # phpMyAdmin（数据库 Web 入口，别直接暴露到公网）
+      - "8880:80"       # 站点 HTTP（宿主机 80 被 fnOS 占用）
       - "8443:443"      # 站点 HTTPS（宿主机 443 被 fnOS 占用）
-      - "2222:22"       # SSH（root 口令见首启日志，非必要建议注释掉本行）
-      - "3306:3306"     # MySQL
+      # 以下端口默认关闭，按需取消注释。暴露在公网前请先做好访问控制。
+      # - "2222:22"      # SSH（root 口令见首启日志）
+      # - "3306:3306"     # MySQL（不需要从外部连就默认关闭）
       # FTP 主动 + 被动端口。被动端口范围大，非必要不开。
       # - "20-21:20-21"
       # - "39000-40000:39000-40000"
 
-    # 从 port.pl 现读端口，http 失败再试 https。
+    # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，三段：
+    #   持久化降级标记 / /data/www 与 /data/system 磁盘水位（任一可用 <1GB 或 ≥95%）/ 面板端口可达。
+    # 判据要调整就改脚本（可单独执行测试），compose 这边不用动。
     # 注意：探活命令里绝不能出现面板进程名，否则会被 bt 脚本的 ps|grep
     # 误判成「面板已在运行」而跳过启动。
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          p=$$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888);
-          curl -skf -o /dev/null "http://127.0.0.1:$$p/"
-          || curl -skf -o /dev/null "https://127.0.0.1:$$p/"
+      test: [CMD, /baota/healthcheck.sh]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -94,3 +121,4 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+

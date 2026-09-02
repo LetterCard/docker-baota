@@ -1,0 +1,31 @@
+# ==============================================================================
+#  shellcheck 配置（make lint 会用到）
+#
+#  https://github.com/koalaman/shellcheck
+# ==============================================================================
+
+# 检查级别由 make lint 的 `shellcheck -S warning` 控制（CI 只卡「会出错的代码」）；
+# .shellcheckrc 本身不支持 severity 指令，这里仅作说明。style 级（[ ]→[[ ]]、加引号、
+# 加花括号）是品味问题，老脚本已有大量，全改无功能收益且易引入回归。
+# shell=bash
+
+# 本项目的解释器约定：
+#   init-mounts.sh  → busybox sh（POSIX）
+#   其余            → bash
+# 由脚本自身的 shebang 决定，这里不强制
+# shell=bash
+
+# 允许 source 在运行时才存在的文件（/baota/defaults.env 由 Docker COPY 提供）
+enable=all
+disable=SC1091
+
+# SC1090: 无法跟踪的非字面 source 路径 —— 同上，路径来自变量
+disable=SC1090
+
+# SC2312: 命令替换里的退出码未处理 —— 本项目的日志函数大量依赖这种写法
+disable=SC2312
+
+# SC2148（缺 shebang）仅 .env 文件会触发，但 .env 不进 shellcheck 段，脚本都有 shebang
+# SC2155（local 声明与赋值合一）在命令替换场景属惯用法，按需在 backup.sh 逐行 disable
+# 输出格式：gcc 风格，便于编辑器跳转
+format=gcc
