@@ -58,7 +58,7 @@ jobs:
   # 一致 → 今天无事可做；不一致 → 输出新版本号，交给 build 构建发布。
   # ---------------------------------------------------------------------------
   detect:
-    name: 🔍 探测并与 release/VERSION 比对
+    name: 🔍 探测版本（release 通道）
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -70,7 +70,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔍 API 取版号并与 VERSION 比对
+      - name: 🔍 探测上游版本并与 VERSION 比对
         id: detect
         run: |
           UPSTREAM=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" | tr -d '[:space:]' || true)
@@ -155,7 +155,7 @@ jobs:
           shellcheck --version
           python3 -c "import yaml; print('PyYAML ok')"
 
-      - name: 🧹 shellcheck + 语法 + YAML 检查
+      - name: 🧹 运行静态检查
         run: make lint
 
   # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🖥️ 确认 runner 架构
+      - name: 🖥️ 确认 runner 原生架构
         run: |
           echo "runner: $(uname -m)  target: ${{ matrix.arch }}"
           case "${{ matrix.arch }}-$(uname -m)" in
@@ -199,7 +199,7 @@ jobs:
       #   1) 健康检查通过后 docker push 的就是这份本地镜像，无需重新打 tag
       #   2) 两个矩阵 job 各自独立，带后缀才不会互相覆盖
       # 构建缓存走 GHA cache（runner 内置 token 授权，按架构分 scope）
-      - name: 🏗️ 构建镜像（唯一一次构建，加载到本地待验证）
+      - name: 🏗️ 构建镜像（唯一一次，载入本地待验证）
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           VER="${{ needs.detect.outputs.version }}"
@@ -219,7 +219,8 @@ jobs:
           # 回读本地 image ID 确认 load 成功，并打进日志供与推送 step 比对
           docker image inspect --format '本地镜像 ID：{{.Id}}' "${TAG}"
 
-      - name: 🩺 发布前健康检查
+      # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
+      - name: 🩺 验证 1/3：功能完整性（19 项检查）
         run: |
           bash .github/scripts/health-check/run.sh core \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.detect.outputs.version }}-${{ matrix.arch }}" \
@@ -228,14 +229,14 @@ jobs:
       # 这里补两类同样致命、但那边测不到的场景：
       #   混合挂载（./data:/data/www + ./system:/data/system）能否正常工作
       #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
-      - name: 🧪 挂载方式与降级场景检查（未通过则不推送）
+      - name: 🧪 验证 2/3：挂载方式与降级场景
         run: bash .github/scripts/health-check/run.sh mounts "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.detect.outputs.version }}-${{ matrix.arch }}"
 
       # 版本护栏、升级前快照、面板启动器刷新这三段**只在镜像版本变化时执行**，
       # 全新卷永远走不到 —— 上面两套检查都覆盖不到。
       # 这里通过改写持久化层里的版本记录，把「升级」与「降级」两条分支都跑一遍，
       # 确认快照真的生成（且内容完整）、启动器真的被刷新、降级不会阻断启动
-      - name: 🔼 升级与降级路径检查（未通过则不推送）
+      - name: 🔼 验证 3/3：升级与降级路径
         run: |
           bash .github/scripts/health-check/run.sh upgrade \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.detect.outputs.version }}-${{ matrix.arch }}" \
@@ -259,7 +260,7 @@ jobs:
       # 固定后缀 tag（<版本>-amd64 / <版本>-arm64）是中间产物：
       # 下次 CI 同 tag 同 digest 幂等覆盖，不累积；用户可见的标签
       # 仍然只有 publish job 打出的 repo:<版本> 与 repo:latest。
-      - name: 📤 推送已验证的本地镜像（不重新构建）
+      - name: 📤 推送已验证镜像（字节一致，不重新构建）
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           VER="${{ needs.detect.outputs.version }}"
@@ -316,7 +317,7 @@ jobs:
   # 所以 latest 永远不会指向坏镜像。
   # ---------------------------------------------------------------------------
   publish:
-    name: 🚀 发布（版本 + latest）
+    name: 🚀 合并多架构并发布（<版本> + latest）
     needs: [detect, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -337,7 +338,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: 🚀 合并并打标签（版本 + latest）
+      - name: 🚀 合并多架构标签（<版本> + latest）
         id: publish
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
@@ -390,7 +391,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: ✏️ 回写推送成功的版本号
+      - name: ✏️ 回写已发布的版本号
         run: |
           VER="${{ needs.publish.outputs.tag }}"
           printf '%s\n' "$VER" > "$VERSION_FILE"
