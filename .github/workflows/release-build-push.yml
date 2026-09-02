@@ -190,16 +190,17 @@ jobs:
       - name: 🔧 准备 Docker Buildx
         uses: docker/setup-buildx-action@v4.3.0
 
-      # ---- 唯一一次构建：load 到本地，供健康检查 ----
-      # 用裸 buildx CLI 而非 build-push-action：本流程「构建」与「推送」是两个
-      # 独立 step（中间隔着三套健康检查），action 的组合语义用不上；裸 CLI 的
-      # step 名完全由本文件控制，UI 里不会再出现 "Post 构建镜像" 这类
-      # 由 action 自动附加的收尾 step，避免「像是构建了两次」的误读。
+      # ---- 核心设计：唯一构建、验证通过后推送已验证的本地镜像 ----
+      # 构建结果是接下来三道验证的对象；推送是本地镜像直接 docker push，
+      # 「验证的 = 推送的」由同一个 image ID 保证（见推送 step 注释）。
+      # 用裸 buildx CLI 而非 build-push-action：构建与推送在这里是独立 step，
+      # action 的组合语义用不上；裸 CLI 让 step 名完全可控，UI 里不会再出现
+      # "Post 构建镜像" 这类由 action 自动附加的收尾副本。
       # tag 直接用最终 repo 名 + 架构后缀：
-      #   1) 健康检查通过后 docker push 的就是这份本地镜像，无需重新打 tag
+      #   1) 验证通过后 docker push 的就是这份本地镜像，无需重新打 tag
       #   2) 两个矩阵 job 各自独立，带后缀才不会互相覆盖
       # 构建缓存走 GHA cache（runner 内置 token 授权，按架构分 scope）
-      - name: 🏗️ 构建镜像（唯一一次，载入本地待验证）
+      - name: 🏗️ 构建镜像
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           VER="${{ needs.detect.outputs.version }}"
@@ -220,7 +221,7 @@ jobs:
           docker image inspect --format '本地镜像 ID：{{.Id}}' "${TAG}"
 
       # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
-      - name: 🩺 验证 1/3：功能完整性（19 项检查）
+      - name: 🩺 验证 1/3：功能完整性
         run: |
           bash .github/scripts/health-check/run.sh core \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.detect.outputs.version }}-${{ matrix.arch }}" \
@@ -248,19 +249,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---- 推送已通过健康检查的本地镜像（不再二次构建） ----
+      # ---- 推送已通过三道验证的本地镜像 ----
       #
-      # 为什么改为 push 本地镜像而不是再构建一次按 digest 推：
+      # 为什么直接 push 本地镜像而不是再构建一次按 digest 推：
       #   「再构建一次命中缓存所以相同」依赖构建可复现——但本镜像构建要从
       #   download.bt.cn 拉官方脚本、走 apt 源，两次构建间隙上游一变，
-      #   第二次产物就不是健康检查验证过的那份了。
+      #   第二次产物就不是验证过的那份了。
       #   docker push 直接上传本地镜像的字节，「验证的 = 推送的」由
       #   同一个 image ID 保证，下方还会做远端 config digest 硬比对。
       #
       # 固定后缀 tag（<版本>-amd64 / <版本>-arm64）是中间产物：
       # 下次 CI 同 tag 同 digest 幂等覆盖，不累积；用户可见的标签
       # 仍然只有 publish job 打出的 repo:<版本> 与 repo:latest。
-      - name: 📤 推送已验证镜像（字节一致，不重新构建）
+      - name: 📤 推送已验证镜像
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           VER="${{ needs.detect.outputs.version }}"
@@ -338,7 +339,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: 🚀 合并多架构标签（<版本> + latest）
+      - name: 🚀 合并多架构 manifest
         id: publish
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"

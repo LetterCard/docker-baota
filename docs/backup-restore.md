@@ -58,8 +58,8 @@ docker exec baota baota-backup --verify /data/www/backup/manual/baota-backup-202
 
 它替你绕开手工 tar 的三个坑：
 
-1. **自动排除** `.baota`、`www/backup/auto`、`www/backup/manual`、`www/backup/database` ——
-   漏掉 `www/backup/auto` 会把上一次的升级快照打进本次备份，体积逐次翻倍
+1. **自动排除** `.baota`、`backup/auto`、`backup/manual`、`backup/database`、`backup/rsync` ——
+   漏掉 `backup/auto` 会把上一次的升级快照打进本次备份，体积逐次翻倍
    （实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）
 2. **自动加 `--xattrs`**，保住 overlay 的目录替换标记
 3. **生成后自动自校验**，并拒绝自包含的包
@@ -76,11 +76,13 @@ docker exec baota baota-backup --verify /data/www/backup/manual/baota-backup-202
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
-# 2) 打包。--xattrs 保留 overlay 元数据，两个 --exclude 各有用处
+# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data（包含 www 子树 + wwwroot +
+#    backup + server/data 等 passthrough bind 源，整体才是完整的可恢复数据）
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
-    -C data --exclude='.baota' --exclude='www/backup/auto' \
-             --exclude='www/backup/manual' --exclude='www/backup/database' .
+    -C data --exclude='.baota' --exclude='backup/auto' \
+             --exclude='backup/manual' --exclude='backup/database' \
+             --exclude='backup/rsync' .
 
 # 3) 启动
 docker compose up -d
@@ -92,7 +94,8 @@ docker compose up -d
   **混合挂载模式下不能用这一条**（`data/` 只对应数据层），请改用下面的「恢复」小节按层解包
 - `--exclude='.baota'`：项目元数据目录（工作目录、并发锁、版本记录、启动历史，
   单挂时位于 `data/system/.baota`），排除后启动时自动重建
-- `--exclude='www/backup/auto'`：升级自动快照就存在这里，**必须排除** ——
+- `--exclude='backup/auto'`：升级自动快照就存在这里（init-mounts 把 /www/backup 播种后，
+  entrypoint 的 take_snapshot 写在 PERSIST_DATA_ROOT/backup/auto），**必须排除** ——
   否则会把上一次的快照打进本次备份、下次再打进来，体积逐次翻倍
 - 站点多、数据库大时，耗时主要花在 `data/www/server/data`（MySQL 数据目录），属正常
 - 想看体积分布：`docker exec baota baota-backup --list`
@@ -169,7 +172,7 @@ docker compose up -d && docker compose logs -f baota
 ```bash
 docker exec baota baota-backup --verify /data/www/backup/manual/baota-backup-*.tgz
 # 或者宿主机侧：
-tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|server/panel/data/' | head
+tar tzf baota-backup-*.tgz | grep -E 'wwwroot/|server/data/|www/server/panel/data/' | head
 ```
 
 能看到站点、数据库、面板配置这三类路径才算完整。**只有恢复过一次的备份才算备份**，

@@ -54,24 +54,27 @@ PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 OUTPUT_DIR="${PERSIST_DATA_ROOT}/backup/manual"
 NAME_PREFIX='baota-backup'
 
-# 打包时排除的路径（相对各层根，顺序与下面的 EXCLUDE_ARGS 一一对应）
+# 打包时排除的路径（相对 tar 归档根 = PERSIST_DATA_ROOT 或 PERSIST_SYSTEM_ROOT）：
 #   .baota             项目元数据：overlay 工作目录、并发锁、版本记录、启动历史
 #                      启动时自动重建，跟着备份走只会带来陈旧状态
-#                      （数据层在 /data/www/.baota，系统层在 /data/system/.baota，
+#                      （数据层在 PERSIST_DATA_ROOT/.baota，系统层在 PERSIST_SYSTEM_ROOT/.baota，
 #                       两个都会被 --exclude='.baota' 一并排除）
-#   www/backup/auto    升级前自动快照。不排除会把它打进本次备份、下次再打进来，
-#                      体积逐次翻倍；它只是升级时的临时回滚点
-#   www/backup/manual  本脚本自己的产物。不排除会自包含
-#   www/backup/database
-#                      面板「数据库」页产生的备份，同样会自包含
-#   www/backup/rsync   --rsync 的落点之一（也可以挂独立卷同步到容器外）。
+#   www/.baota         历史遗留：早期版本可能写到 www 子树里的 .baota；现在统一在
+#                      PERSIST_DATA_ROOT/.baota，但保险排除一次（与上面 .baota 互补）
+#   backup/auto        升级前自动快照（entrypoint take_snapshot 写到 PERSIST_DATA_ROOT/backup/auto，
+#                      不再是 www/backup/auto —— 整层归档后归档根变了）。不排除会把它打进本次
+#                      备份、下次再打进来，体积逐次翻倍；它只是升级时的临时回滚点
+#   backup/manual      本脚本自己的产物。不排除会自包含
+#   backup/database    面板「数据库」页产生的备份，同样会自包含
+#   backup/rsync       --rsync 的落点之一（也可以挂独立卷同步到容器外）。
 #                      不排除的话，同步目标会被下一次全量备份装进去，同样自包含
 EXCLUDES=(
     '.baota'
-    'www/backup/auto'
-    'www/backup/manual'
-    'www/backup/database'
-    'www/backup/rsync'
+    'www/.baota'
+    'backup/auto'
+    'backup/manual'
+    'backup/database'
+    'backup/rsync'
 )
 
 # 由 EXCLUDES 派生 tar 参数。排除项只在这里写一次，全量打包与 --rsync 共用，
@@ -277,10 +280,11 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    data_members=()
-    for _d in ${PERSIST_DATA_DIRS}; do
-        [ -d "${PERSIST_DATA_ROOT}/${_d}" ] && data_members+=( "${_d}" )
-    done
+    # 数据层：归档整个 PERSIST_DATA_ROOT（不只 www 子树）
+    # www/wwwroot 等 PASSTHROUGH_DIRS 的宿主机路径（/data/www/wwwroot、
+    # /data/www/backup、/data/www/server/data）也在数据层根下，与 www 平级，
+    # 也是用户关键数据（站点 / 手动备份 / MySQL），必须一起进包
+    data_members=('.')
     sys_members=()
     for _d in ${PERSIST_SYSTEM_DIRS}; do
         [ -d "${PERSIST_SYSTEM_ROOT}/${_d}" ] && sys_members+=( "${_d}" )
@@ -334,7 +338,11 @@ verify_archive() {
     log "正在校验：${file}"
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
-    for pattern in 'www/wwwroot' 'www/server/panel/data' 'MANIFEST.txt'; do
+    # 关键成员检查：
+    #   wwwroot/             passthrough bind 源（站点目录宿主侧），恢复时必须还原
+    #   www/server/panel/data 面板 overlay 数据层（配置 + 数据库），恢复时必须还原
+    #   MANIFEST.txt         备份清单（由 backup.sh 自动生成）
+    for pattern in 'wwwroot/' 'www/server/panel/data' 'MANIFEST.txt'; do
         if printf '%s\n' "${listing}" | grep -q -- "${pattern}"; then
             echo "  ✅ 含 ${pattern}"
         else
@@ -344,8 +352,8 @@ verify_archive() {
     done
 
     # 自包含检查：备份包不应把上一次的产物又装进来
-    if printf '%s\n' "${listing}" | grep -q 'www/backup/\(auto\|manual\|database\)/'; then
-        warn '备份包内含有 www/backup 下的产物，发生自包含（下一次备份体积会翻倍）'
+    if printf '%s\n' "${listing}" | grep -q 'backup/\(auto\|manual\|database\|rsync\)/'; then
+        warn '备份包内含有 backup/ 下的产物，发生自包含（下一次备份体积会翻倍）'
         missing=$((missing + 1))
     fi
 
