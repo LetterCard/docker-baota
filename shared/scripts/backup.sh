@@ -342,20 +342,22 @@ verify_archive() {
     #   wwwroot/             passthrough bind 源（站点目录宿主侧），恢复时必须还原
     #   www/server/panel/data 面板 overlay 数据层（配置 + 数据库），恢复时必须还原
     #   MANIFEST.txt         备份清单（由 backup.sh 自动生成）
+    # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，
+    # 大清单的 printf 写不完被 SIGPIPE 终止（141），会把「含」误判成「缺少」。
+    # listing 已在变量里，case 子串匹配既无管道也无该隐患
     for pattern in 'wwwroot/' 'www/server/panel/data' 'MANIFEST.txt'; do
-        if printf '%s\n' "${listing}" | grep -q -- "${pattern}"; then
-            echo "  ✅ 含 ${pattern}"
-        else
-            echo "  ❌ 缺少 ${pattern}"
-            missing=$((missing + 1))
-        fi
+        case "${listing}" in
+            *"${pattern}"*) echo "  ✅ 含 ${pattern}" ;;
+            *)              echo "  ❌ 缺少 ${pattern}"; missing=$((missing + 1)) ;;
+        esac
     done
 
     # 自包含检查：备份包不应把上一次的产物又装进来
-    if printf '%s\n' "${listing}" | grep -q 'backup/\(auto\|manual\|database\|rsync\)/'; then
-        warn '备份包内含有 backup/ 下的产物，发生自包含（下一次备份体积会翻倍）'
-        missing=$((missing + 1))
-    fi
+    case "${listing}" in
+        *'backup/auto/'*|*'backup/manual/'*|*'backup/database/'*|*'backup/rsync/'*)
+            warn '备份包内含有 backup/ 下的产物，发生自包含（下一次备份体积会翻倍）'
+            missing=$((missing + 1)) ;;
+    esac
 
     [ "${missing}" -eq 0 ] || die "校验未通过（${missing} 项异常）"
     log "校验通过，共 $(printf '%s\n' "${listing}" | wc -l | tr -d ' ') 个条目"

@@ -61,6 +61,12 @@ inside_sh() { docker exec "$CONTAINER" sh -c "$1"; }
 is_running() {
     [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = 'true' ]
 }
+# docker logs | grep -q 在 pipefail 下会误判失败：grep -q 一命中就退出并关闭
+# 管道，docker logs 写不完剩余输出被 SIGPIPE 终止（141），pipefail 把命中当成
+# 失败。用 `{ grep -q && cat >/dev/null; }` 读干净管道，生产者正常收尾。
+logs_match() {
+    docker logs "$CONTAINER" 2>&1 | { grep -q -- "$1" && cat > /dev/null; }
+}
 
 wait_systemd() {
     local state="" tries=0
@@ -189,7 +195,7 @@ done
 
 if [ "$found" = 1 ]; then
     pass "只读持久化根已写入 degraded-critical"
-elif docker logs "$CONTAINER" 2>&1 | grep -q '本次不会持久化'; then
+elif logs_match '本次不会持久化'; then
     # 兜底：容器退得比轮询更快时，退而求其次看启动日志里的降级告警
     pass "只读持久化根已被识别（启动日志有降级告警）"
 elif is_running && docker exec "$CONTAINER" sh -c ': > /data/.ro-probe 2>/dev/null'; then

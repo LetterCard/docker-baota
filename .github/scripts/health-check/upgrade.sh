@@ -65,6 +65,16 @@ inside()     { docker exec "$CONTAINER" "$@"; }
 inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
 inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
 
+# docker logs | grep -q 在 pipefail 下会误判失败：
+#   grep -q 一命中就退出并关闭管道，docker logs 写不完剩余输出就被
+#   SIGPIPE 终止（141）；pipefail 把 141 当成管道失败，于是「日志里明明
+#   有该文案」却报「未识别」。用 `{ grep -q && cat >/dev/null; }` 把管道
+#   读干净再退出，生产者正常收尾，退出码只由 grep 决定。
+#   若 grep 未命中，它会读完整个输入才退出，同样不会触发 SIGPIPE。
+logs_match() {
+    docker logs "$CONTAINER" 2>&1 | { grep -q -- "$1" && cat > /dev/null; }
+}
+
 wait_systemd() {
     local state="" tries=0
     while [ "$tries" -lt 90 ]; do
@@ -159,7 +169,7 @@ docker rm -f "$CONTAINER" >/dev/null
 start_container
 wait_systemd
 
-docker logs "$CONTAINER" 2>&1 | grep -q '检测到镜像升级' \
+logs_match '检测到镜像升级' \
     || fail "未识别为镜像升级 —— 版本护栏失效（快照与启动器刷新都不会发生）"
 pass "已识别为镜像升级"
 
@@ -173,7 +183,7 @@ pass "升级前快照已生成且内容完整：${SNAP}"
 
 # 启动器刷新只在版本变化时执行。漏掉它会让面板启动器被持久化层永久锁定，
 # 之后无论换什么镜像都不再更新
-docker logs "$CONTAINER" 2>&1 | grep -q '已刷新面板启动器' \
+logs_match '已刷新面板启动器' \
     || fail "未刷新面板启动器（升级后启动器会被持久化层永久锁定）"
 pass "面板启动器已刷新到当前镜像版本"
 
@@ -198,7 +208,7 @@ docker rm -f "$CONTAINER" >/dev/null
 start_container
 wait_systemd
 
-docker logs "$CONTAINER" 2>&1 | grep -q '检测到镜像降级' \
+logs_match '检测到镜像降级' \
     || fail "未识别为镜像降级 —— 降级告警丢失"
 pass "已识别为镜像降级并输出告警"
 
