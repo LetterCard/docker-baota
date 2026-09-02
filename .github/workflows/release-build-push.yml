@@ -359,6 +359,8 @@ jobs:
           echo "amd64: ${AMD64}  arm64: ${ARM64}"
           [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少 digest"; exit 1; }
 
+          # 约定：release 是正式版通道，同时打版本号与 latest 两个标签，
+          # 让用户 docker pull 不指定版本时无脑拉到最新正式版
           docker buildx imagetools create \
             -t "${REPO}:${VER}" -t "${REPO}:latest" \
             "${REPO}@${AMD64}" "${REPO}@${ARM64}"

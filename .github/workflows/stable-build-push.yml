@@ -401,6 +401,8 @@ jobs:
           echo "arm64: ${ARM64}"
           [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少某个架构的 digest"; exit 1; }
 
+          # 约定：stable 是稳定线，只打版本号标签；latest 由 release 通道独占，
+          # 这里绝对不能加 -t "${REPO}:latest" —— 会把 latest 误指向 stable
           docker buildx imagetools create -t "${REPO}:${VER}" \
             "${REPO}@${AMD64}" \
             "${REPO}@${ARM64}"
