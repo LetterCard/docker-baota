@@ -47,6 +47,7 @@ overlay 上层与项目元数据）。两者也可拆成两个挂载（混合模
 |---|---|
 | 把面板跑起来 | [快速开始](docs/getting-started.md) |
 | 搞清楚我的数据到底存在哪、会不会丢 | [持久化原理](docs/persistence.md) |
+| 想知道为什么不用「直接挂 /etc」那种做法 | [持久化方案选型](docs/persistence-alternatives.md) |
 | 改 compose 里某一项配置 | [编排配置详解](docs/configuration.md) |
 | 备份 / 恢复 / 搬到新机器 | [备份与恢复](docs/backup-restore.md) |
 | 升级镜像、回滚、跨机器迁移 | [升级与迁移](docs/upgrade.md) |

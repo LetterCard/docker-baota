@@ -12,6 +12,10 @@
 
 代价：必须 `privileged`，且 `/data` 必须在 ext4 / btrfs / xfs 上。
 
+> 社区里另一类做法是把 `/etc`、`/usr` 首启 `cp -a` 拷到宿主目录、再 `mount --bind` 盖回去。
+> 它更简单、对底层文件系统无要求，但会**让镜像升级在这两个目录上彻底失效**
+> （持久层那份全量快照永久屏蔽镜像层）。完整取舍见 `docs/persistence-alternatives.md`。
+
 ### `index=off` 是正确性要求，不是调优
 
 内核文档：用同一个 upper 挂载不同的 lower，仅在未启用 `index` / `metacopy` 时合法。
@@ -116,3 +120,30 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 
 所以 `baota-backup` 必须带 `--xattrs`；用图形界面「压缩 / 复制」备份 `data/` 会丢扩展属性。
 NAS 快照（btrfs / zfs）是文件系统级的，天然保留一切，是最省心的方案。
+
+## 每日巡检：验证已发布镜像
+
+```
+prep  ── 读 stable/VERSION + release/VERSION
+  ├─ verify-stable （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
+  └─ verify-release（并行，独立 job）→ 同上
+collect ── 下载片段 → 生成 report.md → 注入 README → 回写仓库
+```
+
+- 验的是**「DockerHub 上已发布的镜像」**，不是构建产物；版本号取自两个 `VERSION` 文件
+  （由发布流水线推送成功后回写，永远对应已发布标签），不做上游探测
+- 两个通道并行、各自独立 job，Actions 里并排显示进度，墙钟时间约等于单通道
+- 只验 linux/amd64：arm64 在 QEMU 模拟下 overlay 结论不可信，arm64 的真实覆盖由两个
+  构建工作流在原生 ARM runner 上负责
+- **回写顺序有讲究**：`git rebase` 必须在「生成 / 修改任何文件」之前完成。
+  `report.md` / `README.md` 一旦处于 modified，rebase 会因 dirty tree 中止，
+  报告就写不进仓库（症状是「日志显示成功但文件没变」）
+
+### report.md 与 README 内嵌
+
+- `report.md` 每次运行整体覆盖（不追加，体积恒定）
+- `.github/scripts/inject-report.py` 把它注入 README 的
+  `<!-- DAILY-VERIFY-REPORT:START/END -->` 标记之间，并把报告首行 H1 降级为 H3，
+  避免 README 出现两个一级标题
+- 报告里的面板口令 / root 口令 / 安全入口在写入前已脱敏
+- `collect` 用 `if: always()`：即使验证失败也把现场写进报告，最后一步才判红

@@ -8,11 +8,13 @@ baota-docker/
 ├── CHANGELOG.md               变更记录
 ├── LICENSE                    MIT
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
+├── report.md                  每日巡检报告（CI 生成并回写，不要手改）
 │
 ├── docs/                      使用文档（本目录）
 │   ├── README.md              文档索引
 │   ├── getting-started.md     快速开始、端口、首次登录凭据
 │   ├── persistence.md         持久化原理、候选方案、硬约束
+│   ├── persistence-alternatives.md  方案选型：overlay vs bind mount
 │   ├── configuration.md       compose 逐项配置详解
 │   ├── backup-restore.md      备份与恢复
 │   ├── upgrade.md             镜像升级、回滚、跨机器迁移
@@ -45,8 +47,11 @@ baota-docker/
 ├── stable/                    stable 通道：Dockerfile / docker-compose.yml / VERSION
 ├── release/                   release 通道：同上
 └── .github/
-    ├── scripts/health-check/      发布前检查三套 + 统一入口 run.sh（CI 专用，被 .dockerignore 排除）
-    └── workflows/                 两个通道的构建发布工作流
+    ├── dependabot.yml             每周检查并升级 Actions 版本（只开 PR，不自动合并）
+    ├── scripts/
+    │   ├── inject-report.py       把 report.md 注入 README 的报告标记区
+    │   └── health-check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
+    └── workflows/                 两个通道的构建发布 + 每日巡检工作流
 ```
 
 ### 关键约定
@@ -72,6 +77,12 @@ make up CHANNEL=stable           # 起容器
 make logs CHANNEL=stable         # 看日志
 make health                      # 跑发布前健康检查
 make lint                        # shellcheck + bash -n + YAML 语法
+```
+
+> ⚠️ `make lint` 里的 shellcheck **未安装时会被直接跳过**（本地很常见），但 CI 上会真正
+> 执行，且 **warning 级别即判失败** —— 本地跑通不代表 CI 能过。
+> 装一个再验：`brew install shellcheck`；没有 brew 时用
+> `python3 -m pip install --user shellcheck-py`（装完确认它在 `PATH` 里，否则 make 仍会跳过）。
 ```
 
 ## 🧩 架构支持
@@ -162,3 +173,6 @@ journald 上限 / logrotate 配置 / 生产 healthcheck 脚本 / 关键文件路
 - 探活命令里同样不能出现面板进程名，理由同上
 - 持久化层的每一次写入都不可逆：**能不写就不写**。
   新增「每次启动都做的事」时，先判断结果是否真的需要变化，变化了才写
+- **shellcheck 的 warning 会让 CI 失败**（`make lint` 用 `-S warning`），而本地没装
+  shellcheck 时这一步被跳过，所以务必装上再验。典型例子：未使用的循环计数器
+  （`for i in $(seq 1 60)` 但循环体没读到 `i`）会报 SC2034 —— 用不到就写成 `_`

@@ -3,7 +3,7 @@ name: baota-docker
 description: "Development and operations guide for baota-docker: containerizing Baota (宝塔) Linux Panel with overlayfs-based persistence. Use when working in this repository, modifying build/runtime shell scripts, Dockerfiles, compose files, CI workflows, or docs; or when troubleshooting persistence, healthcheck, upgrade, backup, or release issues for the containerized panel."
 description_zh: "宝塔面板容器化项目（baota-docker）的开发与运维助手"
 description_en: "Development and ops guide for the baota-docker project"
-version: 1.0.0
+version: 1.1.0
 allowed-tools: Read,Bash,Grep,Glob
 ---
 
@@ -53,6 +53,17 @@ allowed-tools: Read,Bash,Grep,Glob
 6. **`init-mounts.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。
    函数内「局部变量」用下划线前缀 `_dir` / `_upper` / `_work` —— 不加前缀会覆盖调用方的循环变量。
 7. **清理必须写在产生垃圾的那一层内**。Docker 分层特性下，后续 `RUN` 删前面层的文件不减小体积。
+8. **CI 回写仓库时，`git rebase` 必须在「生成 / 修改任何文件」之前完成**。
+   `report.md` / `README.md` 一旦处于 modified，`git rebase` 会因 dirty tree 中止，
+   导致回写步骤整体失败 —— 表现为「日志显示成功但文件没变」。
+   正确顺序：checkout → rebase（clean）→ 生成文件 → 注入 → add → commit。
+9. **工作流 job 的 `name` 不能含 `${{ }}` 动态表达式**。Actions 在表达式未求值时
+   会 fallback 成英文 job key（`verify-stable`），看不出在跑什么。
+   版本号放**步骤名**里，job 名用静态中文。
+10. **`report.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->` 标记区由 CI 维护**，
+    不要手改 —— 下次巡检运行会被整体覆盖。
+11. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
+    本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
 
 ## 文件地图
 
@@ -71,6 +82,12 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
 | `stable/` `release/` | 两个通道的 Dockerfile / compose / VERSION |
 | `.github/scripts/health-check*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `.github/scripts/health-check/verify-published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
+| `.github/scripts/inject-report.py` | 把 `report.md` 注入 README 的报告标记区 |
+| `.github/workflows/verify-published.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
+| `.github/dependabot.yml` | 每周升级 Actions 版本（只开 PR，不自动合并） |
+| `report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
+| `docs/persistence-alternatives.md` | 方案选型：overlay vs bind mount 的取舍 |
 | `docs/` | 使用文档；`docs/development.md` 是开发者入口 |
 
 ## 常用命令
@@ -81,7 +98,7 @@ make up CHANNEL=stable            # 起容器
 make logs CHANNEL=stable          # 看日志（首次登录凭据在这里）
 make ps                           # 健康状态
 make health                       # 跑发布前健康检查
-make lint                         # shellcheck + bash -n
+make lint                         # shellcheck + bash -n + YAML（shellcheck 未装会跳过；CI 上 warning 即失败）
 
 docker exec baota baota-backup            # 备份
 docker exec baota baota-backup --list     # 体积分布 + 磁盘水位
@@ -110,6 +127,14 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
 **镜像版本与面板版本不一致** → 有人在面板里点过更新，新版文件已写进持久化层。
 补丁只挡住 `script/` 下的入口，API 层入口挡不住，靠 `entrypoint` 的
 `audit_panel_version` 检测并告警。
+
+**每日巡检失败或 report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
+
+- 有 diff 却没提交 → 回写步骤挂了，多半是 `git rebase` 因 dirty tree 中止（红线 8）
+- 打印「报告内容无变化，跳过提交」 → 内容确实一致（时间戳每次不同，正常不会命中）
+- 报告里出现「未产出报告」 → 对应通道的 artifact 没上传，去看那个 verify job 为何提前失败
+- 只验 amd64 是设计如此：arm64 在 QEMU 下 overlay 结论不可信，
+  arm64 的真实覆盖由两个构建工作流在原生 ARM runner 上负责
 
 更完整的排障清单见 `references/troubleshooting.md`，
 架构细节（为什么用 overlay、为什么 index=off）见 `references/architecture.md`。

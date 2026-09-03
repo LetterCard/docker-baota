@@ -127,3 +127,26 @@ cat data/system/.baota/boot-history.log
 
 新增检查项时注意：**不要靠 grep 中文告警文案判断**，读 `/run/baota/degraded*` 标记文件。
 `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PERSIST_DATA_ROOT` 等从 `shared/conf/defaults.env` 解析，不要在本脚本里硬编码。
+
+### 每日巡检：report.md 没更新
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| 日志显示成功但文件没变 | `git rebase` 因 dirty tree 中止 → 回写步骤失败 | 确认 rebase 排在「生成文件」之前 |
+| 打印「报告内容无变化，跳过提交」 | 内容确实与已提交的一致 | 正常（时间戳每次不同，极少命中） |
+| 报告里出现「未产出报告」 | 该通道 artifact 没上传 | 去看对应 verify job 为何提前失败 |
+| 只有 amd64 的结果 | 设计如此 | arm64 在 QEMU 下 overlay 结论不可信，由构建工作流在原生 ARM runner 覆盖 |
+| 工作流图里 job 显示英文 key | job `name` 含 `${{ }}` 表达式 | 改成静态中文名，版本号放步骤名 |
+
+### `make lint` 在 CI 失败但本地通过
+
+本地没装 shellcheck 时 `make lint` 会**跳过**这一步（只跑 `bash -n` / `sh -n` / YAML），
+而 CI 上真正执行且 `-S warning` 让 **warning 即失败**。
+
+```bash
+brew install shellcheck                        # 有 brew 时
+python3 -m pip install --user shellcheck-py    # 没有 brew 时（装完确认在 PATH 里）
+shellcheck -x -S warning shared/build/*.sh shared/scripts/*.sh .github/scripts/health-check/*.sh
+```
+
+典型：SC2034「变量未使用」——循环计数器用不到就写成 `_`（`for _ in $(seq 1 60)`）。

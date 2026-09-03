@@ -76,6 +76,10 @@ lowerdir = 镜像内的同名目录（随镜像升级而更新）
 overlay 挂载显式带 `index=off`：同 upper 换 lower（升级）需要它。
 overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
+> 有人会问：为什么不直接 `mount --bind` 把 `/etc`、`/usr` 挂出来，那样更简单。
+> 那种做法能让数据不丢，但会让镜像升级在这两个目录上**彻底失效**。
+> 完整对比与取舍见[持久化方案选型](persistence-alternatives.md)。
+
 ### 换镜像后会发生什么
 
 | 内容 | 换镜像后 |
