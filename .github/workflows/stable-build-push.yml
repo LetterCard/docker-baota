@@ -21,8 +21,9 @@ name: 🚀 稳定版：构建并发布镜像
 #    🗓️ 每周一     UTC 02:00（北京时间周一 10:00）自动运行一次。先探测上游
 #                  横幅版本：没有新版本就空转结束，有新版本才走完整构建发布。
 #                  与 release 通道的每日 UTC 17:00 错开。
-#    🖱️ 手动       随时在页面触发，流程与定时一致，但无论版本是否变化都会
-#                  重新构建发布一次（需要「不改版本号也重建」时用这个）。
+#    🖱️ 手动       随时在页面触发，语义 = 手动跑一次探测：与定时完全一致，
+#                  只有探测到新版本才构建。确需不改版本号强制重建时，
+#                  临时放开 build / publish 的 if 条件再手动触发。
 #    发布成功后回写 stable/VERSION；文件变更不触发任何工作流。
 #
 #  并行多架构
@@ -178,19 +179,14 @@ jobs:
           PROBE="${{ steps.resolve.outputs.probe }}"
           CHANGED="${{ steps.resolve.outputs.changed }}"
 
-          # 手动触发 = 用户明确要求发布（版本未变也重新构建）；
-          # 定时触发 = 仅在探测到新版本（changed=true）时才有后续构建任务
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MANUAL_NOTE="，手动触发将重新构建发布"
-          else
-            MANUAL_NOTE="，定时触发本次不构建"
-          fi
-
+          # 只有探测到新版本才进入构建，与触发方式无关（手动 = 手动跑一次探测）。
+          # 探测失败同样阻断：无法确认上游状态时按旧版本继续构建，
+          # 打出的镜像可能与上游不一致，宁可不发，等下次运行自动重试
           case "${PROBE}:${CHANGED}" in
             ok:true)  TEXT="🎉 发现上游新版本：${CURRENT} → ${VALUE}，将按新版本发布" ;;
-            ok:false) TEXT="✅ 已是最新（${VALUE}）${MANUAL_NOTE}" ;;
-            failed:*) TEXT="⚠️ 探测失败，按 stable/VERSION（${VALUE}）继续${MANUAL_NOTE}" ;;
-            *)        TEXT="❓ 未知状态" ;;
+            ok:false) TEXT="✅ 已是最新（${VALUE}），本次不构建" ;;
+            failed:*) TEXT="⚠️ 探测失败，无法确认上游状态，本次不构建；稍后可手动重跑" ;;
+            *)        TEXT="❓ 未知状态，本次不构建" ;;
           esac
           {
             echo "### 🔍 stable 版本探测"
@@ -232,10 +228,15 @@ jobs:
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
     needs: [version, lint]
-    # 定时触发时只在探测到新版本才构建，否则每周都要空跑一整轮双架构构建
-    # （单次约 40 分钟，还要重复覆盖 DockerHub 上已有的同一个标签）。
-    # 手动触发则总是构建，方便在不改版本号的情况下重建镜像。
-    if: github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
+    # 只在探测到新版本才构建，手动与定时一视同仁：
+    #   - 否则每周定时都要空跑一整轮双架构构建（单次约 40 分钟），
+    #     还要重复覆盖 DockerHub 上已有的同一个标签；
+    #   - 手动触发同理 = 「手动跑一次探测」，无新版本就到此为止。
+    # 确需不改版本号强制重建时：临时把本行 if 改回
+    #   github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
+    # 并手动触发。常规渠道走不到这里就对了 —— 常备输入框比临时改条件
+    # 更容易误用
+    if: needs.version.outputs.changed == 'true'
     timeout-minutes: 180
     strategy:
       # 不要 fail-fast：让两个架构都跑完，一次就能看到各自的问题
@@ -381,7 +382,7 @@ jobs:
   publish:
     name: 🚀 合并多架构并发布（仅 <版本> 标签）
     needs: [version, build]
-    if: github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
+    if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
