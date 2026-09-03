@@ -228,50 +228,38 @@ jobs:
       - name: 🔧 准备 Docker Buildx
         uses: docker/setup-buildx-action@v4.3.0
 
-      # ---- 核心设计：唯一构建、验证通过后推送已验证的本地镜像 ----
-      # 构建结果是接下来三道验证的对象；推送是本地镜像直接 docker push，
-      # 「验证的 = 推送的」由同一个 image ID 保证（见推送 step 注释）。
-      # 用裸 buildx CLI 而非 build-push-action：构建与推送在这里是独立 step，
-      # action 的组合语义用不上；裸 CLI 让 step 名完全可控，UI 里不会再出现
-      # "Post 构建镜像" 这类由 action 自动附加的收尾副本。
-      # tag 直接用最终 repo 名 + 架构后缀：
-      #   1) 验证通过后 docker push 的就是这份本地镜像，无需重新打 tag
-      #   2) 两个矩阵 job 各自独立，带后缀才不会互相覆盖
-      # 构建缓存走 GHA cache（runner 内置 token 授权，按架构分 scope）
-      - name: 🏗️ 构建镜像
+      # ---- 第一次构建：只加载到本地，供三套健康检查使用 ----
+      # 同时把构建缓存写进 GHA 缓存（按架构分 scope），第二次按 digest 推送会命中，
+      # 几乎不再重新编译
+      - name: 🏗️ 构建镜像（加载到本地，供健康检查）
         run: |
-          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          VER="${{ needs.version.outputs.value }}"
-          TAG="${REPO}:${VER}-${{ matrix.arch }}"
-          echo "构建 ${TAG}"
+          echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
           docker buildx build \
             --file ./stable/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --load \
             --provenance=false \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
-            --build-arg "IMAGE_VERSION=${VER}" \
+            --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
             --build-arg "INSTALL_URL=${{ env.INSTALL_URL }}" \
-            --tag "${TAG}" \
+            --tag "baota:candidate" \
             --cache-from "type=gha,scope=${{ matrix.arch }}" \
             --cache-to "type=gha,scope=${{ matrix.arch }},mode=max" \
             .
-          # 回读本地 image ID 确认 load 成功，并打进日志供与推送 step 比对
-          docker image inspect --format '本地镜像 ID：{{.Id}}' "${TAG}"
+          docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
 
       # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
       - name: 🩺 验证 1/3：功能完整性
         run: |
           bash .github/scripts/health-check/run.sh core \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.value }}-${{ matrix.arch }}" \
-            "${{ needs.version.outputs.value }}"
+            "baota:candidate" "${{ needs.version.outputs.value }}"
 
       # 上面 19 项只覆盖了「命名卷 + 单挂 /data」一种挂载方式。
       # 这里补两类同样致命、但那边测不到的场景：
       #   混合挂载（./data:/data + ./system:/data/system）能否正常工作
       #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
       - name: 🧪 验证 2/3：挂载方式与降级场景
-        run: bash .github/scripts/health-check/run.sh mounts "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.value }}-${{ matrix.arch }}"
+        run: bash .github/scripts/health-check/run.sh mounts "baota:candidate"
 
       # 版本护栏、升级前快照、面板启动器刷新这三段**只在镜像版本变化时执行**，
       # 全新卷永远走不到 —— 上面两套检查都覆盖不到。
@@ -280,8 +268,7 @@ jobs:
       - name: 🔼 验证 3/3：升级与降级路径
         run: |
           bash .github/scripts/health-check/run.sh upgrade \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.value }}-${{ matrix.arch }}" \
-            "${{ needs.version.outputs.value }}"
+            "baota:candidate" "${{ needs.version.outputs.value }}"
 
       - name: 🔑 登录 DockerHub
         uses: docker/login-action@v4.6.0
@@ -289,70 +276,44 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---- 推送已通过三道验证的本地镜像 ----
+      # ---- 第二次构建：按 digest 推送，不产生任何 arch 标签 ----
       #
-      # 为什么直接 push 本地镜像而不是再构建一次按 digest 推：
-      #   「再构建一次命中缓存所以相同」依赖构建可复现——但本镜像构建要从
-      #   download.bt.cn 拉官方脚本、走 apt 源，两次构建间隙上游一变，
-      #   第二次产物就不是验证过的那份了。
-      #   docker push 直接上传本地镜像的字节，「验证的 = 推送的」由
-      #   同一个 image ID 保证，下方还会做远端 config digest 硬比对。
-      #
-      # 固定后缀 tag（<版本>-amd64 / <版本>-arm64）是中间产物：
-      # 下次 CI 同 tag 同 digest 幂等覆盖，不累积；用户可见的标签
-      # 仍然只有 publish job 合并出的 repo:<版本>。
-      - name: 📤 推送已验证镜像
+      # 为什么构建两次（取舍，不是技术限制）：buildx 一次调用里没法「测完再推」。
+      # 这里先构建并 load 到本机、三套健康检查通过后才第二次推送；第二次命中
+      # 第一次刚写入的 GHA 缓存，几乎不再重新编译。
+      # push-by-digest=true：只把镜像按 digest 存进 registry，不创建任何标签 ——
+      # DockerHub 上永远不会出现 <版本>-amd64 / <版本>-arm64。
+      - name: 📤 按 digest 推送（不产生标签）
+        id: push
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          VER="${{ needs.version.outputs.value }}"
-          ARCH="${{ matrix.arch }}"
-          TAG="${REPO}:${VER}-${ARCH}"
-
-          # 本地 image ID（即 config digest）——「被验证的那份」的身份标识
-          LOCAL_ID=$(docker inspect --format '{{.Id}}' "${TAG}")
-          echo "推送 ${TAG}"
-          echo "本地镜像（三套健康检查验证对象）：${LOCAL_ID}"
-          docker push "${TAG}"
-
-          # push 后 RepoDigests[0] 即本次推送入库的 digest
-          # （刚 build 的镜像在 push 之前没有 RepoDigests，不存在拿到旧值的可能）
-          N=$(docker inspect --format '{{len .RepoDigests}}' "${TAG}")
-          [ "${N}" -gt 0 ] || { echo "::error::推送完成但读不到 RepoDigests"; exit 1; }
-          FULL=$(docker inspect --format '{{index .RepoDigests 0}}' "${TAG}")
-          DIGEST="${FULL#*@}"
+          echo "推送 linux/${{ matrix.arch }}（按 digest，无标签）"
+          docker buildx build \
+            --file ./stable/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --provenance=false \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
+            --build-arg "INSTALL_URL=${{ env.INSTALL_URL }}" \
+            --output "type=image,name=${REPO},push=true,push-by-digest=true" \
+            --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
+            --cache-from "type=gha,scope=${{ matrix.arch }}" \
+            .
+          DIGEST=$(jq -r '."containerimage.digest"' "/tmp/meta-${{ matrix.arch }}.json")
           case "${DIGEST}" in
-              sha256:*) ;;
-              *) echo "::error::未能取回 digest：${FULL}"; exit 1 ;;
+            sha256:*) ;;
+            *) echo "::error::取 digest 失败：${DIGEST}"; exit 1 ;;
           esac
-
-          # 「验证 = 推送」的硬证明：远端 manifest 的 config digest 必须等于本地 image ID。
-          # 用 jq 提取 .config.digest，不能再用 grep 写死 "digest":"..."（冒号后无空格）：
-          # imagetools --raw 返回的 JSON 若带缩进 / 空格就永远匹配不到 → config 为空，
-          # 反而误报「远端与本地不一致」。GH 官方 runner 自带 jq
-          RAW_MANIFEST=$(docker buildx imagetools inspect --raw "${REPO}@${DIGEST}" 2>/dev/null || true)
-          [ -n "${RAW_MANIFEST}" ] \
-              || { echo "::error::无法读取远端 manifest（${REPO}@${DIGEST}）"; exit 1; }
-          REMOTE_CFG=$(printf '%s' "${RAW_MANIFEST}" \
-              | jq -r 'if type == "object" then (.config.digest // "") else "" end' 2>/dev/null || true)
-          if [ -z "${REMOTE_CFG}" ]; then
-              echo "::error::远端 manifest 未解析出 config digest（可能是 OCI index）"
-              exit 1
-          fi
-          if [ "${REMOTE_CFG}" != "${LOCAL_ID}" ]; then
-              echo "::error::远端镜像与本地验证的不一致（config ${REMOTE_CFG} != ${LOCAL_ID}）"
-              exit 1
-          fi
-
           mkdir -p /tmp/digests
-          printf '%s\n' "${DIGEST}" > "/tmp/digests/${ARCH}"
+          printf '%s\n' "${DIGEST}" > "/tmp/digests/${{ matrix.arch }}"
           {
-            echo "### 🏗️ linux/${ARCH}"
+            echo "### 🏗️ linux/${{ matrix.arch }}"
             echo ""
-            echo "- 推送 digest：\`${REPO}@${DIGEST}\`"
-            echo "- 与本地健康检查验证的镜像字节一致（config \`${LOCAL_ID}\`）"
+            echo "- 按 digest 推送：\`${REPO}@${DIGEST}\`（无 arch 标签）"
+            echo "- 字节与健康检查对象同源（复用同一份 GHA 缓存）"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ ${ARCH} digest: ${DIGEST}（与验证镜像字节一致）"
+          echo "✅ ${{ matrix.arch }} digest: ${DIGEST}"
 
       - name: 📦 上传 digest 产物
         uses: actions/upload-artifact@v7.0.1
@@ -409,25 +370,6 @@ jobs:
 
           echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
           echo "tag=${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: 🧹 清理多架构中间产物标签
-        if: success()
-        run: |
-          # 多架构合并完成后，把每架构推送时残留的 <ver>-amd64 / <ver>-arm64 标签删掉，
-          # 让 DockerHub 标签页只展示约定的最终标签（stable=版本号、release=版本号+latest）。
-          # DockerHub v2 API：DELETE /v2/repositories/{namespace}/{repo}/tags/{tag}/
-          set -e
-          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          VER="${{ needs.version.outputs.value }}"
-          NS="${REPO%/*}"; NAME="${REPO#*/}"
-          for ARCH in amd64 arm64; do
-            TAG="${VER}-${ARCH}"
-            echo "删除 ${NS}/${NAME}:${TAG}"
-            curl -fsS -X DELETE -o /dev/null \
-              -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}" \
-              "https://hub.docker.com/v2/repositories/${NS}/${NAME}/tags/${TAG}/" \
-              || echo "  （${TAG} 不存在或已删除，跳过）"
-          done
 
       - name: 📋 输出摘要
         run: |
