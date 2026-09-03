@@ -266,11 +266,11 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 整份持久化都在 data 卷内（业务直通 data/www、面板 upper data/system/panel、
-    # 系统层 data/system/<dir>），一次 '.' 归档 data 根即可 —— 包内 www/、system/
-    # 结构天然完整，无需分两段。
-    # 排除项见 EXCLUDES（.baota 与 www/backup/ 的产物）
-    data_members=('.')
+    # 归档 data 卷内的两层顶层目录：业务（www/）+ 系统（system/，内含面板 upper）。
+    # 用显式成员而不是 '.'：'.' 会让成员名带 ./ 前缀，EXCLUDES 里
+    # 'www/backup/manual' 匹配不上 → 边写边读自己的输出包 → tar 报错。
+    # 顶层 .baota 不进成员、内部 .baota 由 basename 排除，天然不打包。
+    data_members=('www' 'system')
     return 0
 }
 
