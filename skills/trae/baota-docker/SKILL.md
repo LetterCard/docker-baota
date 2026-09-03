@@ -25,11 +25,13 @@ allowed-tools: Read,Bash,Grep,Glob
 
 ```
 /data（宿主机 data/，bind mount）
- ├── www/          ← 容器 /www 的整层 overlay upper（lower=镜像 /www）
- │    ├── server/panel/   面板（增量）
- │    ├── wwwroot/        站点 data/www/wwwroot
- │    └── backup/         备份 data/www/backup
- ├── system/       ← 系统层根：etc usr var root opt home srv 的 upperdir
+ ├── www/          ← 业务数据：三个直通目录（源在 overlay upper 外，宿主可直改）
+ │    ├── wwwroot/        站点 data/www/wwwroot  ↔ 容器 /www/wwwroot
+ │    ├── backup/         备份 data/www/backup   ↔ 容器 /www/backup
+ │    └── server/data/    MySQL data/www/server/data ↔ /www/server/data
+ ├── system/       ← 系统层
+ │    ├── panel/          /www 面板 overlay upper（server/panel、wwwlogs 增量）
+ │    ├── etc usr var root opt home srv
  │    └── .baota/  ← 元数据：work/ lock image-version boot-history.log
  └── .baota/       ← 数据层状态（lock + overlay workdir）
 

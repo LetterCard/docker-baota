@@ -39,20 +39,20 @@ ls -1t data/www/backup/auto/
 # 2) 必须先停容器：运行期间直接改 overlay 的 upper 属未定义行为
 docker compose down
 
-# 3) 替换 —— 面板配置的 upper 就在 data/www/server/panel/data
-rm -rf data/www/server/panel/data
-cp -a data/www/backup/auto/baota-<版本>-<时间>  data/www/server/panel/data
+# 3) 替换 —— 面板配置在 /www 这一层 overlay 的 upper 里（data/system/panel）
+rm -rf data/system/panel/server/panel/data
+cp -a data/www/backup/auto/baota-<版本>-<时间>  data/system/panel/server/panel/data
 
 docker compose up -d
 ```
 
-> **路径为什么能对齐**：`/www` 的 overlay upper 直接落在 `data/www/`，与容器内的
-> `/www` 一一对应 —— 宿主机上的 `data/www/server/panel/data` 就是容器里的
-> `/www/server/panel/data`，没有多余层级。
+> **路径为什么这样**：`/www` 的面板 overlay upper 收敛在 `data/system/panel/`，
+> 所以容器里 `/www/server/panel/data` 对应宿主 `data/system/panel/server/panel/data`；
+> 快照落在业务直通目录 `data/www/backup/auto/`。
 >
-> 升级快照只覆盖面板配置，**不覆盖站点与数据库** —— 它们虽是 `/www` 这一层
-> overlay 的内容，但镜像里这些目录为空，换镜像（换 lower）动不到它们；
-> 另有更好的备份手段（面板内备份、`baota-backup`）。
+> 升级快照只覆盖面板配置，**不覆盖站点与数据库** —— 它们走 bind 直通
+> （`data/www/...`），换镜像（换 lower）动不到；另有更好的备份手段
+> （面板内备份、`baota-backup`）。
 
 ### ✅ 升级后验证
 
@@ -119,9 +119,9 @@ docker compose logs -f baota
 
 ### ⚠️ 迁移后需要你确认的部分
 
-1. **面板端口**：新机器的端口映射要和 `data/www/server/panel/data/port.pl` 里的值对得上
+1. **面板端口**：新机器的端口映射要和 `data/system/panel/server/panel/data/port.pl` 里的值对得上
 2. **架构**：amd64 与 arm64 的镜像不通用。跨架构迁移（例如 x86 换 ARM 飞牛）时，
-   编译好的 nginx / php / MySQL 二进制就躺在 `data/system/usr` 与 `data/www/server` 里，
+   编译好的 nginx / php / MySQL 二进制就躺在 `data/system/usr` 与 `data/system/panel/server` 里，
    迁移过去起不来。**跨架构迁移只搬业务数据**：在新机器上全新启动，
    再用面板导入站点文件与数据库备份
 3. **文件系统**：新位置必须是 ext4 / btrfs / xfs，否则持久化层会降级为只读（见[硬约束](persistence.md#硬约束)）

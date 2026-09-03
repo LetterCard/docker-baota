@@ -23,17 +23,19 @@
 清理与挂载都在 `flock` 独占锁的保护下，同一时刻不可能有另一个实例在用。
 锁由内核持有、容器死亡自动释放，非正常退出不会留下死锁。
 
-## `/www` 是整层 overlay（没有直通）
+## `/www` = 面板 overlay + 业务直通
 
-`/www` 整体是一层 overlay，upper 直接是 `data/www/`，宿主机目录与容器内
-一一对应：`data/www/server/panel`、`data/www/wwwroot`（站点）、
-`data/www/backup`（备份）、`data/www/server/data`（MySQL）。
+`/www` 在容器里仍是 overlay（面板代码跟镜像升级），但 upper 收敛到
+`data/system/panel/`（server/panel、wwwlogs 等增量）。三个纯业务目录在
+overlay 之后 bind 直通（源在 upper 之外）：
 
-没有为站点 / 备份 / MySQL 做独立的直通 bind：它们虽在 overlay upper 里，
-但镜像中这些目录基本为空（纯运行期数据），换镜像（换 lower）不会动到它们。
-宿主若要直接改站点文件，写 `data/www/wwwroot` 即可 —— 数据在磁盘上仍是
-普通目录，风险点只在「删除镜像自带文件」这类需要 whiteout 的操作上，
-对纯运行期目录无影响。
+- `/www/wwwroot` ← `data/www/wwwroot`（站点，宿主可直接 SMB 改）
+- `/www/backup` ← `data/www/backup`
+- `/www/server/data` ← `data/www/server/data`（MySQL）
+
+系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/system/<同名>`。
+镜像里 wwwroot/backup/server/data 为空（纯运行期数据），换镜像动不到它们；
+面板代码 / 默认配置走 overlay lower，换镜像自动更新。
 
 ## 启动链与阶段划分
 
@@ -41,8 +43,9 @@
 ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
   └─ 0. flock 独占锁
   └─ 1. 暂存 Docker 注入的 /etc/{hosts,resolv.conf,hostname}
-  └─ 2. 逐个 mount overlay（index=off）+ 可写性实测（/www → data/www，系统层 → data/system/<dir>）
-  └─ 3. 还原 Docker 动态文件
+  └─ 2. 逐个 mount overlay（index=off）+ 可写性实测（/www → data/system/panel，系统层 → data/system/<dir>）
+  └─ 3. 业务直通 bind（/www/wwwroot、/www/backup、/www/server/data → data/www/<同名>）
+  └─ 4. 还原 Docker 动态文件
   └─ 4. exec bash /baota/entrypoint.sh
        └─ check_panel_files       面板被写坏时给明确指引
        └─ prepare_runtime_dirs    /run 复位，/var/run → /run

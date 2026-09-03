@@ -1,9 +1,9 @@
 # 💾 备份与恢复
 
 所有状态都在持久化层里：一个 `data/` 目录（compose 默认 `./data:/data`）——
-`/www` 的持久化在 `data/www/`（面板 / 站点 / 备份 / MySQL 都在里面），系统层在 `data/system/`。
-备份工具 `baota-backup` 直接打整份 `data/`，包内不含宿主机绝对路径，
-所以恢复到任何机器、任何目录都不受影响。
+业务数据（站点/备份/MySQL）在 `data/www/`（直通，宿主可直改），面板增量在
+`data/system/panel/`，系统层在 `data/system/`。备份工具 `baota-backup` 直接打整份
+`data/`，包内不含宿主机绝对路径，所以恢复到任何机器、任何目录都不受影响。
 
 ---
 
@@ -124,8 +124,7 @@ docker exec baota baota-backup --rsync /backup
 
 ```
 /backup/
-├── data/            ← data/（面板 / 站点 / 数据库 / 备份；系统层单独同步到 data/system）
-├── system/          ← 系统层（etc usr var root opt home srv）
+├── data/            ← 整份 data 卷（业务 data/www + 面板 data/system/panel + 系统层）
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
 
@@ -146,9 +145,8 @@ docker exec baota baota-backup --rsync /backup
 
 ```bash
 docker compose down
-mv data "data.bak-$(date +%F)" && mkdir -p data/system
+mv data "data.bak-$(date +%F)" && mkdir data
 cp -a /backup/data/.   data/
-cp -a /backup/system/. data/system/
 docker compose up -d && docker compose logs -f baota
 ```
 
@@ -173,11 +171,10 @@ tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|www/server/p
 docker compose down
 
 # 现有 data 先改名而不是直接删，新包有问题还能退回
-mv data "data.bak-$(date +%F)" && mkdir -p data/system
+mv data "data.bak-$(date +%F)" && mkdir data
 
-# 数据层（www/ = 面板+站点+备份+MySQL）解到 data/，系统层解到 data/system/
-tar xzf baota-backup-2026-08-31.tgz -C data        www
-tar xzf baota-backup-2026-08-31.tgz -C data/system etc usr var root opt home srv
+# 整包解回 data（业务 + 面板 + 系统都在包里，结构就是 data/www、data/system）
+tar xzf baota-backup-2026-08-31.tgz -C data
 
 docker compose up -d && docker compose logs -f baota
 ```

@@ -209,7 +209,6 @@ dump_databases() {
 # 生成包内说明：版本号、时间、目录清单，以及恢复步骤
 write_manifest() {
     local file="$1" image_ver db_note
-    local data_tops='' _d
 
     image_ver=$(cat /baota/VERSION 2> /dev/null || echo unknown)
     if [ -f "${TMP_DIR}/databases.sql" ]; then
@@ -218,35 +217,23 @@ write_manifest() {
         db_note='未包含 MySQL 转储（容器停止或未安装 MySQL）'
     fi
 
-    # 包内数据层的顶层名字（恢复命令直接用）：数据层成员目前只有 www
-    data_tops=''
-    for _d in ${PERSIST_DATA_DIRS}; do
-        data_tops="${data_tops} ${_d}"
-    done
-    data_tops="${data_tops# }"
-
     cat > "${file}" <<EOF
 baota-backup 备份清单
 =====================
 生成时间    : $(date '+%F %T %Z')
 镜像版本    : ${image_ver}
-数据层根目录: ${PERSIST_DATA_ROOT}
-系统层根目录: ${PERSIST_SYSTEM_ROOT}
-持久化目录  : ${PERSIST_DATA_DIRS} | ${PERSIST_SYSTEM_DIRS}
+持久化根目录: ${PERSIST_DATA_ROOT}
 数据库      : ${db_note}
 
 恢复步骤
 --------
-包内数据层内容在 ${data_tops}/ 下（= 容器 /www 这一层 overlay，含 server/panel、
-wwwroot、backup），系统层内容在 etc/usr/var/root/opt/home/srv 下。
-数据层与系统层要解到各自的落点，直接整包解到一处会错位：
+本包是整份 data 卷的镜像（业务 data/www、面板 upper data/system/panel、
+系统层 data/system/... 都在里面），直接整包解回 data 即可：
 
 【./data:/data（compose 默认）】
 1. 停止容器：docker compose down
-2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir -p data/system
-3. 解开备份：
-     tar xzf $(basename "${2:-本包}") -C data        ${data_tops}            # 数据层
-     tar xzf $(basename "${2:-本包}") -C data/system etc usr var root opt home srv   # 系统层
+2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir data
+3. 解开备份：tar xzf $(basename "${2:-本包}") -C data
 4. 启动容器：docker compose up -d && docker compose logs -f baota
 
 若 MySQL 起不来（热备份时 InnoDB 文件可能半写）：
@@ -332,24 +319,24 @@ verify_archive() {
     log "正在校验：${file}"
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
-    # 关键成员检查：
-    #   www/wwwroot/         站点（/www 这一层 overlay 的内容），恢复时必须还原
-    #   www/server/panel/data 面板 overlay 数据层（配置 + 数据库），恢复时必须还原
-    #   MANIFEST.txt         备份清单（由 backup.sh 自动生成）
+    # 关键成员检查（整份 data 卷归档，结构与宿主机一致）：
+    #   www/wwwroot/                   站点（业务直通）
+    #   system/panel/server/panel/data 面板配置 + 数据库（/www overlay upper）
+    #   MANIFEST.txt                   备份清单（由 backup.sh 自动生成）
     # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，
     # 大清单的 printf 写不完被 SIGPIPE 终止（141），会把「含」误判成「缺少」。
     # listing 已在变量里，case 子串匹配既无管道也无该隐患
-    for pattern in 'wwwroot/' 'www/server/panel/data' 'MANIFEST.txt'; do
+    for pattern in 'www/wwwroot/' 'system/panel/server/panel/data' 'MANIFEST.txt'; do
         case "${listing}" in
             *"${pattern}"*) echo "  ✅ 含 ${pattern}" ;;
             *)              echo "  ❌ 缺少 ${pattern}"; missing=$((missing + 1)) ;;
         esac
     done
 
-    # 自包含检查：备份包不应把上一次的产物又装进来
+    # 自包含检查：备份包不应把业务备份目录（data/www/backup/*）里的产物装进来
     case "${listing}" in
-        *'backup/auto/'*|*'backup/manual/'*|*'backup/database/'*|*'backup/rsync/'*)
-            warn '备份包内含有 backup/ 下的产物，发生自包含（下一次备份体积会翻倍）'
+        *'www/backup/auto/'*|*'www/backup/manual/'*|*'www/backup/database/'*|*'www/backup/rsync/'*)
+            warn '备份包内含有 www/backup/ 下的产物，发生自包含（下一次备份体积会翻倍）'
             missing=$((missing + 1)) ;;
     esac
 
