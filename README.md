@@ -61,10 +61,10 @@ overlay 上层与项目元数据）。两者也可拆成两个挂载（混合模
 
 ## 三个必须先知道的约定
 
-1. **`data/` 一个目录保住全部数据。** `data/www/` 就是容器 `/www` 的持久化层 ——
-   站点在 `data/www/wwwroot/`、备份在 `data/www/backup/`，与官方路径一致；
-   系统层 `data/system/` 收起 `etc usr var root opt home srv` 的 overlay 上层与项目元数据。
-   （见[编排配置详解](docs/configuration.md)）。
+1. **`data/` 一个目录保住全部数据，三层分清楚。** 业务数据在 `data/www/`
+   （`wwwroot/` 站点、`backup/` 备份、`server/data/` MySQL —— 三个直通目录，
+   宿主机可直接 SMB 读写）；面板增量在 `data/system/panel/`；系统层在
+   `data/system/`（etc usr var root opt home srv）。（见[编排配置详解](docs/configuration.md)）。
 2. **不要在面板里点「更新」。** 面板版本由镜像决定，面板内更新会把新版文件写进
    持久化层、永久屏蔽镜像层。镜像升级才是干净的升级路径。
 3. **口令写在 compose 等于公开。** 镜像里没有任何固定口令，首次启动随机生成并打印到日志；

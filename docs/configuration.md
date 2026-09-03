@@ -98,13 +98,14 @@ compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在
 
 ```
 data/                         （./data:/data，host 侧一目录）
-├── www/                      ← 容器 /www 的 overlay upper
-│   ├── server/panel/             面板
-│   ├── wwwroot/                  ← 站点 data/www/wwwroot
-│   ├── backup/                   ← 备份 data/www/backup
-│   └── wwwlogs/
-├── system/                   ← etc usr var root opt home srv 的 overlay upper
-│   └── .baota/               ← 项目元数据（锁、版本记录、启动历史）
+├── www/                      ← 业务数据：三个直通目录（宿主机可直接 SMB 读写）
+│   ├── wwwroot/                  ← 站点 data/www/wwwroot ↔ /www/wwwroot
+│   ├── backup/                   ← 备份 data/www/backup ↔ /www/backup
+│   └── server/data/              ← MySQL data/www/server/data ↔ /www/server/data
+├── system/                   ← 系统层
+│   ├── panel/                    ← /www 面板 overlay upper（server/panel、wwwlogs 增量）
+│   ├── etc/ usr/ var/ root/ opt/ home/ srv/   ← 各目录 overlay upper
+│   └── .baota/                   ← 项目元数据（锁、版本记录、启动历史）
 └── .baota/                   ← 数据层状态（锁 + overlay workdir）
 ```
 

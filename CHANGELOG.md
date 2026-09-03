@@ -5,34 +5,30 @@
 
 ---
 
-## [未发布] — 持久化布局改为「/www 整层 overlay」+ 结构与可维护性重构
+## [未发布] — 三层分离布局（业务直通 + 面板/系统 overlay）+ 结构与可维护性重构
 
-### ⚠️ 持久化布局（官方路径对齐，全新部署请从空 data/ 开始）
-
-`/www` 现在是**一整层 overlay**，upper 直接就是 `data/www/`：
+### ⚠️ 布局：一个 data，三层分清楚（全新部署请从空 data/ 开始）
 
 ```
-data/www/             = 容器 /www 的持久化层
-  ├─ server/panel/        面板（增量）
-  ├─ wwwroot/             站点 data/www/wwwroot
-  ├─ backup/              备份 data/www/backup
-  └─ wwwlogs/
-data/system/          = etc usr var root opt home srv 的 overlay upper
-data/.baota           = 数据层状态（锁 + overlay workdir）
+data/                        （./data:/data）
+├── www/                      业务数据 —— 三个直通目录，宿主机可 SMB 直改
+│   ├── wwwroot/       ↔ /www/wwwroot（站点）
+│   ├── backup/        ↔ /www/backup
+│   └── server/data/   ↔ /www/server/data（MySQL）
+├── system/                   系统层
+│   ├── panel/         /www 面板 overlay upper（server/panel、wwwlogs 增量）
+│   ├── etc usr var root opt home srv
+│   └── .baota/
+└── .baota/
 ```
 
-宿主机目录与容器内路径一一对应，站点就在 `data/www/wwwroot/`，不再有
-「www 套 www」或直通目录的平级碎片。compose 只挂一个 `./data:/data`。
+- `/www` 仍是 overlay（面板随镜像升级），upper 收敛到 `data/system/panel`
+- 站点 / 备份 / MySQL 改为 bind 直通（源在 `data/www`，upper 之外），
+  宿主直接改有内核保证
+- 容器内路径不变（`/www/wwwroot`、`/www/server/panel`…）
 
-同时移除：
-- **直通挂载机制**（`PASSTHROUGH_DIRS` 与 bind 播种逻辑整个删除）——
-  `/www` 整体一层 overlay，站点 / 备份 / MySQL 都落在 `data/www/` 下
-- **旧数据自动迁移逻辑**（`migrate_old_layout` / `migrate_data_layout`）——
-  不做跨版本布局迁移；从旧版升级请按 docs/upgrade.md 手工迁移或全新起 data/
-- 系统层的 `data/system` 不再作为可拆分的「混合挂载」宣传
-
-> ⚠️ 已用旧布局（data/www/www 或直通式 data/wwwroot）跑过的 data/ 与本版不兼容，
-> 升级前请用旧版 `baota-backup` 先打一份完整备份，再按 docs/upgrade.md 恢复。
+> ⚠️ 旧布局（data/www 整棵 overlay 或早先的 data/wwwroot 直通）与本版不兼容，
+> 升级前请用旧版 `baota-backup` 打完整备份再按 docs/upgrade.md 恢复。
 
 ### ✨ 新增
 
