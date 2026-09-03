@@ -88,7 +88,7 @@ jobs:
 
   # ── 2) 两个通道并行验证（互不依赖，UI 并排、各自可见进度） ────────────────
   verify-stable:
-    name: 🐂 验证稳定版 ${{ needs.prep.outputs.stable }}
+    name: 🐂 验证稳定版
     needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -96,7 +96,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 运行回归验证
+      - name: 🔬 运行回归验证（${{ needs.prep.outputs.stable }}）
         run: |
           bash "${HC}/verify-published.sh" \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.stable }}" \
@@ -113,7 +113,7 @@ jobs:
           retention-days: 7
 
   verify-release:
-    name: 📦 验证正式版 ${{ needs.prep.outputs.release }}
+    name: 📦 验证正式版
     needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -121,7 +121,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 运行回归验证
+      - name: 🔬 运行回归验证（${{ needs.prep.outputs.release }}）
         run: |
           bash "${HC}/verify-published.sh" \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.release }}" \
