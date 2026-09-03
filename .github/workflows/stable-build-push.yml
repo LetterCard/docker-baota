@@ -7,6 +7,10 @@ name: 🚀 稳定版：构建并发布镜像
 #      - 版本来源：stable/VERSION（version job 每次运行时自动探测校准）
 #      - 安装脚本：installStable_12.sh（稳定线 12.x）
 #      - 只发布精确版本标签，不打 latest
+#      - 安装脚本地址：stable 必须显式拿到它 —— version job 要下载脚本、
+#        从横幅里提取版本号（release 走 get_version API，不需要下载）。
+#        地址的唯一真源是 stable/Dockerfile 的 ARG INSTALL_URL，
+#        由 version job 现场解析；build job 不传 --build-arg，用同一份默认值
 #
 #  版本来源
 #    每次运行探测安装脚本横幅版本：高于 stable/VERSION 就按新版本发布，
@@ -48,13 +52,10 @@ on:
     # 每周一 UTC 02:00（北京时间周一 10:00）。
     # 与 release 通道的每日 UTC 17:00（北京时间 1 点）错开，避免两个通道同时构建
     - cron: '0 2 * * 1'
-  workflow_dispatch:
-    inputs:
-      install_url:
-        description: '安装脚本地址（手动运行时用于校准 VERSION；默认与 Dockerfile 一致）'
-        required: false
-        default: 'https://download.bt.cn/install/installStable_12.sh'
-        type: string
+  # 手动触发不再带任何输入项：该填的都在仓库里，页面上多一个输入框只会
+  # 多一处「这次填的和平时跑的不一样」的隐患（典型后果：探测时用一个脚本、
+  # 构建时又用另一个）
+  workflow_dispatch: {}
 
 # 同一时刻只保留最新一次运行，避免两套多架构构建互相抢缓存
 concurrency:
@@ -64,7 +65,12 @@ concurrency:
 env:
   # 必须与 stable/docker-compose.yml 里的 image 保持一致
   IMAGE_NAME: baota
-  INSTALL_URL: ${{ inputs.install_url || 'https://download.bt.cn/install/installStable_12.sh' }}
+  # 这里刻意没有 INSTALL_URL：安装脚本地址的唯一真源是
+  # stable/Dockerfile 的 ARG INSTALL_URL 默认值。
+  #   · build job  不传 --build-arg，直接用 Dockerfile 的默认值；
+  #   · version job 需要它去探测上游版本，从 Dockerfile 现场解析（见该 job）。
+  # 在 workflow 里再抄一份，漂移的表现是「探测到的版本」与「实际装出来的
+  # 版本」不是同一个 —— 探测 12.1 却按 12.0 装，白跑一整轮双架构构建。
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -83,13 +89,42 @@ jobs:
       current: ${{ steps.resolve.outputs.current }}
       changed: ${{ steps.resolve.outputs.changed }}
       probe: ${{ steps.resolve.outputs.probe }}
+      install_url: ${{ steps.install_url.outputs.url }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
+      # ---- 安装脚本地址：唯一真源是 stable/Dockerfile 的 ARG ----
+      #
+      # 与 release 通道不同，stable 必须拿到这个地址：本 job 要下载它、从横幅里
+      # 提取版本号（release 走 get_version API，不需要下载脚本，所以它的
+      # workflow 里根本没有这一项）。
+      #
+      # 从 Dockerfile 现场解析，而不是在 workflow 里再抄一份默认值：
+      # 两处漂移的表现是「探测到的版本」与「实际装出来的版本」不是同一个 ——
+      # 探测到 12.1 却按 12.0 构建，健康检查的版本校验会拦下，但白跑一整轮
+      # 双架构构建（30 分钟起）。
+      - name: 🔗 读取安装脚本地址（取自 Dockerfile）
+        id: install_url
+        run: |
+          URL=$(sed -n 's/^ARG INSTALL_URL=//p' stable/Dockerfile | head -1)
+          if [ -z "${URL}" ]; then
+            echo "::error::无法从 stable/Dockerfile 解析 ARG INSTALL_URL"
+            exit 1
+          fi
+          case "${URL}" in
+            http://*|https://*) ;;
+            *) echo "::error::解析到的安装脚本地址不像 URL：${URL}"; exit 1 ;;
+          esac
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "安装脚本：${URL}"
+
       - name: 🔍 探测上游版本并与 VERSION 比对
         id: resolve
         run: |
+          # 地址由上一步从 stable/Dockerfile 解析而来（那里是唯一真源）
+          INSTALL_URL='${{ steps.install_url.outputs.url }}'
+
           VER=$(tr -d '[:space:]' < stable/VERSION)
           if [ -z "$VER" ]; then
             echo "::error::stable/VERSION 为空"
@@ -235,6 +270,8 @@ jobs:
       - name: 🏗️ 构建镜像（加载到本地，供健康检查）
         run: |
           echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
+          # INSTALL_URL 刻意不传：用 stable/Dockerfile 里 ARG 的默认值，
+          # 与 version job 探测时解析到的是同一份（见 env 处的说明）
           docker buildx build \
             --file ./stable/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
@@ -242,7 +279,6 @@ jobs:
             --provenance=false \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
-            --build-arg "INSTALL_URL=${{ env.INSTALL_URL }}" \
             --tag "baota:candidate" \
             --cache-from "type=gha,scope=stable-${{ matrix.arch }}" \
             --cache-to "type=gha,scope=stable-${{ matrix.arch }},mode=max" \
@@ -303,13 +339,13 @@ jobs:
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           echo "推送 linux/${{ matrix.arch }}（按 digest，无标签）"
+          # INSTALL_URL 同第一次构建，用 Dockerfile 默认值，不在这里传
           docker buildx build \
             --file ./stable/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --provenance=false \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
-            --build-arg "INSTALL_URL=${{ env.INSTALL_URL }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \
             --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
             --cache-from "type=gha,scope=stable-${{ matrix.arch }}" \
