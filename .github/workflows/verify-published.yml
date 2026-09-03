@@ -158,6 +158,17 @@ jobs:
         with:
           path: /tmp/reports
 
+      # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
+      # 否则 report.md / README.md 已处于 modified，git rebase 会因 dirty tree 中止，
+      # 导致回写步骤整体失败、报告写不进仓库。
+      - name: 🔄 同步 main（rebase）
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+
       - name: 📝 生成 report.md
         run: |
           set -euo pipefail
@@ -211,19 +222,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 与另两个通道的 writeback 同样处理：跑一轮要十几分钟，期间 main
-          # 可能已有新提交，先 rebase 再 push，避免 non-fast-forward 被拒
-          git fetch origin main
-          git rebase origin/main
-
-          # rebase 完成（working tree 此时干净）后，再把报告注入 README 标记区，
-          # 避免 rebase 时 README 处于「已修改」状态导致 rebase 中止
+          # rebase 已在上一独立步骤完成（working tree 干净时执行），这里只注入并提交
           python3 .github/scripts/inject-report.py "${{ env.REPORT }}"
 
           git add "${{ env.REPORT }}" README.md
+
+          echo '--- 待提交变更 ---'
+          git status --short
+          git diff --cached --stat
+
           if git diff --cached --quiet; then
             echo '报告内容无变化，跳过提交'
             exit 0
