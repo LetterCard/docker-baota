@@ -354,6 +354,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "✅ ${ARCH} digest: ${DIGEST}（与验证镜像字节一致）"
 
+          # 推完即删：把 <ver>-amd64 / <ver>-arm64 中间标签立刻删掉
+          # ——publish 用的是 @digest（manifest 还在 registry，不依赖标签存在），
+          # 这样 arch 标签活不过本 job；publish 也不再需要"清理"步骤。
+          NS="${REPO%/*}"; NAME="${REPO#*/}"
+          echo "删除 ${REPO}:${VER}-${ARCH}"
+          curl -fsS -X DELETE -o /dev/null \
+            -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}" \
+            "https://hub.docker.com/v2/repositories/${NS}/${NAME}/tags/${VER}-${ARCH}/" \
+            || echo "  （${VER}-${ARCH} 删除失败/不存在，继续）"
+
       - name: 📦 上传 digest 产物
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -409,25 +419,6 @@ jobs:
 
           echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
           echo "tag=${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: 🧹 清理多架构中间产物标签
-        if: success()
-        run: |
-          # 多架构合并完成后，把每架构推送时残留的 <ver>-amd64 / <ver>-arm64 标签删掉，
-          # 让 DockerHub 标签页只展示约定的最终标签（stable=版本号、release=版本号+latest）。
-          # DockerHub v2 API：DELETE /v2/repositories/{namespace}/{repo}/tags/{tag}/
-          set -e
-          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          VER="${{ needs.version.outputs.value }}"
-          NS="${REPO%/*}"; NAME="${REPO#*/}"
-          for ARCH in amd64 arm64; do
-            TAG="${VER}-${ARCH}"
-            echo "删除 ${NS}/${NAME}:${TAG}"
-            curl -fsS -X DELETE -o /dev/null \
-              -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}" \
-              "https://hub.docker.com/v2/repositories/${NS}/${NAME}/tags/${TAG}/" \
-              || echo "  （${TAG} 不存在或已删除，跳过）"
-          done
 
       - name: 📋 输出摘要
         run: |
