@@ -15,8 +15,9 @@ name: 📦 正式版：构建并发布镜像
 #                   与是否有新版本无关
 #    🔍 detect      get_version API 取最新版号，与 release/VERSION 比对；
 #                   一致 → 结束；不一致 → 进入构建
-#    🏗️ build       双架构构建 → 三套健康检查 → 推送已验证的本地镜像
-#                   （19 项功能检查 / 挂载与降级场景 / 升级与降级路径）
+#    🏗️ build       双架构：构建两次 —— 第一次本地构建+三套健康检查
+#                   （19 项功能检查 / 挂载与降级场景 / 升级与降级路径），
+#                   通过后第二次按 digest 推送（不创建 arch 标签）
 #    🚀 publish     合并 digest → 打 repo:<版本> 与 repo:latest
 #    ✏️ writeback   把「实际推送的版本号」回写 release/VERSION，供下次比对
 #
