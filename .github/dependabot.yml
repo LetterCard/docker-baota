@@ -13,5 +13,4 @@ updates:
         patterns:
           - "*"
     commit-message:
-      prefix: "ci"
-      include: "scope"
+      prefix: "ci(actions) 自动更新 Actions 版本"
