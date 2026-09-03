@@ -47,7 +47,6 @@ fi
 
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
 # 备份产物目录：写在容器内的 /www/backup/manual（/www 是 www 这一层 overlay，
@@ -279,20 +278,12 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 数据层逐个列出成员，不能图省事用 '.' 归档整个数据层根（/data）：
-    # 系统层根 /data/system 是 /data 的子目录，'.' 会把系统层一起装进来，
-    # 与下面的 sys_members 重复 —— 体积翻倍、恢复时路径打架。
-    # 数据层唯一成员 www 是 /www 的整层 overlay upper，里面已含 server/panel、
-    # wwwroot、backup 等全部 /www 内容，归档它一个就够
-    data_members=()
-    for _d in ${PERSIST_DATA_DIRS}; do
-        [ -d "${PERSIST_DATA_ROOT}/${_d}" ] && data_members+=( "${_d}" )
-    done
-
+    # 整份持久化都在 data 卷内（业务直通 data/www、面板 upper data/system/panel、
+    # 系统层 data/system/<dir>），一次 '.' 归档 data 根即可 —— 包内 www/、system/
+    # 结构天然完整，无需分两段。
+    # 排除项见 EXCLUDES（.baota 与 www/backup/ 的产物）
+    data_members=('.')
     sys_members=()
-    for _d in ${PERSIST_SYSTEM_DIRS}; do
-        [ -d "${PERSIST_SYSTEM_ROOT}/${_d}" ] && sys_members+=( "${_d}" )
-    done
     return 0
 }
 
@@ -321,7 +312,6 @@ build_archive() {
     tar --xattrs --xattrs-include='trusted.overlay.*' \
         "${EXCLUDE_ARGS[@]}" \
         -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${data_members[@]}" \
-        -C "${PERSIST_SYSTEM_ROOT}" "${sys_members[@]}" \
         -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
         || die "打包失败：${out}"
 
@@ -457,28 +447,11 @@ rsync_sync() {
         rargs+=( "--exclude=${_e}" )
     done
 
-    # --rsync 是整层同步（打包那条路径已经改成逐个列成员，不受影响），
-    # 而数据层根 /data 里含嵌套的系统层根 /data/system。不排除就会把系统层
-    # 同步进 dest/data，与下面 system 那一段重复，恢复时路径还会打架。
-    # 只有两层真的嵌套时才加这条排除 —— 用户把两层挂到不相关路径时保持原样。
-    # 前导 / 是 rsync 的锚定写法：只匹配传输根下的这一项，不会误伤同名子目录
-    case "${PERSIST_SYSTEM_ROOT}" in
-        "${PERSIST_DATA_ROOT}/"*)
-            _nested="${PERSIST_SYSTEM_ROOT#"${PERSIST_DATA_ROOT}"/}"
-            if [ -n "${_nested}" ]; then
-                rargs+=( "--exclude=/${_nested}" )
-                log "增量同步 已排除嵌套在数据层内的系统层目录：${_nested}"
-            fi
-            ;;
-    esac
-
-    log "增量同步 数据层 ${PERSIST_DATA_ROOT} -> ${dest}/data"
+    # --rsync 整层同步 data 卷（业务 data/www + 面板 upper data/system/panel
+    # + 系统层 data/system/<dir> 都在里面），一条命令覆盖全部
+    log "增量同步 ${PERSIST_DATA_ROOT} -> ${dest}/data"
     rsync "${rargs[@]}" "${PERSIST_DATA_ROOT}/" "${dest}/data/" \
-        || die "数据层同步失败：${dest}/data"
-
-    log "增量同步 系统层 ${PERSIST_SYSTEM_ROOT} -> ${dest}/system"
-    rsync "${rargs[@]}" "${PERSIST_SYSTEM_ROOT}/" "${dest}/system/" \
-        || die "系统层同步失败：${dest}/system"
+        || die "同步失败：${dest}/data"
 
     log "增量同步完成：${dest}"
     log '提示：--rsync 是镜像同步，目标里始终只有最新一份；要留历史请配合 NAS 快照'
@@ -533,7 +506,6 @@ main() {
             tar --xattrs --xattrs-include='trusted.overlay.*' \
                 "${EXCLUDE_ARGS[@]}" \
                 -C "${PERSIST_DATA_ROOT}" -cz "${data_members[@]}" \
-                -C "${PERSIST_SYSTEM_ROOT}" "${sys_members[@]}" \
                 -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
                 || die '打包失败'
             return 0

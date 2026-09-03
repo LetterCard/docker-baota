@@ -29,9 +29,7 @@ read_default() {
     sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env
 }
 
-PERSIST_DATA_DIRS=$(read_default PERSIST_DATA_DIRS)
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
-[ -n "${PERSIST_DATA_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_DIRS"; exit 1; }
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
 
 WORK_ROOT=$(mktemp -d)
@@ -118,22 +116,14 @@ if inside test -e /run/baota/degraded; then
 fi
 pass "混合挂载下无降级"
 
-# 数据层落在宿主机 data/，系统层落在 system/ —— 各归各位
+# 业务直通源落在宿主机 data/（data/www/wwwroot 等），面板 upper 与系统层在 system/
 # shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
-for d in $PERSIST_DATA_DIRS; do
-    [ -d "${WORK_ROOT}/data/${d}" ] || fail "数据层目录缺失（宿主机侧）：${WORK_ROOT}/data/${d}"
-done
+[ -d "${WORK_ROOT}/data/www" ] || fail "业务直通源目录缺失（宿主机侧）：${WORK_ROOT}/data/www"
 for d in $PERSIST_SYSTEM_DIRS; do
     [ -d "${WORK_ROOT}/system/${d}" ] || fail "系统层目录缺失（宿主机侧）：${WORK_ROOT}/system/${d}"
 done
-pass "两层目录在宿主机上分别就位"
-
-# www 属于数据层。系统层下若出现 www，说明构建期的目录列表与运行期真源漂移了
-# （历史上 services.sh 的默认值的确多带了 www，会在镜像里建出这个空目录）
-if [ -d "${WORK_ROOT}/system/www" ]; then
-    fail "系统层出现了 www 目录（构建期与 defaults.env 漂移）：${WORK_ROOT}/system/www"
-fi
-pass "系统层无多余的 www 目录"
+[ -d "${WORK_ROOT}/system/panel" ] || fail "面板 upper 缺失（宿主机侧）：${WORK_ROOT}/system/panel"
+pass "业务源/面板/系统目录在宿主机上分别就位"
 
 step "A3) 混合挂载下写入落点正确"
 inside_sh 'echo mix > /etc/_mix_marker'
@@ -141,13 +131,12 @@ inside_sh 'echo mix > /www/_mix_marker'
 inside_sh 'echo mix > /www/wwwroot/_mix_marker'
 # 落盘路径语义：
 #   /etc           系统层 overlay，upper 在 system/etc/
-#   /www           数据层 overlay，upper 在 data/www/，与容器内的 /www 对齐
-#   /www/wwwroot   没有独立直通目录，它属于 /www 这一层 overlay，
-#                  落点就是 data/www/wwwroot/（data 挂在 data/ 上）
-[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]         || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}/data/www/_mix_marker" ]           || fail "/www 写入未落到数据层 upper（data/www/）"
-[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]   || fail "/www/wwwroot 写入未落到 data/www/wwwroot/"
-pass "写入分别落到 system/etc/ 与 data/www/（含 wwwroot）"
+#   /www           面板 overlay，upper 在 system/panel/
+#   /www/wwwroot   业务直通 bind，源 = data/www/wwwroot（data 挂在 data/ 上）
+[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]        || fail "/etc 写入未落到系统层 system/etc/"
+[ -f "${WORK_ROOT}/system/panel/_mix_marker" ]      || fail "/www 写入未落到面板 upper（system/panel/）"
+[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]  || fail "/www/wwwroot 写入未落到直通源 data/www/wwwroot/"
+pass "写入分别落到 system/etc/、system/panel/ 与 data/www/wwwroot"
 
 step "A4) 销毁容器后重建，数据不丢"
 docker rm -f "$CONTAINER" >/dev/null

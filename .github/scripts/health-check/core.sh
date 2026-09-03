@@ -32,13 +32,10 @@ read_default() {
     sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env
 }
 
-PERSIST_DATA_DIRS=$(read_default PERSIST_DATA_DIRS)
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
-[ -n "${PERSIST_DATA_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_DIRS"; exit 1; }
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
-ALL_PERSIST_DIRS="${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS}"
-# 两层「根」也一起读真源：落盘路径全部由根 + 成员名拼出来。
-# 之前脚本里硬写 /data/www/…，改成从真源派生，以后挪根不会再漏改
+PASSTHROUGH_DIRS=$(read_default PASSTHROUGH_DIRS)
+# 「根」与面板 upper 也读真源：落盘路径由根派生，避免硬编码漂移
 PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
 [ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
@@ -164,20 +161,23 @@ step "A2) 校验 overlay 持久化"
 assert_no_readonly_warning
 MOUNTED=$(inside_sh "mount | grep -c 'type overlay'" || true)
 MOUNTED=${MOUNTED:-0}
-EXPECT_MOUNTS=$(echo "$ALL_PERSIST_DIRS" | wc -w | tr -d ' ')
+# overlay 数 = 1 个 /www（面板 upper data/system/panel）+ 系统层各目录
+EXPECT_MOUNTS=$(( 1 + $(echo "$PERSIST_SYSTEM_DIRS" | wc -w) ))
 [ "$MOUNTED" -ge "$EXPECT_MOUNTS" ] \
     || fail "overlay 挂载数 ${MOUNTED}，期望至少 ${EXPECT_MOUNTS} 个"
 pass "overlay 挂载 ${MOUNTED} 个，无只读告警"
 
-# 数据层目录落在「数据层根/<dir>」，系统层落在「系统层根/<dir>」
-for d in $ALL_PERSIST_DIRS; do
-    case " $PERSIST_DATA_DIRS " in
-        *" $d "*) m="${PERSIST_DATA_ROOT}/${d}" ;;
-        *)            m="${PERSIST_SYSTEM_ROOT}/${d}" ;;
-    esac
-    inside test -d "$m" || fail "持久化目录缺失：${m}"
+# 系统层 upper 落在「系统层根/<dir>」；面板 upper 落在系统层下的 panel
+inside test -d "${PERSIST_SYSTEM_ROOT}/panel" || fail "面板 upper 缺失：${PERSIST_SYSTEM_ROOT}/panel"
+for d in $PERSIST_SYSTEM_DIRS; do
+    inside test -d "${PERSIST_SYSTEM_ROOT}/${d}" || fail "持久化目录缺失：${PERSIST_SYSTEM_ROOT}/${d}"
 done
-pass "${EXPECT_MOUNTS} 个持久化目录齐备"
+# 业务直通源在「数据层根/www」
+for t in $PASSTHROUGH_DIRS; do
+    inside test -d "${PERSIST_DATA_ROOT}/www${t#/www}" \
+        || fail "直通源缺失：${PERSIST_DATA_ROOT}/www${t#/www}"
+done
+pass "面板/系统/业务三层 upper 与直通源齐备"
 
 # /tmp 必须留在容器可写层：变成 tmpfs 会让上传、解压备份直接吃内存
 if inside_sh 'grep -q " /tmp " /proc/mounts'; then
@@ -301,14 +301,13 @@ inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_m
 inside_sh 'echo persist > /www/wwwroot/_persist_marker'
 # 落盘路径语义（容易搞混，写清楚再检查）：
 #   /etc /var      系统层 overlay，upper 在 /data/system/<dir>
-#   /www           数据层 overlay，upper = /data/www，与容器内的 /www 一一对应
-#   /www/wwwroot   也是 /www 这一层 overlay 的内容，落在 data/www/wwwroot
-#                  （没有独立的直通目录 —— /www 整体就是一层 overlay）
+#   /www           面板 overlay，upper = /data/system/panel
+#   /www/wwwroot   业务直通 bind，源 = /data/www/wwwroot
 inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f /data/www/_persist_marker                   || fail "/www 写入未落盘（overlay upper 应为 /data/www）"
-inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到 /data/www/wwwroot"
+inside test -f /data/system/panel/_persist_marker          || fail "/www 写入未落盘（面板 upper 应为 data/system/panel）"
+inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到直通源 /data/www/wwwroot"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入已落到 /data/www（含 wwwroot）与 /data/system/<目录>"
+pass "写入落到直通 data/www/wwwroot 与 data/system/panel、data/system/<dir>"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
