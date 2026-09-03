@@ -49,8 +49,8 @@ PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
-# 备份产物目录：写在容器内的 /www/backup/manual（/www 是 www 这一层 overlay，
-# 于是落到 upper 的 data/www/backup/manual，宿主机直接从那取走即可）
+# 备份产物目录：写在容器内的 /www/backup/manual（业务直通，落到
+# data/www/backup/manual，宿主机直接从那取走即可）
 OUTPUT_DIR='/www/backup/manual'
 NAME_PREFIX='baota-backup'
 
@@ -59,7 +59,7 @@ NAME_PREFIX='baota-backup'
 #   .baota              项目元数据（数据层 /data/.baota、系统层 /data/system/.baota），
 #                       启动时自动重建，跟着备份走只会带来陈旧状态
 #   www/backup/auto     升级前自动快照（entrypoint take_snapshot 写到 /www/backup/auto，
-#                       = upper 的 data/www/backup/auto）。不排除会把它打进本次备份、
+#                       业务直通 → data/www/backup/auto）。不排除会把它打进本次备份、
 #                       下次再打进来，体积逐次翻倍；它只是升级时的临时回滚点
 #   www/backup/manual   本脚本自己的产物。不排除会自包含
 #   www/backup/database 面板「数据库」页产生的备份，同样会自包含
@@ -144,14 +144,15 @@ show_usage() {
     echo '各持久化目录体积（降序）：'
     # shellcheck disable=SC2086,SC2046
     du -sh \
-        $(for d in ${PERSIST_DATA_DIRS};  do echo "${PERSIST_DATA_ROOT}/${d}"; done) \
+        "${PERSIST_DATA_ROOT}/www" \
+        "${PERSIST_DATA_ROOT}/system/panel" \
         $(for d in ${PERSIST_SYSTEM_DIRS}; do echo "${PERSIST_SYSTEM_ROOT}/${d}"; done) \
         2> /dev/null | sort -rh || true
     echo
     echo '可排除项体积：'
     for d in "${PERSIST_DATA_ROOT}/.baota" "${PERSIST_SYSTEM_ROOT}/.baota" \
-             "${PERSIST_DATA_ROOT}/backup/auto" "${PERSIST_DATA_ROOT}/backup/manual" \
-             "${PERSIST_DATA_ROOT}/backup/database"; do
+             "${PERSIST_DATA_ROOT}/www/backup/auto" "${PERSIST_DATA_ROOT}/www/backup/manual" \
+             "${PERSIST_DATA_ROOT}/www/backup/database"; do
         [ -e "${d}" ] || continue
         printf '  %-40s %s\n' "${d#/*/}" "$(du -sh "${d}" 2> /dev/null | cut -f1)"
     done
@@ -270,7 +271,6 @@ collect_members() {
     # 结构天然完整，无需分两段。
     # 排除项见 EXCLUDES（.baota 与 www/backup/ 的产物）
     data_members=('.')
-    sys_members=()
     return 0
 }
 
@@ -472,7 +472,7 @@ main() {
             #   所以这里用 echo ... >&2，不能用 log()（log 走 stdout）。
             #
             # 产物必须与 create 模式一致，否则过不了自己的 --verify：
-            #   · 数据层成员取 ${PERSIST_DATA_DIRS}，不能写死 www
+            #   · 归档整份 data 卷（collect_members 用 '.'），与 create 一致
             #   · 同样附加 MANIFEST.txt 与 MySQL 转储
             #   · 排除项共用 EXCLUDE_ARGS
             # 唯一的区别是无法生成后自校验 —— 流已经吐出去了，读不回来
