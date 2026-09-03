@@ -49,8 +49,8 @@ bad() { FAIL=$((FAIL + 1)); RESULTS+=("- [ ] ❌ $*"); echo "  ❌ $*"; }
 
 # 等待持久化挂载完成：mount 表里出现足量 overlay 后再动手
 wait_persist() {
-    local i n
-    for i in $(seq 1 60); do
+    local _ n
+    for _ in $(seq 1 60); do
         n=$(docker exec "$C" sh -c 'mount 2>/dev/null | grep -c overlay' 2>/dev/null || echo 0)
         [ "${n:-0}" -ge "${EXPECT_OVERLAYS}" ] && return 0
         sleep 1
@@ -60,8 +60,8 @@ wait_persist() {
 
 # 等待 entrypoint + systemd + 面板就绪
 wait_ready() {
-    local i code
-    for i in $(seq 1 60); do
+    local _ code
+    for _ in $(seq 1 60); do
         docker exec "$C" bt default >/dev/null 2>&1 || { sleep 2; continue; }
         code=$(docker exec "$C" sh -c '
             p=$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888)
