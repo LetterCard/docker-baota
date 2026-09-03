@@ -30,6 +30,11 @@ name: 🔬 日巡检：已发布镜像回归
 #    宁可不测也不给假绿灯。arm64 的真实覆盖由 stable / release 两个工作流
 #    在原生 ARM runner 上的构建期健康检查负责
 #
+#  并行与进度
+#    prep 读取两个通道版本后，verify-stable / verify-release 两个 job 并行
+#    跑（互不依赖），在 Actions UI 里并排显示、各自可见进度，墙钟时间约为
+#    单通道耗时；collect 在两者都结束后汇总并回写 report.md
+#
 #  触发时机
 #    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 release 每日 17:00 之后、
 #       stable 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
@@ -46,7 +51,7 @@ on:
 
 # 让它跑完再排下一次：中途取消会留下残缺的报告
 concurrency:
-  group: daily-verify
+  group: verify-published
   cancel-in-progress: false
 
 env:
@@ -55,20 +60,21 @@ env:
   HC: .github/scripts/health-check
 
 jobs:
-  verify:
-    name: 🔬 回归验证 linux/amd64
+  # ── 1) 读取两个通道的已发布版本，作为后续 job 的输入 ──────────────────────
+  prep:
+    name: 🔖 读取已发布版本
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: write
+    outputs:
+      stable: ${{ steps.set.outputs.stable }}
+      release: ${{ steps.set.outputs.release }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
-      - name: 🔖 读取两个通道的已发布版本
-        id: ver
+      - name: 🔖 解析 VERSION
+        id: set
         run: |
           set -euo pipefail
           STABLE=$(tr -d '[:space:]' < stable/VERSION)
@@ -80,38 +86,96 @@ jobs:
           echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
           echo "稳定版 ${STABLE} / 正式版 ${RELEASE}"
 
-      # 两个通道各自独立验证：任一失败不中断另一个，报告里都能看到结果
-      - name: 🔬 验证稳定版镜像
-        id: stable
-        continue-on-error: true
+  # ── 2) 两个通道并行验证（互不依赖，UI 并排、各自可见进度） ────────────────
+  verify-stable:
+    name: 🐂 验证稳定版 ${{ needs.prep.outputs.stable }}
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔬 运行回归验证
         run: |
           bash "${HC}/verify-published.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.stable }}" \
-            "${{ steps.ver.outputs.stable }}" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.stable }}" \
+            "${{ needs.prep.outputs.stable }}" \
             /tmp/report-stable.md
 
-      - name: 🔬 验证正式版镜像
-        id: release
-        continue-on-error: true
+      - name: 📤 上传报告片段
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-stable
+          path: /tmp/report-stable.md
+          if-no-files-found: warn
+          retention-days: 7
+
+  verify-release:
+    name: 📦 验证正式版 ${{ needs.prep.outputs.release }}
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔬 运行回归验证
         run: |
           bash "${HC}/verify-published.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.release }}" \
-            "${{ steps.ver.outputs.release }}" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.release }}" \
+            "${{ needs.prep.outputs.release }}" \
             /tmp/report-release.md
+
+      - name: 📤 上传报告片段
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-release
+          path: /tmp/report-release.md
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── 3) 汇总两个通道结果、生成并回写 report.md ───────────────────────────
+  #  if: always() —— 即使某通道验证失败，也要把失败现场写进报告
+  collect:
+    name: 📝 汇总并回写 report.md
+    needs: [prep, verify-stable, verify-release]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 📥 下载报告片段
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/reports
 
       - name: 📝 生成 report.md
         run: |
           set -euo pipefail
 
-          S_ICON=$([ "${{ steps.stable.outcome }}" = 'success' ] && echo '✅' || echo '❌')
-          R_ICON=$([ "${{ steps.release.outcome }}" = 'success' ] && echo '✅' || echo '❌')
-          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.stable }}"
-          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.release }}"
+          STABLE="${{ needs.prep.outputs.stable }}"
+          RELEASE="${{ needs.prep.outputs.release }}"
+          [ -n "${STABLE}" ] && [ -n "${RELEASE}" ] \
+            || { echo "::error::prep 未产出版本号，跳过报告生成"; exit 1; }
+
+          S_ICON=$([ "${{ needs.verify-stable.result }}" = 'success' ] && echo '✅' || echo '❌')
+          R_ICON=$([ "${{ needs.verify-release.result }}" = 'success' ] && echo '✅' || echo '❌')
+          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${STABLE}"
+          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${RELEASE}"
 
           {
             echo '# 📊 已发布镜像每日验证报告'
             echo
-            echo '> 本文件由 `.github/workflows/daily-verify.yml` 自动生成，每次运行整体覆盖（不追加）。'
+            echo '> 本文件由 `.github/workflows/verify-published.yml` 自动生成，每次运行整体覆盖（不追加）。'
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
@@ -129,22 +193,21 @@ jobs:
             echo
             echo '## 🐂 稳定版 stable'
             echo
-            cat /tmp/report-stable.md 2>/dev/null \
+            cat /tmp/reports/report-stable/report-stable.md 2>/dev/null \
               || echo '_（稳定版验证未产出报告，见构建日志）_'
             echo
             echo '---'
             echo
             echo '## 📦 正式版 release'
             echo
-            cat /tmp/report-release.md 2>/dev/null \
+            cat /tmp/reports/report-release/report-release.md 2>/dev/null \
               || echo '_（正式版验证未产出报告，见构建日志）_'
           } > "${{ env.REPORT }}"
 
           echo '--- report.md 已生成（前 30 行）---'
           head -n 30 "${{ env.REPORT }}"
 
-      # 回写放在判定之前：即使验证失败，也要把失败现场写进报告
-      - name: ✏️ 回写 report.md
+      - name: ✏️ 回写 report.md 与 README
         run: |
           set -euo pipefail
 
@@ -156,14 +219,18 @@ jobs:
           git fetch origin main
           git rebase origin/main
 
-          git add "${{ env.REPORT }}"
+          # rebase 完成（working tree 此时干净）后，再把报告注入 README 标记区，
+          # 避免 rebase 时 README 处于「已修改」状态导致 rebase 中止
+          python3 .github/scripts/inject-report.py "${{ env.REPORT }}"
+
+          git add "${{ env.REPORT }}" README.md
           if git diff --cached --quiet; then
             echo '报告内容无变化，跳过提交'
             exit 0
           fi
           git commit -m "docs: 更新每日镜像验证报告 $(date -u '+%F')"
           git push origin HEAD:main
-          echo "已回写 ${{ env.REPORT }}"
+          echo "已回写 ${{ env.REPORT }} 与 README.md"
 
       - name: 📋 输出摘要
         if: always()
@@ -173,16 +240,16 @@ jobs:
             echo
             echo "| 通道 | 结果 |"
             echo '|---|---|'
-            echo "| 稳定版 ${{ steps.ver.outputs.stable }} | ${{ steps.stable.outcome }} |"
-            echo "| 正式版 ${{ steps.ver.outputs.release }} | ${{ steps.release.outcome }} |"
+            echo "| 稳定版 ${{ needs.prep.outputs.stable }} | ${{ needs.verify-stable.result }} |"
+            echo "| 正式版 ${{ needs.prep.outputs.release }} | ${{ needs.verify-release.result }} |"
             echo
             echo '完整报告见仓库根目录 `report.md`'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🚦 判定
         run: |
-          if [ "${{ steps.stable.outcome }}" != 'success' ] \
-             || [ "${{ steps.release.outcome }}" != 'success' ]; then
+          if [ "${{ needs.verify-stable.result }}" != 'success' ] \
+             || [ "${{ needs.verify-release.result }}" != 'success' ]; then
             echo "::error::镜像回归验证未全部通过，详见 ${{ env.REPORT }}"
             exit 1
           fi

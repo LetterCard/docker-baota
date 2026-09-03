@@ -1,6 +1,6 @@
 # 📊 已发布镜像每日验证报告
 
-> 本文件由 `.github/workflows/daily-verify.yml` 自动生成，每次运行整体覆盖（不追加）。
+> 本文件由 `.github/workflows/verify-published.yml` 自动生成，每次运行整体覆盖（不追加）。
 
 - 生成时间（UTC）：2026-09-03 13:14:34
 - 触发方式：workflow_dispatch
