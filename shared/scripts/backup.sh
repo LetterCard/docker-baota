@@ -72,12 +72,21 @@ NAME_PREFIX='baota-backup'
 #   www/backup/database 面板「数据库」页产生的备份，同样会自包含
 #   www/backup/rsync    --rsync 的落点之一（也可以挂独立卷同步到容器外）。
 #                       不排除的话，同步目标会被下一次全量备份装进去，同样自包含
+#   system/var/log/journal  journald 的运行时日志（system.journal / user-*.journal）。
+#                       三重理由都必须排除：
+#                         1) 它由 systemd 自己管理，镜像里已限到「总占用 ≤200M、
+#                            保留 7 天」（journald.conf.d/baota-size.conf），
+#                            恢复后 journald 自动重建，不是需要保留的用户数据；
+#                         2) 它是打包期间写入最活跃的文件 —— 「file changed as
+#                            we read it」几乎都出自这里；
+#                         3) 体积不小却零恢复价值，白拖慢备份
 EXCLUDES=(
     '.baota'
     'www/backup/auto'
     'www/backup/manual'
     'www/backup/database'
     'www/backup/rsync'
+    'system/var/log/journal'
 )
 
 # 由 EXCLUDES 派生 tar 参数。排除项只在这里写一次，全量打包与 --rsync 共用，
@@ -100,6 +109,33 @@ log()  {
 }
 warn() { echo "⚠️ [backup][WARN] $*" >&2; }
 die()  { echo "❌ [backup][ERROR] $*" >&2; exit 1; }
+
+# ==============================================================================
+#  tar 退出码判定（热备份必须区分，否则会把「正常竞态」误当成失败）
+#
+#  GNU tar 的三档语义：
+#    0   干净完成
+#    1   有文件在读取期间被改写（"file changed as we read it"）——
+#        ★ 包本身是完整可用的，只是那些文件是「某一时刻的快照」。
+#        容器在跑，journald / MySQL / 面板日志随时可能写入，这是热备份的
+#        固有特性，不是错误。CI 曾在 journald 写入的瞬间随机失败，
+#        就是因为没区分这一档。
+#    ≥2  真正的失败（源读不到 / 目标写不下 / 参数错），必须拦住。
+#
+#  返回 0 表示可以接受（含第 1 档），非 0 表示真失败，由调用方 die。
+# ==============================================================================
+check_tar_rc() {
+    case "$1" in
+        0) return 0 ;;
+        1)
+            warn '部分文件在打包期间被改写（热备份的固有竞态）：备份已生成，内容可用，'
+            warn '  但不是字节级一致。需要严格一致请停机后再打一次：'
+            warn '    docker compose down → 打包 → docker compose up -d'
+            return 0
+            ;;
+        *) return "$1" ;;
+    esac
+}
 
 # 可选的 MySQL 转储临时目录。
 # --stdout 模式同样会用到（清单与转储要先落盘，再喂给 tar），
@@ -306,11 +342,21 @@ build_archive() {
 
     # 数据层（/data）与系统层（/data/system）分两段打包，
     # 包内路径仍为 www/... 与 etc/...，恢复时不受挂载方式影响
+    #
+    # 退出码不能直接 || die：热备份下 tar 常以 1（文件在读取期间被改写）结束，
+    # 那是可接受的，包照样完整；只有 ≥2 才是真失败。详见 check_tar_rc。
+    local rc=0
     tar --xattrs --xattrs-include='trusted.overlay.*' \
         "${EXCLUDE_ARGS[@]}" \
         -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${data_members[@]}" \
         -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
-        || die "打包失败：${out}"
+        || rc=$?
+
+    if ! check_tar_rc "${rc}"; then
+        # 失败的半成品必须清掉：留着会让用户误以为手里有回滚点
+        rm -f "${out}" 2> /dev/null || true
+        die "打包失败（tar 退出码 ${rc}）：${out}"
+    fi
 
     log "备份完成：${out}（$(du -mh "${out}" 2> /dev/null | cut -f1)）"
 }
@@ -505,11 +551,19 @@ main() {
                 echo '📦 [backup] 未附加 MySQL 转储（MySQL 未运行或未安装）' >&2
             fi
 
+            # 退出码处理与 create 模式一致（热备份下 tar 返回 1 可接受）。
+            # 这里无法清理半成品 —— 流已经吐出去了，读不回来。
+            # check_tar_rc 的告警走 stderr，不会污染 stdout 的 tar 流
+            local rc=0
             tar --xattrs --xattrs-include='trusted.overlay.*' \
                 "${EXCLUDE_ARGS[@]}" \
                 -C "${PERSIST_DATA_ROOT}" -cz "${data_members[@]}" \
                 -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
-                || die '打包失败'
+                || rc=$?
+
+            if ! check_tar_rc "${rc}"; then
+                die "打包失败（tar 退出码 ${rc}）"
+            fi
             return 0
             ;;
     esac

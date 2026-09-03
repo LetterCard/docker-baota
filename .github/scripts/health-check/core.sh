@@ -369,7 +369,10 @@ fi
 # 从持久化层取最新备份文件 —— 不再解析 baota-backup 的 stdout。
 # 之前用 tail -1 提取路径的写法，在 verify 失败时会把 verify 的
 # echo 行（"✅ 含 xxx"）误当路径，让错误链条完全错乱。
-# 备份落在容器 /www/backup/manual 下（= www 这层 overlay 的 upper data/www/backup/manual）
+# 备份落在容器 /www/backup/manual 下 —— /www/backup 是 PASSTHROUGH_DIRS 的
+# bind 直通目录，源在 data/www/backup/manual（不在 /www 的 overlay upper 里，
+# 那层的 upper 是 data/system/panel）。所以这里在容器内 ls 与在宿主 data 卷里
+# ls 看到的是同一份文件
 BACKUP_PATH=$(inside_sh "ls -1t /www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
 [ -n "${BACKUP_PATH}" ] || fail "未找到备份文件（baota-backup 报告成功但持久化层没产物）"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
