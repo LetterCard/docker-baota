@@ -1,0 +1,189 @@
+name: 🔬 每日验证：已发布镜像回归
+
+# ==============================================================================
+#  🔬 从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写 report.md
+#
+#  与另两个工作流（stable / release 构建发布）的分工：
+#    那两个  验的是「本地构建出来的候选镜像」，作用是把坏镜像拦在推送之前，
+#            只在探测到新版本时才构建
+#    本工作流 验的是「DockerHub 上已经发布的镜像」，作用是每天确认线上镜像
+#            仍然健康 —— 上游脚本变更、镜像被重新推送、依赖漂移，都能在
+#            日常回归里第一时间发现，而不是等用户踩到
+#
+#  验的是哪个镜像
+#    版本号取自仓库里的 stable/VERSION 与 release/VERSION（这两个文件由
+#    发布流水线在推送成功后回写，永远对应「已发布」的标签），不是重新探测
+#    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
+#
+#  验什么
+#    .github/scripts/health-check/verify-published.sh：19 项，覆盖持久化
+#    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
+#    备份包结构 / 首启凭据 / 补丁生效），外加一段脱敏后的首次启动日志
+#
+#  产出
+#    仓库根目录 report.md，每次运行整体覆盖（不追加，体积恒定）
+#    ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前已脱敏
+#
+#  架构
+#    只验 linux/amd64（GitHub-hosted runner 的原生架构）。arm64 镜像要跑
+#    QEMU 模拟，而本方案的核心是 overlay 持久化 —— 模拟环境下的结论不可信，
+#    宁可不测也不给假绿灯。arm64 的真实覆盖由 stable / release 两个工作流
+#    在原生 ARM runner 上的构建期健康检查负责
+#
+#  触发时机
+#    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 release 每日 17:00 之后、
+#       stable 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
+#    🖱️ 手动：随时触发
+#
+#  注意：本工作流只由 schedule / workflow_dispatch 触发，回写 report.md
+#        不会触发任何构建（另两个工作流同样不监听 push）
+# ==============================================================================
+
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch: {}
+
+# 让它跑完再排下一次：中途取消会留下残缺的报告
+concurrency:
+  group: daily-verify
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: baota
+  REPORT: report.md
+  HC: .github/scripts/health-check
+
+jobs:
+  verify:
+    name: 🔬 回归验证 linux/amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 🔖 读取两个通道的已发布版本
+        id: ver
+        run: |
+          set -euo pipefail
+          STABLE=$(tr -d '[:space:]' < stable/VERSION)
+          RELEASE=$(tr -d '[:space:]' < release/VERSION)
+          for v in "${STABLE}" "${RELEASE}"; do
+            [ -n "${v}" ] || { echo "::error::VERSION 文件为空"; exit 1; }
+          done
+          echo "stable=${STABLE}" >> "$GITHUB_OUTPUT"
+          echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "稳定版 ${STABLE} / 正式版 ${RELEASE}"
+
+      # 两个通道各自独立验证：任一失败不中断另一个，报告里都能看到结果
+      - name: 🔬 验证稳定版镜像
+        id: stable
+        continue-on-error: true
+        run: |
+          bash "${HC}/verify-published.sh" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.stable }}" \
+            "${{ steps.ver.outputs.stable }}" \
+            /tmp/report-stable.md
+
+      - name: 🔬 验证正式版镜像
+        id: release
+        continue-on-error: true
+        run: |
+          bash "${HC}/verify-published.sh" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.release }}" \
+            "${{ steps.ver.outputs.release }}" \
+            /tmp/report-release.md
+
+      - name: 📝 生成 report.md
+        run: |
+          set -euo pipefail
+
+          S_ICON=$([ "${{ steps.stable.outcome }}" = 'success' ] && echo '✅' || echo '❌')
+          R_ICON=$([ "${{ steps.release.outcome }}" = 'success' ] && echo '✅' || echo '❌')
+          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.stable }}"
+          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.release }}"
+
+          {
+            echo '# 📊 已发布镜像每日验证报告'
+            echo
+            echo '> 本文件由 `.github/workflows/daily-verify.yml` 自动生成，每次运行整体覆盖（不追加）。'
+            echo
+            echo "- 生成时间（UTC）：$(date -u '+%F %T')"
+            echo "- 触发方式：${{ github.event_name }}"
+            echo "- 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）"
+            echo "- 验证脚本：\`${HC}/verify-published.sh\`"
+            echo
+            echo '## 概要'
+            echo
+            echo '| 通道 | 镜像 | 结果 |'
+            echo '|---|---|---|'
+            echo "| 🐂 稳定版 stable | \`${S_TAG}\` | ${S_ICON} |"
+            echo "| 📦 正式版 release | \`${R_TAG}\` | ${R_ICON} |"
+            echo
+            echo '---'
+            echo
+            echo '## 🐂 稳定版 stable'
+            echo
+            cat /tmp/report-stable.md 2>/dev/null \
+              || echo '_（稳定版验证未产出报告，见构建日志）_'
+            echo
+            echo '---'
+            echo
+            echo '## 📦 正式版 release'
+            echo
+            cat /tmp/report-release.md 2>/dev/null \
+              || echo '_（正式版验证未产出报告，见构建日志）_'
+          } > "${{ env.REPORT }}"
+
+          echo '--- report.md 已生成（前 30 行）---'
+          head -n 30 "${{ env.REPORT }}"
+
+      # 回写放在判定之前：即使验证失败，也要把失败现场写进报告
+      - name: ✏️ 回写 report.md
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 与另两个通道的 writeback 同样处理：跑一轮要十几分钟，期间 main
+          # 可能已有新提交，先 rebase 再 push，避免 non-fast-forward 被拒
+          git fetch origin main
+          git rebase origin/main
+
+          git add "${{ env.REPORT }}"
+          if git diff --cached --quiet; then
+            echo '报告内容无变化，跳过提交'
+            exit 0
+          fi
+          git commit -m "docs: 更新每日镜像验证报告 $(date -u '+%F')"
+          git push origin HEAD:main
+          echo "已回写 ${{ env.REPORT }}"
+
+      - name: 📋 输出摘要
+        if: always()
+        run: |
+          {
+            echo '### 🔬 已发布镜像回归验证'
+            echo
+            echo "| 通道 | 结果 |"
+            echo '|---|---|'
+            echo "| 稳定版 ${{ steps.ver.outputs.stable }} | ${{ steps.stable.outcome }} |"
+            echo "| 正式版 ${{ steps.ver.outputs.release }} | ${{ steps.release.outcome }} |"
+            echo
+            echo '完整报告见仓库根目录 `report.md`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚦 判定
+        run: |
+          if [ "${{ steps.stable.outcome }}" != 'success' ] \
+             || [ "${{ steps.release.outcome }}" != 'success' ]; then
+            echo "::error::镜像回归验证未全部通过，详见 ${{ env.REPORT }}"
+            exit 1
+          fi
+          echo '✅ 两个通道的已发布镜像均通过回归验证'
