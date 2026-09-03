@@ -492,8 +492,26 @@ audit_panel_version() {
     expect=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null || true)
     [ -n "${expect}" ] || return 0
 
-    actual=$(cd "${PANEL_DIR}" && "${PANEL_PY}" -c 'import public;print(public.version())' 2> /dev/null \
-             | tail -n1 | tr -d '[:space:]' || true)
+    # 取版本的方式与 CI 健康检查（core.sh A7）保持同一套：
+    # public.py 在 ${PANEL_DIR}/class/ 下，必须把它加进 sys.path 才能 import ——
+    # 只 cd 面板根目录会 ModuleNotFoundError，导致本检测此前每次启动都
+    # 静默跳过、从未真正生效（CI 里能过是因为 A7 的写法本来就正确）。
+    # 在面板进程尚未启动的原始状态下该方法即可用，无需等 systemd 拉起面板。
+    actual=$(cd "${PANEL_DIR}" && "${PANEL_PY}" -c "
+import sys
+sys.path.insert(0, '${PANEL_DIR}')
+sys.path.insert(0, '${PANEL_DIR}/class')
+import public
+print(public.version())
+" 2> /dev/null | tail -n1 | tr -d '[:space:]' || true)
+
+    # 回退：config/menu.json 的 version 字段（与 CI 的回退一致）
+    if [ -z "${actual}" ]; then
+        actual=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            "${PANEL_DIR}/config/menu.json" 2> /dev/null \
+            | head -n1 | cut -d'"' -f4 | tr -d '[:space:]' || true)
+    fi
+
     [ -n "${actual}" ] || { log '无法读取面板版本，跳过一致性检测'; return 0; }
 
     if [ "${actual}" != "${expect}" ]; then

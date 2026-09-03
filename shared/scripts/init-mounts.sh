@@ -79,17 +79,24 @@ mark_critical() {
 }
 
 # ==============================================================================
-#  0. 并发互斥锁（flock，内核持有、进程死亡自动释放）
+#  0. 并发互斥锁（flock）
+#
+#  ★ 持锁方式必须是「独立后台进程」，不能用 exec 8<>lock + flock -n 8 的
+#    fd 方式：fd 会随 exec 链（busybox → bash entrypoint → systemd）一路
+#    移交给 PID 1，而 systemd 启动时会关闭继承的非标准 fd —— 锁随 fd 关闭
+#    而自动释放。实测（Docker Desktop，flock util-linux 2.38）主容器就绪
+#    （systemd 接管后）第二实例能再次取得同一把锁、锁文件被覆盖，并发保护
+#    在启动数秒后即失效。独立进程持锁与 exec 链无关：进程活 → 锁在；
+#    容器停止 → 进程亡 → 锁自动释放。持锁者在 docker top 里是一个 sleep
+#    进程，属预期。
 # ==============================================================================
 _lock_layer() {
-    _state="$1"
-    _lock="$2"
-    _fd="$3"
-    _name="$4"
+    _lock="$1"
+    _name="$2"
 
-    mkdir -p "${_state}" 2> /dev/null || true
-    if [ ! -d "${_state}" ]; then
-        warn "无法创建 ${_state}：${_name}持久化根不可写，跳过该层并发保护"
+    _dir=$(dirname "${_lock}")
+    if ! mkdir -p "${_dir}" 2> /dev/null || [ ! -d "${_dir}" ]; then
+        warn "无法创建 ${_dir}：${_name}持久化根不可写，跳过该层并发保护"
         return 0
     fi
     if ! ( exec 2> /dev/null; : >> "${_lock}" ); then
@@ -100,12 +107,18 @@ _lock_layer() {
         warn "未找到 /usr/bin/flock，跳过${_name}并发保护"
         return 0
     fi
-    case "${_fd}" in
-        8) exec 8<>"${_lock}" ;;
-        9) exec 9<>"${_lock}" ;;
-        *) warn "内部错误：不支持的锁 fd ${_fd}，跳过${_name}并发保护"; return 0 ;;
-    esac
-    if ! /usr/bin/flock -n "${_fd}"; then
+
+    # 一步完成「非阻塞互斥 + 长期持有」：拿到锁 → flock 驻留后台（持锁直到
+    # 进程退出）；拿不到 → flock 立即非零退出。通过 kill -0 观察其生死来判定。
+    /usr/bin/flock -n "${_lock}" -c 'exec sleep infinity' &
+    _holder=$!
+    _tries=0
+    while kill -0 "${_holder}" 2> /dev/null && [ "${_tries}" -lt 3 ]; do
+        _tries=$((_tries + 1))
+        sleep 1
+    done
+    if ! kill -0 "${_holder}" 2> /dev/null; then
+        wait "${_holder}" 2> /dev/null || true
         _owner=$(cat "${_lock}" 2> /dev/null || echo '未知')
         warn '=============================================================='
         warn "另一个容器实例正在使用同一份持久化数据（${_name}）"
@@ -117,19 +130,17 @@ _lock_layer() {
         warn '=============================================================='
         return 1
     fi
-    case "${_fd}" in
-        8) printf 'pid=%s host=%s at=%s\n' \
-               "$$" "$(hostname 2> /dev/null || echo unknown)" "$(date '+%F %T')" >&8 ;;
-        9) printf 'pid=%s host=%s at=%s\n' \
-               "$$" "$(hostname 2> /dev/null || echo unknown)" "$(date '+%F %T')" >&9 ;;
-    esac
+
+    printf 'pid=%s host=%s at=%s\n' \
+        "$$" "$(hostname 2> /dev/null || echo unknown)" "$(date '+%F %T')" \
+        >> "${_lock}" 2> /dev/null || true
     log "已获得${_name}持久化层独占锁"
     return 0
 }
 
 acquire_lock() {
-    _lock_layer "${STATE_DIR}" "${LOCK_FILE}" 9 '系统层' || return 1
-    _lock_layer "${DATA_STATE_DIR}" "${DATA_LOCK_FILE}" 8 '数据层' || return 1
+    _lock_layer "${LOCK_FILE}" '系统层' || return 1
+    _lock_layer "${DATA_LOCK_FILE}" '数据层' || return 1
     log '持久化层并发保护已就位'
     return 0
 }
