@@ -61,7 +61,9 @@ docker exec baota ls /www/server/panel/BT-Panel /www/server/panel/pyenv/bin/pyth
 `entrypoint` 的 `audit_panel_version` 会告警。补丁只挡住 `script/` 下的入口，
 API 层入口（BTPanel/__init__.py 的 upgrade_panel 等）挡不住。
 
-恢复：删除 `data/www/server/panel` 中被更新的文件后重启。
+恢复：删除 `data/system/panel/server/panel` 中被更新的文件后重启
+（面板 overlay 的 upper 在 `data/system/panel`，所以容器里的 `/www/server/panel`
+对应宿主这一层；站点与数据库在 `data/www/` 下，不受影响）。
 
 ### 备份体积逐次翻倍
 

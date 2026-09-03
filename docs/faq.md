@@ -18,7 +18,7 @@ docker exec baota rm -f /www/wwwroot/<站点>/.user.ini
 
 ## 🔌 面板端口被改过之后健康检查失败
 
-健康检查从 `data/www/server/panel/data/port.pl` 现读端口，不会写死 8888。
+健康检查从 `data/system/panel/server/panel/data/port.pl` 现读端口，不会写死 8888。
 但 compose 里的端口映射要你自己同步改，否则新端口在容器内生效了却没映射出来，外面连不上。
 
 ## 🔑 忘记面板口令

@@ -77,12 +77,16 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
-# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/（www/ + system/ + 顶层 .baota 除外）
+# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www 与 system 两个顶层
+#    ★ 必须用显式成员 www system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
+#      下面的 --exclude='www/backup/manual' 就匹配不上了。把输出包放在 data/ 里时
+#      tar 会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
+#      与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
     -C data --exclude='.baota' --exclude='www/backup/auto' \
              --exclude='www/backup/manual' --exclude='www/backup/database' \
-             --exclude='www/backup/rsync' .
+             --exclude='www/backup/rsync' www system
 
 # 3) 启动
 docker compose up -d
@@ -90,7 +94,9 @@ docker compose up -d
 
 💡 要点：
 
-- `-C data` 让包内路径保持相对（`www/...` 与 `system/...`），恢复到任何机器、任何目录都不受绝对路径影响
+- `-C data` 加显式成员 `www system`，让包内路径保持相对（`www/...` 与 `system/...`），
+  恢复到任何机器、任何目录都不受绝对路径影响；结构也与 `baota-backup` 的产出一致，
+  两种包共用同一套校验与恢复步骤
 - `--exclude='.baota'`：项目元数据 / 数据层状态（`data/.baota` 与 `data/system/.baota`），
   排除后启动时自动重建
 - `--exclude='www/backup/*'`：升级快照、本工具产物、面板备份、rsync 同步目标，
@@ -124,7 +130,8 @@ docker exec baota baota-backup --rsync /backup
 
 ```
 /backup/
-├── data/            ← 整份 data 卷（业务 data/www + 面板 data/system/panel + 系统层）
+├── data/            ← 整份 data 卷：业务 www/（wwwroot·backup·server/data）
+│                      + 面板 upper system/panel/ + 系统层 system/<dir>/
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
 
@@ -136,7 +143,7 @@ docker exec baota baota-backup --rsync /backup
   不会自包含）。但那样仍在 data 所在的盘上：**只能防误删，防不了盘坏**。
   正经备份请放到另一块盘
 - 带 `--delete`，目标会严格对齐源。目标若非空且不像本工具之前的产物
-  （缺少 `data/` 与 `system/` 两个子目录），命令会直接拒绝执行，避免误删
+  （缺少 `data/` 子目录），命令会直接拒绝执行，避免误删
 - 目标里始终只有最新一份。要留历史，请配合 NAS 快照，或定期把 `/backup` 整体归档
 
 ### 用同步目标恢复
@@ -157,7 +164,7 @@ docker compose up -d && docker compose logs -f baota
 ```bash
 docker exec baota baota-backup --verify /www/backup/manual/baota-backup-*.tgz
 # 或者宿主机侧：
-tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|www/server/panel/data/' | head
+tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|system/panel/server/panel/data/' | head
 ```
 
 能看到站点、数据库、面板配置这三类路径才算完整。**只有恢复过一次的备份才算备份**，

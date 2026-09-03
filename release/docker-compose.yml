@@ -73,8 +73,9 @@ services:
     #   data/system/            系统层
     #     ├─ panel/             /www 面板 overlay upper（server/panel、wwwlogs 增量）
     #     ├─ etc usr var root opt home srv  各目录 overlay upper
-    #     └─ .baota/
-    #   data/.baota             数据层状态（锁 + overlay workdir，隐藏）
+    #     └─ .baota/            系统层元数据：并发锁、overlay workdir、
+    #                           镜像版本记录、启动历史
+    #   data/.baota/            数据层状态（并发锁，隐藏；workdir 只在系统层）
     #
     #   ⚠️ data 必须在 ext4 / btrfs / xfs 上，否则会「挂载成功但只读」、写入静默失败
     #      （容器启动时会实测一次并告警）

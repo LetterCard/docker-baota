@@ -49,9 +49,16 @@ PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
-# 备份产物目录：写在容器内的 /www/backup/manual（业务直通，落到
-# data/www/backup/manual，宿主机直接从那取走即可）
-OUTPUT_DIR='/www/backup/manual'
+# 备份产物目录。写成「数据层根/www/backup/manual」而不是容器内的
+# /www/backup/manual —— 开启直通时两者经 bind 指向同一份数据，但只有前者能
+#   1) 跟随用户覆盖的 PERSIST_DATA_ROOT；
+#   2) 在下面打印宿主机路径时正确剥出「data/www/backup/manual」；
+#   3) 用户把 PASSTHROUGH_DIRS 置空（关闭直通）时依然成立 —— 那时 /www/backup
+#      会落进 /www 的 overlay upper（data/system/panel/backup），
+#      而下面的 --exclude 写的是 www/backup/manual，匹配不到它，
+#      备份就会把自己装进自己。用数据层根则始终在 www/ 下，排除项恒定生效。
+# 业务直通目录，宿主机从 data/www/backup/manual 直接取走即可
+OUTPUT_DIR="${PERSIST_DATA_ROOT}/www/backup/manual"
 NAME_PREFIX='baota-backup'
 
 # 打包时排除的路径。数据层 /www 是 www 这一层 overlay，归档成员是 www/，
@@ -94,7 +101,9 @@ log()  {
 warn() { echo "⚠️ [backup][WARN] $*" >&2; }
 die()  { echo "❌ [backup][ERROR] $*" >&2; exit 1; }
 
-# 可选的 MySQL 转储临时目录（--stdout 模式下不会用到）
+# 可选的 MySQL 转储临时目录。
+# --stdout 模式同样会用到（清单与转储要先落盘，再喂给 tar），
+# 只有 --list / --verify 这两个只读模式不涉及
 TMP_DIR=''
 
 cleanup() { [ -n "${TMP_DIR}" ] && rm -rf "${TMP_DIR}" 2> /dev/null || true; }
@@ -168,8 +177,9 @@ show_usage() {
 # ==============================================================================
 #  数据库热转储
 #
-#  /www/server/data（都在 /www 这层 overlay 的 upper data/www/server/data）在容器
-#  运行时被直接复制，InnoDB 文件可能处于半写状态，
+#  MySQL 数据在 /www/server/data —— 它是 PASSTHROUGH_DIRS 里的 bind 直通目录，
+#  源在 data/www/server/data，不在任何 overlay upper 里（/www 的 upper 只是
+#  data/system/panel）。容器运行时它被直接复制，InnoDB 文件可能处于半写状态，
 #  恢复后表损坏。这里在打包前先做一次单事务转储，作为包内的「一致副本」：
 #  恢复时若发现 InnoDB 起不来，导入这份 SQL 即可。
 #
@@ -288,7 +298,7 @@ build_archive() {
     if dump_databases "${TMP_DIR}/databases.sql"; then
         log '已附加 MySQL 一致性转储（databases.sql）'
     else
-        log '未附加 MySQL 转储（MySQL 未运行或未安装）—— 这是冷备份，数据一致'
+        log '未附加 MySQL 转储（MySQL 未运行或未安装）—— InnoDB 文件可能处于半写状态，恢复后如起不来请改用停机备份（docker compose down 后再打）'
     fi
 
     local -a extra=()
@@ -375,8 +385,9 @@ prune_archives() {
 #        与全量打包的 --xattrs 等价。少了它，恢复后「被整体替换过的目录」会与
 #        镜像内容合并，而不是保持你替换后的样子
 #
-#  按数据层 / 系统层分别同步到目标的 data/ 与 system/，
-#  与全量包的内部结构一致，恢复方式也一致。
+#  整份持久化层同步到目标的 data/：源 ${PERSIST_DATA_ROOT}/ 下已经有 www/ 与
+#  system/ 两个顶层，一条 rsync 就都带过去了，不再分两次同步。
+#  包内结构与全量备份一致，恢复方式也一致。
 #
 #  安全护栏（--delete 的危险性）：
 #    --delete 会让目标严格对齐源，目标里「源没有的」会被删掉。
@@ -404,15 +415,19 @@ rsync_sync() {
         esac
     done
 
-    # 目标非空时，必须是本工具之前的同步产物，否则拒绝用 --delete
+    # 目标非空时，必须是本工具之前的同步产物，否则拒绝用 --delete。
+    # 判据只看 data/：整份持久化层（含系统层 system/）都同步进 dest/data 里，
+    # 早先版本额外建过一个 dest/system 却从不往里写，拿它当判据等于
+    # 「手工 mkdir -p dest/data dest/system 就能骗过护栏」，没有意义。
+    # 老目标里的那个空 system/ 不影响判定，可以直接删掉。
     if [ -n "$(ls -A "${dest}" 2> /dev/null)" ]; then
-        if [ ! -d "${dest}/data" ] || [ ! -d "${dest}/system" ]; then
-            die "目标目录非空且不像本工具的同步产物（缺少 data/ 与 system/ 子目录）：${dest}
+        if [ ! -d "${dest}/data" ]; then
+            die "目标目录非空且不像本工具的同步产物（缺少 data/ 子目录）：${dest}
   --delete 会删除目标里源没有的文件。请换一个空目录，或先清空目标"
         fi
     fi
 
-    mkdir -p "${dest}/data" "${dest}/system" 2> /dev/null \
+    mkdir -p "${dest}/data" 2> /dev/null \
         || die "无法创建目标目录：${dest}"
 
     # 先转储再同步：热同步时 InnoDB 文件可能半写，这份 SQL 是「一致副本」。
@@ -472,7 +487,7 @@ main() {
             #   所以这里用 echo ... >&2，不能用 log()（log 走 stdout）。
             #
             # 产物必须与 create 模式一致，否则过不了自己的 --verify：
-            #   · 归档整份 data 卷（collect_members 用 '.'），与 create 一致
+            #   · 归档整份 data 卷（collect_members 用显式成员 www / system），与 create 一致
             #   · 同样附加 MANIFEST.txt 与 MySQL 转储
             #   · 排除项共用 EXCLUDE_ARGS
             # 唯一的区别是无法生成后自校验 —— 流已经吐出去了，读不回来
@@ -513,7 +528,14 @@ main() {
     if [ "${QUIET}" = '1' ]; then
         echo "${out}"
     else
-        log "宿主机上的位置：<compose 目录>/${out#"${PERSIST_DATA_ROOT}"/}"
+        # 宿主机可见路径 = compose 目录（data 卷）下的相对路径，即去掉根斜杠。
+        # 只有产物落在持久化层里才谈得上「宿主机位置」：用户用 -o 指到容器内
+        # 其它地方时，那个路径在宿主机上并不存在，如实打印容器内路径，
+        # 不要拼出一个看起来像、实际打不开的路径。
+        case "${out}" in
+            "${PERSIST_DATA_ROOT}"/*) log "宿主机上的位置：<compose 目录>/${out#/}" ;;
+            *)                        log "备份已生成（容器内路径）：${out}" ;;
+        esac
     fi
 }
 

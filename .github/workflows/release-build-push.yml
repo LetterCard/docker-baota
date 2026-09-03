@@ -210,25 +210,40 @@ jobs:
           docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
 
       # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
-      - name: 🩺 验证 1/3：功能完整性
+      #
+      # 三套检查测的是三个互不相关的失效面（功能完整性 / 挂载与降级 / 版本演进），
+      # 各自启停独立容器（容器名按 PID 区分：baota-healthcheck-<pid> /
+      # baota-mounts-<pid> / baota-upgrade-<pid>，不会撞车），可以并行跑：
+      #   - 单 runner 启 3 个 baota 容器约 1.5 GB 内存，amd64/arm64 runner 都够
+      #   - 容器名按 PID 区分，不会冲突
+      #   - 任一子任务非零退出 → set -e + wait 让 step 失败，不掩盖问题
+      # 串行改并行一般能省 5~10 分钟（每套检查都要 systemd 起来 + 宝塔初始化）
+      - name: 🩺 三套健康检查并行（功能 / 挂载 / 升级）
         run: |
-          bash .github/scripts/health-check/run.sh core \
-            "baota:candidate" "${{ needs.detect.outputs.version }}"
-      # 上面 19 项只覆盖了「命名卷 + 单挂 /data」一种挂载方式。
-      # 这里补两类同样致命、但那边测不到的场景：
-      #   混合挂载（./data:/data + ./system:/data/system）能否正常工作
-      #   持久化根被挂成只读时，是否真的被识别为降级而不是「写入静默丢失」
-      - name: 🧪 验证 2/3：挂载方式与降级场景
-        run: bash .github/scripts/health-check/run.sh mounts "baota:candidate"
+          set -euo pipefail
+          LOG_DIR="${RUNNER_TEMP:-/tmp}/hc-logs"
+          mkdir -p "${LOG_DIR}"
+          VER="${{ needs.detect.outputs.version }}"
 
-      # 版本护栏、升级前快照、面板启动器刷新这三段**只在镜像版本变化时执行**，
-      # 全新卷永远走不到 —— 上面两套检查都覆盖不到。
-      # 这里通过改写持久化层里的版本记录，把「升级」与「降级」两条分支都跑一遍，
-      # 确认快照真的生成（且内容完整）、启动器真的被刷新、降级不会阻断启动
-      - name: 🔼 验证 3/3：升级与降级路径
-        run: |
-          bash .github/scripts/health-check/run.sh upgrade \
-            "baota:candidate" "${{ needs.detect.outputs.version }}"
+          # 后台启动三套，每套单独写日志；前台 wait 等齐；任一非零则整步失败
+          bash .github/scripts/health-check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/health-check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
+          bash .github/scripts/health-check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+
+          FAILED=0
+          wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
+          wait "${PID_MOUNTS}"  || { echo "::error::mounts 检查失败，日志见 ${LOG_DIR}/mounts.log";  FAILED=1; }
+          wait "${PID_UPGRADE}" || { echo "::error::upgrade 检查失败，日志见 ${LOG_DIR}/upgrade.log"; FAILED=1; }
+
+          # 任一失败：先把日志吐到 step 输出，再非零退出 —— 不让并行"静默吃掉"问题
+          if [ "${FAILED}" -ne 0 ]; then
+            for f in core mounts upgrade; do
+              echo "===== ${f}.log (tail 80) ====="
+              tail -n 80 "${LOG_DIR}/${f}.log" || true
+            done
+            exit 1
+          fi
+          echo "✅ 三套健康检查全过"
 
       - name: 🔑 登录 DockerHub
         uses: docker/login-action@v4.6.0
@@ -348,8 +363,18 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # ✏️ 发布成功之后才回写 release/VERSION —— 保证文件永远对应「已推送」
-  # 的版本。构建失败时 VERSION 不动，下次运行会自动重试同一版本；
-  # 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈。
+  # 的版本。构建失败时 VERSION 不动，下次运行会自动重试同一版本。
+  #
+  # 关键约束（与 stable 通道对称，踩过的坑不重复犯）：
+  #   1. 必须先 git fetch + rebase 最新 main，再 commit。
+  #      publish 跑完通常要 30+ 分钟，期间若有人在 main 上提交（手动改回、
+  #      其他 bot、并发 workflow 调度等），bot checkout 时拿到的不是最新 HEAD，
+  #      直接 push 会被 non-fast-forward 拒绝。
+  #   2. git push 失败必须让 step 真正失败（exit 1）。
+  #      之前用 `if git push; then ... else ::warning:: ... fi` 的写法，
+  #      bash 把整体退出码取最后一个 echo 的（成功），于是 step 显示绿色✓
+  #      但 push 其实没生效。下次 detect 会再判定"不一致"，重新走一遍
+  #      build → publish → writeback，整轮 30 分钟构建浪费。
   # ---------------------------------------------------------------------------
   writeback:
     name: ✏️ 回写 release/VERSION
@@ -362,20 +387,44 @@ jobs:
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
+        with:
+          # 完整历史让 rebase 能拿到共同祖先
+          fetch-depth: 0
 
       - name: ✏️ 回写已发布的版本号
         run: |
+          set -euo pipefail
+
           VER="${{ needs.publish.outputs.tag }}"
-          printf '%s\n' "$VER" > "$VERSION_FILE"
+          [ -n "${VER}" ] || { echo "::error::publish.outputs.tag 为空，上游未产生新版本"; exit 1; }
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1) 同步最新 main，避免与并发 push 形成 non-fast-forward。
+          #    这里只动一个 VERSION 文件，rebase 冲突几乎不可能；
+          #    真撞上时直接报错退出，比强行 --force 安全得多。
+          git fetch origin main
+          git rebase origin/main
+
+          # 2) rebase 后若 VERSION 已是目标值，说明并发运行已先一步
+          #    回写完毕（典型场景：detect / manual dispatch 同时刻重合），
+          #    无需重复 commit，直接成功退出。
+          CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" || true)
+          if [ "${CURRENT}" = "${VER}" ]; then
+            echo "${VERSION_FILE} 已是 ${VER}，并发回写已生效，跳过"
+            exit 0
+          fi
+
+          printf '%s\n' "${VER}" > "$VERSION_FILE"
           git add "$VERSION_FILE"
           git commit -m "chore: release baota ${VER} (writeback release/VERSION)"
-          if git push; then
-            echo "已回写 $VERSION_FILE = ${VER}"
-          else
-            echo "::warning::回写推送失败（分支可能受保护）。镜像 ${VER} 已发布成功；下次运行 detect 仍会发现不一致并自动重试回写"
-          fi
+
+          # 3) 直接 push，不再用 if-then-else 包裹。
+          #    push 失败（非 fast-forward / 分支保护 / 权限不足）会原样
+          #    冒泡成 step 失败：红❌ + ::error::，下次运行会重新探测并重试。
+          git push origin HEAD:main
+          echo "已回写 ${VERSION_FILE} = ${VER}"
 
       - name: 📋 输出摘要
         run: |

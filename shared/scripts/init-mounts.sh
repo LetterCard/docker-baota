@@ -34,8 +34,10 @@ PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 PASSTHROUGH_DIRS="${PASSTHROUGH_DIRS:-/www/wwwroot /www/backup /www/server/data}"
 STAGE2="${STAGE2:-/baota/entrypoint.sh}"
 
-# 这几个目录一旦持久化失败，数据会静默丢失 —— 必须让 healthcheck 可见
-CRITICAL_DIRS="${CRITICAL_DIRS:-etc var panel}"
+# 这几个目录一旦持久化失败，数据会静默丢失 —— 必须让 healthcheck 可见。
+# 名字必须是循环里传进 mount_persist 的顶层目录名（www / PERSIST_SYSTEM_DIRS 之一），
+# 不是 upper 目录名：面板这层循环里叫 www，upper 才叫 data/system/panel
+CRITICAL_DIRS="${CRITICAL_DIRS:-etc var www}"
 
 # Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
 # 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回

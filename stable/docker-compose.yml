@@ -105,8 +105,9 @@ services:
     #   data/system/            系统层
     #     ├─ panel/             /www 面板 overlay upper（server/panel、wwwlogs 增量）
     #     ├─ etc usr var root opt home srv  各目录 overlay upper
-    #     └─ .baota/
-    #   data/.baota             数据层状态（锁 + overlay workdir，隐藏）
+    #     └─ .baota/            系统层元数据：并发锁、overlay workdir、
+    #                           镜像版本记录、启动历史（boot-history.log）
+    #   data/.baota/            数据层状态（并发锁，隐藏；workdir 只在系统层）
     #
     #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
     #   ⚠️ 放到 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」、写入静默失败；

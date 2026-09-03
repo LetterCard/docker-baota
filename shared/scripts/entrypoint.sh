@@ -27,6 +27,7 @@ fi
 
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
+PANEL_UPPER_DIR="${PANEL_UPPER_DIR:-${PERSIST_SYSTEM_ROOT}/panel}"
 PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 AUTO_BACKUP_KEEP="${AUTO_BACKUP_KEEP:-3}"
@@ -499,7 +500,7 @@ audit_panel_version() {
         warn '=============================================================='
         warn "面板实际版本(${actual}) 与镜像版本(${expect}) 不一致"
         warn '  说明面板被更新过：新版文件已写入持久化层，永久屏蔽镜像层'
-        warn "  恢复：删除 ${PERSIST_DATA_ROOT}/server/panel 中被更新的文件后重启"
+        warn "  恢复：删除 ${PANEL_UPPER_DIR}/server/panel 中被更新的文件后重启"
         warn '=============================================================='
     fi
 }
@@ -562,7 +563,7 @@ print_summary() {
         log '查看面板账号：docker exec <容器名> bt default'
         log '重置面板口令：docker exec -it <容器名> bt 5'
     fi
-    log "数据层：${PERSIST_DATA_ROOT}（站点目录在 ${PERSIST_DATA_ROOT}/wwwroot）"
+    log "数据层：${PERSIST_DATA_ROOT}（站点目录在 ${PERSIST_DATA_ROOT}/www/wwwroot）"
     echo '=================================================================='
 }
 
