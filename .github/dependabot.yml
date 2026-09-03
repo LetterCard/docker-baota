@@ -1,0 +1,17 @@
+# GitHub 官方推荐：Dependabot 自动维护 Actions 版本
+# 每周自动检查并合并升版 PR，避免手动跟踪上游版本变更
+# 参考：https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 同一周的所有 Actions 更新合并为一个 PR，减少打扰
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

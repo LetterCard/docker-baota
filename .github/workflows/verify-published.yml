@@ -105,7 +105,7 @@ jobs:
 
       - name: 📤 上传报告片段
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: report-stable
           path: /tmp/report-stable.md
@@ -130,7 +130,7 @@ jobs:
 
       - name: 📤 上传报告片段
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: report-release
           path: /tmp/report-release.md
@@ -154,7 +154,7 @@ jobs:
           fetch-depth: 0
 
       - name: 📥 下载报告片段
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           path: /tmp/reports
 
