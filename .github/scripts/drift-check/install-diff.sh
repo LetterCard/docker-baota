@@ -42,6 +42,14 @@ update_prep_script_v1.sh
 upgrade_py313.sh
 upgrade_py313_bundle.sh'
 
+# patch-panel.sh 刻意保持原样的依赖 / 插件升级脚本（见其 disable_update 注释：
+# 「其余升级脚本（gevent / flask / 防火墙 / 流量统计）保持原样」）。
+# 它们升级的是 Python 库与插件、不碰面板程序版本，不破坏「版本由镜像决定」，
+# 不应被当成新增升级入口误报
+EXEMPT='upgrade_gevent.sh
+upgrade_flask.sh
+upgrade_firewall.py'
+
 PANEL_SCRIPT_DIR=/www/server/panel/script
 AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
 INSTALL_LOG=/tmp/btpanel-install.log
@@ -67,6 +75,13 @@ is_target() {
     local n="$1" t
     # shellcheck disable=SC2086
     for t in $TARGETS; do [ "$t" = "$n" ] && return 0; done
+    return 1
+}
+
+is_exempt() {
+    local n="$1" e
+    # shellcheck disable=SC2086
+    for e in $EXEMPT; do [ "$e" = "$n" ] && return 0; done
     return 1
 }
 
@@ -190,12 +205,16 @@ EOS
     # 先收集全部文件名再落盘，避免管道把 ADDED 的赋值困在子 shell 里
     ALL_NAMES=()
     ADDED=()
+    EXEMPT_FOUND=()
     for name in "${!FOUND[@]}"; do
         ALL_NAMES+=("$name")
+        is_target "$name" && continue
+        if is_exempt "$name"; then
+            EXEMPT_FOUND+=("$name")
+            continue
+        fi
         case "$name" in
-            upgrade*.py|upgrade*.sh|update*.sh|update*.py)
-                is_target "$name" || ADDED+=("$name")
-                ;;
+            upgrade*.py|upgrade*.sh|update*.sh|update*.py) ADDED+=("$name") ;;
         esac
     done
     if [ ${#ALL_NAMES[@]} -gt 0 ]; then
@@ -221,6 +240,15 @@ EOS
     if [ ${#MISSING[@]} -gt 0 ]; then
         warn "上游已移除升级入口：${MISSING[*]}"
         CRIT=1
+    fi
+
+    if [ ${#EXEMPT_FOUND[@]} -gt 0 ]; then
+        {
+            echo
+            echo '✅ 已知豁免的依赖 / 插件升级脚本（设计上保持原样，不视为漂移）：'
+            echo
+            for n in "${EXEMPT_FOUND[@]}"; do echo "- \`$n\`"; done
+        } >> "$OUT_MD"
     fi
 
     if [ ${#ADDED[@]} -gt 0 ]; then

@@ -95,7 +95,8 @@ baota-docker/
 
 - 已知持久化目录集合在 `.github/scripts/drift-check/install-diff.sh` 的 `KNOWNS`，
   须与 `shared/scripts/init-mounts.sh` 保持一致
-- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 targets 保持一致
+- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 targets 保持一致；
+  `EXEMPT`（gevent / flask / 防火墙等依赖与插件升级脚本，设计上保持原样、不视为漂移）同样须与其注释保持一致
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
 
 ## 🛠️ 本地构建
