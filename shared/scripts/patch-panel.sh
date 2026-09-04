@@ -17,12 +17,24 @@ set -euo pipefail
 
 PANEL_DIR="${PANEL_DIR:-/www/server/panel}"
 
-# 面板自身版本升级入口（须与 .github/scripts/drift-check/install-diff.sh 的 TARGETS
-# 保持一致）。仅这些文件会被替换为禁用 stub；软件商店的插件 / 依赖更新走另一套机制、
-# 不在此列，故禁用面板自更新不影响插件或依赖更新。
+# 面板自身升级入口（须与 .github/scripts/drift-check/install-diff.sh 的 TARGETS
+# 保持一致）。这些文件被替换成禁用 stub 后，面板无法自行升级自身版本。
+#
+# 经对 12.0.0 / 13.0.0 真装实测，入口分三类：
+#   1) 真正的版本升级器：upgrade_panel.py、upgrade_panel_optimized.py
+#      （panel 后端 class/system.py 的「修复 / 更新」即调用它们）
+#   2) 升级链辅助：update_prep_script.sh、update_prep_script_v1.sh
+#      （升级前后执行的预处理钩子）
+#   3) Python 运行时升级：upgrade_py313.py / .sh / _bundle.sh
+#      （把面板 Python 环境升到 3.13；同样会改写镜像固定的运行环境，一并禁用）
+#   另有 local_fix.sh：名字不带 upgrade/update 前缀，却会下载 update6.sh
+#      把面板「升级至最新版」——属于隐藏入口，实测由 class/system.py 触发，
+#      故同样纳入禁用。软件商店的插件 / 依赖升级（gevent / flask / 防火墙等）
+#      走另一套机制、不在此列，故禁用面板自更新不影响插件或依赖更新。
 UPDATE_TARGETS='upgrade_panel.py upgrade_panel_optimized.py upgrade_py313.py
                 update_prep_script.sh update_prep_script_v1.sh
-                upgrade_py313.sh upgrade_py313_bundle.sh'
+                upgrade_py313.sh upgrade_py313_bundle.sh
+                local_fix.sh'
 
 log()  { echo "🩹 [patch] $(date '+%H:%M:%S') - $*"; }
 warn() { echo "⚠️ [patch][WARN] $(date '+%H:%M:%S') - $*" >&2; }
@@ -125,6 +137,26 @@ verify_update_disabled() {
         warn "自动更新标记文件仍存在：${PANEL_DIR}/data/autoUpdate.pl"
         live=$((live + 1))
     fi
+
+    # 隐藏入口扫描：扫描整个 script/，任何「不在 TARGETS 中」却仍含面板升级触发特征的
+    # 脚本（如 local_fix.sh：名字不带 upgrade/update 前缀，却会下载 update6.sh 把面板升到
+    # 最新版）。这类入口会被文件名模式漏掉，必须靠内容特征兜底，否则面板仍可绕过禁用逻辑
+    # 自行升级。已知依赖 / 插件升级脚本（gevent / flask / 防火墙）不含这些特征，不会误报。
+    local trig='update6\.sh|将面板升级|升级至最新|upgrade_panel'
+    local sf sb intgt=0
+    for sf in "${script_dir}"/*; do
+        [ -f "$sf" ] || continue
+        sb=$(basename "$sf")
+        intgt=0
+        for t in ${UPDATE_TARGETS}; do
+            [ "$sb" = "$t" ] && { intgt=1; break; }
+        done
+        [ "$intgt" -eq 1 ] && continue
+        if grep -qE "$trig" "$sf"; then
+            warn "发现隐藏的面板升级入口：${sb}（不在 TARGETS，却含升级触发特征）"
+            live=$((live + 1))
+        fi
+    done
 
     [ "${live}" -eq 0 ] \
         || die "面板自更新未完全禁用（${live} 处入口仍可被触发），构建 / 启动必须拦下"

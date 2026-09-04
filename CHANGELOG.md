@@ -127,6 +127,17 @@ data/                        （./data:/data）
   `audit_new_top_dirs` 的列表不一致。两边对齐（构建期也排除 `/data`）
 - **并发锁只保护系统层**：混合挂载模式下「数据层共享、系统层各自独立」时锁不到。
   数据层补一把锁（系统层 fd 9、数据层 fd 8），两把锁都会被 exec 继承
+- **面板禁用更新漏掉隐藏入口 `local_fix.sh`**：对 12.0.0 / 13.0.0 真装实测后发现，
+  `script/local_fix.sh` 名字不带 upgrade/update 前缀，却会下载 `update6.sh` 把面板
+  「升级至最新版」，且 `class/system.py` 的「修复」会触发它。原 `UPDATE_TARGETS` / `TARGETS`
+  只按已知文件名列举，既没收录它、也被文件名模式（`upgrade*`/`update*`）漏掉 —— 面板可绕过
+  禁用逻辑自行升级，破坏「版本由镜像决定」。已将其纳入禁用目标，并新增两层内容兜底：
+  `verify_update_disabled` 与漂移检测都增加对 script/ 全量文件的升级触发特征扫描
+  （`HIDDEN_SIGNALS`：`update6.sh` / 将面板升级 / 升级至最新 / upgrade_panel），
+  专门抓名字不带 upgrade/update 前缀的隐藏入口，避免再被文件名模式漏掉
+- **新增两通道面板源码包分析脚本** `.github/scripts/drift-check/analyze-versions.sh`
+  （`[stable|release]` 可选参数），用项目自己的安装法在一次性容器里真装，抓取
+  `panel/script/` 全量清单、升级脚本内容与自更新机制引用，用于核对升级入口清单是否完整
 
 ### ⚡ 优化
 

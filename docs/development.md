@@ -95,11 +95,17 @@ baota-docker/
 
 - 已知持久化目录集合在 `.github/scripts/drift-check/install-diff.sh` 的 `KNOWNS`，
   须与 `shared/scripts/init-mounts.sh` 保持一致
-- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 targets 保持一致；
+- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 `UPDATE_TARGETS` 保持一致
+  （含 `local_fix.sh`：名字不带 upgrade/update 前缀、却会下载 update6.sh 把面板升到最新版的隐藏入口，
+  经对 12.0.0 / 13.0.0 真装实测确认由 `class/system.py` 触发，已纳入禁用）；
   `EXEMPT`（gevent / flask / 防火墙等依赖与插件升级脚本，设计上保持原样、不视为漂移）同样须与其注释保持一致。
   文件名疑似升级脚本、但不在 TARGETS 与 EXEMPT 的，会 `cat` 内容做提示性分类（panel / dep / unknown），
   **仅作报告提示、不做安全判定**——命中任何特征都仍转人工确认，绝不自动豁免，
-  以免正向上游特征过时导致误豁免、面板自更新。改 `PANEL_UPDATE_SIGNALS` / `DEP_PLUGIN_SIGNALS` 时先核对真实脚本内容
+  以免正向上游特征过时导致误豁免、面板自更新。此外还有一层**隐藏入口扫描**：对 script/ 下所有文件
+  按 `HIDDEN_SIGNALS`（`update6.sh` / 将面板升级 / 升级至最新 / upgrade_panel）做内容兜底，
+  专门抓名字不带 upgrade/update 前缀的升级入口（如 local_fix.sh），避免被文件名模式漏掉。
+  改 `PANEL_UPDATE_SIGNALS` / `DEP_PLUGIN_SIGNALS` / `HIDDEN_SIGNALS` 时先核对真实脚本内容。
+  两通道面板源码包可用 `bash .github/scripts/drift-check/analyze-versions.sh [stable|release]` 真装后抓取分析。
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
 
 ## 🛠️ 本地构建

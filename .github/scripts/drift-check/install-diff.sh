@@ -40,7 +40,8 @@ upgrade_py313.py
 update_prep_script.sh
 update_prep_script_v1.sh
 upgrade_py313.sh
-upgrade_py313_bundle.sh'
+upgrade_py313_bundle.sh
+local_fix.sh'
 
 # patch-panel.sh 刻意保持原样的依赖 / 插件升级脚本（见其 disable_update 注释：
 # 「其余升级脚本（gevent / flask / 防火墙 / 流量统计）保持原样」）。
@@ -57,6 +58,11 @@ upgrade_firewall.py'
 PANEL_UPDATE_SIGNALS='panel_version|update_panel|updateLinux|/www/server/panel/class|更新面板|面板升级|安装面板'
 # ② 依赖 / 插件升级：命中仅作提示，仍转人工确认（确认后加入 EXEMPT）
 DEP_PLUGIN_SIGNALS='pyenv/bin/pip|pip3? install|panel/plugin|gevent|flask|防火墙|流量统计'
+
+# 隐藏升级入口的内容特征（比 PANEL_UPDATE_SIGNALS 更紧，专抓名字不带
+# upgrade/update 前缀、却会触发面板升级的脚本，如 local_fix.sh：下载 update6.sh
+# 把面板升到最新版）。这类入口会被文件名模式漏掉，必须靠内容特征兜底
+HIDDEN_SIGNALS='update6\.sh|将面板升级|升级至最新|upgrade_panel'
 
 PANEL_SCRIPT_DIR=/www/server/panel/script
 AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
@@ -228,6 +234,7 @@ EOS
     ADDED_PANEL=()
     UNKNOWN=()
     EXEMPT_FOUND=()
+    HIDDEN_PANEL=()
     declare -A HINT=()
     for name in "${!FOUND[@]}"; do
         ALL_NAMES+=("$name")
@@ -245,6 +252,19 @@ EOS
             panel)   ADDED_PANEL+=("$name") ;;
             *)       UNKNOWN+=("$name"); HINT["$name"]="$kind" ;;
         esac
+    done
+
+    # 隐藏入口扫描：名字不带 upgrade/update 前缀、却仍含面板升级触发特征的脚本。
+    # 仅按文件名模式（upgrade*/update*）会漏掉这类入口（如 local_fix.sh 会下载
+    # update6.sh 把面板升到最新版），必须靠内容特征兜底，否则面板仍可绕过禁用逻辑
+    # 自行升级。已知依赖 / 插件升级脚本（gevent / flask / 防火墙）不含这些特征，不误报。
+    for name in "${!FOUND[@]}"; do
+        is_target "$name" && continue
+        is_exempt "$name" && continue
+        case "$name" in upgrade*|update*) continue ;; esac
+        if docker exec "$CNAME" bash -c "grep -qE '$HIDDEN_SIGNALS' '${PANEL_SCRIPT_DIR}/${name}'" 2>/dev/null; then
+            HIDDEN_PANEL+=("$name")
+        fi
     done
     if [ ${#ALL_NAMES[@]} -gt 0 ]; then
         printf '%s\n' "${ALL_NAMES[@]}" | sort -u > "$TARGETS_OUT"
@@ -308,6 +328,19 @@ EOS
             echo '确认是依赖 / 插件升级 → 加入本脚本的 EXEMPT；是面板升级入口 → 加入 patch-panel.sh 的 targets。'
         } >> "$OUT_MD"
         warn "需人工确认的升级脚本：${UNKNOWN[*]}"
+        CRIT=1
+    fi
+
+    if [ ${#HIDDEN_PANEL[@]} -gt 0 ]; then
+        {
+            echo
+            echo '🚨 隐藏的面板升级入口（名字不带 upgrade/update 前缀，却含升级触发特征，如 local_fix.sh）：'
+            echo
+            for n in "${HIDDEN_PANEL[@]}"; do echo "- \`$n\`"; done
+            echo
+            echo '这类入口会被文件名模式漏掉，必须加入本脚本的 TARGETS（与 patch-panel.sh 的 UPDATE_TARGETS 保持一致）。'
+        } >> "$OUT_MD"
+        warn "隐藏的面板升级入口：${HIDDEN_PANEL[*]}"
         CRIT=1
     fi
 else
