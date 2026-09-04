@@ -45,7 +45,7 @@ env:
   REPORT: drift.md
   BASE_IMAGE: debian:12
   VERSION_API: https://www.bt.cn/api/panel/get_version
-  LABEL: upstream-change
+  LABEL: BUG
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ jobs:
           done
 
       - name: 📤 上传中间产物
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: drift-check-detail
           path: /tmp/uw/
@@ -218,7 +218,7 @@ jobs:
 
       - name: 📥 下载中间产物
         if: needs.drift.result == 'success'
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: drift-check-detail
           path: /tmp/uw
@@ -301,8 +301,6 @@ jobs:
         run: |
           set -euo pipefail
           TITLE='[上游变更] 检测到关键漂移，需人工介入'
-          # 标签不存在时 gh issue create 会失败，先确保标签存在（--force 对已存在的是更新）
-          gh label create "$LABEL" --color D93F0B --description '上游变更检测到关键漂移' --force >/dev/null 2>&1 || true
           NUM=$(gh issue list --label "$LABEL" --state open \
                 --json number --jq '.[0].number' || true)
           {
