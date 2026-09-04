@@ -2,7 +2,7 @@
 
 > 本文件由 `.github/workflows/drift-check.yml` 自动生成，每次运行整体覆盖。
 
-- 生成时间（UTC）：2026-09-04 11:07:10
+- 生成时间（UTC）：2026-09-04 11:34:47
 - 触发方式：workflow_dispatch
 - stable 版本：12.0.0
 - release 版本：13.0.0
@@ -42,6 +42,17 @@
 - `upgrade_firewall.py`
 - `upgrade_gevent.sh`
 - `upgrade_flask.sh`
+
+### 3. 代码级更新旁路检测
+
+> 面板代码里「现拉 `/install/update*.sh` 直接执行」的路径不经 `script/`，
+> stub 拦不住，运行期只能靠版本一致性检测兜底发现（详见 docs/development.md）。
+
+✅ 与基线一致（3 处，全部已知）：
+
+- `task.py:update6.sh`
+- `class/system.py:update6.sh`
+- `class/jobs.py:update_panel.sh`
 
 ### 3. 自动更新标记
 
@@ -85,6 +96,17 @@
 - `upgrade_firewall.py`
 - `upgrade_gevent.sh`
 - `upgrade_flask.sh`
+
+### 3. 代码级更新旁路检测
+
+> 面板代码里「现拉 `/install/update*.sh` 直接执行」的路径不经 `script/`，
+> stub 拦不住，运行期只能靠版本一致性检测兜底发现（详见 docs/development.md）。
+
+✅ 与基线一致（3 处，全部已知）：
+
+- `task.py:update6.sh`
+- `class/system.py:update6.sh`
+- `class/jobs.py:update_panel.sh`
 
 ### 3. 自动更新标记
 
