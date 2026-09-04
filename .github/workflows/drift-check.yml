@@ -1,0 +1,322 @@
+name: 🔭 漂移检测
+
+# ==============================================================================
+#  本工作流只做「看」，绝不发布任何镜像。
+#
+#  目的是在宝塔上游更新后，第一时间发现两类会破坏本项目的变更：
+#    1) 目录漂移：安装产生的文件落到已知 overlay 持久化目录集合之外
+#       → 那部分数据不会被持久化，属于静默丢数据
+#    2) 升级入口漂移：shared/scripts/patch-panel.sh 依赖的面板升级脚本
+#       被上游改名 / 删除 / 新增
+#       → 补丁漏掉新入口，面板会自行升级，破坏「版本由镜像决定」的约定
+#
+#  两级节奏（控制成本）：
+#    · probe  每天跑：只取版本号与安装脚本 sha256，与基线比对，几十秒完成
+#    · drift   仅在上游有变更（或手动强制）时跑：真的装一遍并做文件系统比对
+#
+#  发布已改为手动（stable / release 均移除了 schedule），
+#  维护流程：看本工作流的报告与 issue → 确认无关键漂移 → 手动触发对应发布工作流。
+#
+#  🔑 所需权限：仓库 Settings → Actions → Workflow permissions 需勾
+#     Read and write permissions（回写基线与报告、开 issue）。
+# ==============================================================================
+
+on:
+  schedule:
+    # 每天 UTC 01:00（北京时间 9 点）
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      force_drift:
+        description: '强制跑重量级安装对比（默认仅在上游有变更时执行）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # 回写 drift-check/baseline.json / drift.md
+  issues: write     # 检测到关键漂移时开 issue 提醒
+
+concurrency:
+  group: drift-check
+  cancel-in-progress: false
+
+env:
+  BASELINE: .github/scripts/drift-check/baseline.json
+  REPORT: drift.md
+  BASE_IMAGE: debian:12
+  VERSION_API: https://www.bt.cn/api/panel/get_version
+  LABEL: upstream-change
+
+jobs:
+  # ---------------------------------------------------------------------------
+  #  1) 每天跑：轻量探测
+  # ---------------------------------------------------------------------------
+  probe:
+    name: 🔍 探测上游版本与安装脚本
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.cmp.outputs.changed }}
+      reason: ${{ steps.cmp.outputs.reason }}
+      stable_version: ${{ steps.fetch.outputs.stable_version }}
+      release_version: ${{ steps.fetch.outputs.release_version }}
+      stable_url: ${{ steps.fetch.outputs.stable_url }}
+      release_url: ${{ steps.fetch.outputs.release_url }}
+      stable_sha: ${{ steps.fetch.outputs.stable_sha }}
+      release_sha: ${{ steps.fetch.outputs.release_sha }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 📡 拉取官方版本与两个通道的安装脚本
+        id: fetch
+        run: |
+          set -euo pipefail
+
+          S_URL=$(sed -n 's/^ARG INSTALL_URL=//p' stable/Dockerfile  | head -1 | tr -d '\r')
+          R_URL=$(sed -n 's/^ARG INSTALL_URL=//p' release/Dockerfile | head -1 | tr -d '\r')
+          [ -n "$S_URL" ] || { echo "::error::未能从 stable/Dockerfile 解析 INSTALL_URL";  exit 1; }
+          [ -n "$R_URL" ] || { echo "::error::未能从 release/Dockerfile 解析 INSTALL_URL"; exit 1; }
+
+          # 从安装脚本横幅提取版本（与 stable-build-push 的探测逻辑一致）
+          curl -fsSL --connect-timeout 10 --max-time 60 "$S_URL" -o /tmp/install_stable.sh
+          S_SHA=$(sha256sum /tmp/install_stable.sh | awk '{print $1}')
+          S_VER=$(grep -m1 '您正在安装宝塔面板' /tmp/install_stable.sh \
+                  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+
+          curl -fsSL --connect-timeout 10 --max-time 60 "$R_URL" -o /tmp/install_release.sh
+          R_SHA=$(sha256sum /tmp/install_release.sh | awk '{print $1}')
+
+          # release 通道版本来自官方接口（与 release-build-push 一致）
+          R_VER=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" | tr -d '[:space:]' || true)
+
+          {
+            echo "stable_url=$S_URL"
+            echo "release_url=$R_URL"
+            echo "stable_sha=$S_SHA"
+            echo "release_sha=$R_SHA"
+            echo "stable_version=${S_VER:-unknown}"
+            echo "release_version=${R_VER:-unknown}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "stable  脚本：$S_URL（版本 ${S_VER:-unknown}，sha ${S_SHA:0:12}…）"
+          echo "release 脚本：$R_URL（版本 ${R_VER:-unknown}，sha ${R_SHA:0:12}…）"
+
+      - name: 🆚 与基线比对
+        id: cmp
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BASELINE" ]; then
+            echo 'changed=true'  >> "$GITHUB_OUTPUT"
+            echo 'reason=首次运行，尚无基线' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          REASONS=''
+          B_S_SHA=$(jq -r '.stable_sha  // ""' "$BASELINE")
+          B_R_SHA=$(jq -r '.release_sha // ""' "$BASELINE")
+          B_S_VER=$(jq -r '.stable_version  // ""' "$BASELINE")
+          B_R_VER=$(jq -r '.release_version // ""' "$BASELINE")
+
+          if [ "${{ steps.fetch.outputs.stable_sha }}" != "$B_S_SHA" ]; then
+            REASONS="${REASONS}stable 安装脚本已变更；"
+          fi
+          if [ "${{ steps.fetch.outputs.release_sha }}" != "$B_R_SHA" ]; then
+            REASONS="${REASONS}release 安装脚本已变更；"
+          fi
+          SV='${{ steps.fetch.outputs.stable_version }}'
+          RV='${{ steps.fetch.outputs.release_version }}'
+          if [ "$SV" != 'unknown' ] && [ "$SV" != "$B_S_VER" ]; then
+            REASONS="${REASONS}stable 版本 ${B_S_VER} → ${SV}；"
+          fi
+          if [ "$RV" != 'unknown' ] && [ "$RV" != "$B_R_VER" ]; then
+            REASONS="${REASONS}release 版本 ${B_R_VER} → ${RV}；"
+          fi
+
+          if [ -n "$REASONS" ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            echo "reason=${REASONS}" >> "$GITHUB_OUTPUT"
+            echo "检测到上游变更：${REASONS}"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'reason=与基线一致，本次不跑安装对比' >> "$GITHUB_OUTPUT"
+            echo '与基线一致，跳过安装对比。'
+          fi
+
+  # ---------------------------------------------------------------------------
+  #  2) 有变更时跑：真的装一遍并比对
+  # ---------------------------------------------------------------------------
+  drift:
+    name: 🧪 安装对比（目录 / 升级入口）
+    needs: probe
+    if: >-
+      needs.probe.outputs.changed == 'true' ||
+      inputs.force_drift ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      critical: ${{ steps.merge.outputs.critical }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🧪 逐通道安装并检测
+        id: run
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/uw
+          : > /tmp/uw/critical
+
+          for CH in stable release; do
+            case "$CH" in
+              stable)  URL='${{ needs.probe.outputs.stable_url }}' ;;
+              release) URL='${{ needs.probe.outputs.release_url }}' ;;
+            esac
+            echo "▶️ 开始检测 ${CH} 通道：${URL}"
+            CRIT=0
+            INSTALL_URL="$URL" \
+            BASE_IMAGE="$BASE_IMAGE" \
+            OUT_MD="/tmp/uw/${CH}.md" \
+            CRIT_FILE="/tmp/uw/${CH}.crit" \
+            TARGETS_OUT="/tmp/uw/${CH}.targets" \
+              bash .github/scripts/drift-check/install-diff.sh \
+              || { echo "::error::${CH} 通道检测失败"; exit 1; }
+            echo "$CH $(cat "/tmp/uw/${CH}.crit")" >> /tmp/uw/critical
+          done
+
+      - name: 📤 上传中间产物
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: drift-check-detail
+          path: /tmp/uw/
+          retention-days: 30
+
+      - name: 🔀 汇总关键标记
+        id: merge
+        run: |
+          set -euo pipefail
+          if grep -q ' 1$' /tmp/uw/critical; then
+            echo 'critical=1' >> "$GITHUB_OUTPUT"
+            echo '::error::检测到关键漂移，详见报告'
+          else
+            echo 'critical=0' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  #  3) 写报告、更新基线、必要时开 issue 提醒
+  # ---------------------------------------------------------------------------
+  report:
+    name: 📝 报告与提醒
+    needs: [probe, drift]
+    if: always() && needs.probe.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 📥 下载中间产物
+        if: needs.drift.result == 'success'
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: drift-check-detail
+          path: /tmp/uw
+
+      - name: 📝 生成报告并更新基线
+        run: |
+          set -euo pipefail
+          {
+            echo '# 🔭 漂移检测报告'
+            echo
+            echo "> 本文件由 \`.github/workflows/drift-check.yml\` 自动生成，每次运行整体覆盖。"
+            echo
+            echo "- 生成时间（UTC）：$(date -u '+%F %T')"
+            echo "- 触发方式：${{ github.event_name }}"
+            echo "- stable 版本：${{ needs.probe.outputs.stable_version }}"
+            echo "- release 版本：${{ needs.probe.outputs.release_version }}"
+            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo
+            if [ "${{ needs.drift.result }}" = 'success' ]; then
+              for CH in stable release; do
+                if [ -f "/tmp/uw/${CH}.md" ]; then
+                  echo "---"
+                  echo
+                  echo "## ${CH} 通道"
+                  echo
+                  cat "/tmp/uw/${CH}.md"
+                  echo
+                fi
+              done
+            else
+              echo '---'
+              echo
+              echo '本次未执行安装对比（与基线一致，或被跳过）。'
+              echo
+            fi
+          } > "$REPORT"
+
+          # 基线仅在成功跑完分析后更新，避免把失败运行的中间值写进去
+          if [ "${{ needs.drift.result }}" = 'success' ]; then
+            S_T=$(sort -u /tmp/uw/stable.targets  | jq -R -s 'split("\n") | map(select(length>0))')
+            R_T=$(sort -u /tmp/uw/release.targets | jq -R -s 'split("\n") | map(select(length>0))')
+            jq -n \
+              --arg ss '${{ needs.probe.outputs.stable_sha }}' \
+              --arg rs '${{ needs.probe.outputs.release_sha }}' \
+              --arg sv '${{ needs.probe.outputs.stable_version }}' \
+              --arg rv '${{ needs.probe.outputs.release_version }}' \
+              --argjson st "$S_T" \
+              --argjson rt "$R_T" \
+              '{stable_sha:$ss, release_sha:$rs, stable_version:$sv, release_version:$rv,
+                targets:{stable:$st, release:$rt}}' > "$BASELINE"
+            echo '基线已更新。'
+          fi
+
+      - name: 💾 回写报告与基线
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # 报告区会被本工作流覆盖，rebase 前先取回远端最新，避免 push 冲突
+          git fetch origin "${GITHUB_REF_NAME}"
+          git rebase "origin/${GITHUB_REF_NAME}"
+          git add "$REPORT" "$BASELINE"
+          if git diff --cached --quiet; then
+            echo '报告与基线无变化，跳过提交。'
+          else
+            git commit -m 'chore(drift): 更新漂移检测报告与基线'
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: 🚨 关键漂移：开 issue 提醒并让本作业失败
+        if: needs.drift.outputs.critical == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE='[上游变更] 检测到关键漂移，需人工介入'
+          # 标签不存在时 gh issue create 会失败，先确保标签存在（--force 对已存在的是更新）
+          gh label create "$LABEL" --color D93F0B --description '上游变更检测到关键漂移' --force >/dev/null 2>&1 || true
+          NUM=$(gh issue list --label "$LABEL" --state open \
+                --json number --jq '.[0].number' || true)
+          {
+            echo "## 检测时间（UTC）：$(date -u '+%F %T')"
+            echo
+            echo "- stable 版本：${{ needs.probe.outputs.stable_version }}"
+            echo "- release 版本：${{ needs.probe.outputs.release_version }}"
+            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo
+            echo '完整报告见仓库根目录 `drift.md`。'
+            echo '处理完毕后请关闭本 issue；未处理前本工作流会持续失败以作提醒。'
+          } > /tmp/body.md
+
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body-file /tmp/body.md
+            echo "已在既有 issue #${NUM} 追加记录"
+          else
+            gh issue create --title "$TITLE" --label "$LABEL" --body-file /tmp/body.md
+            echo '已创建提醒 issue'
+          fi
+
+          echo '::error::检测到关键漂移，本次作业标记为失败以便通知维护者'
+          exit 1

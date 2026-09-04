@@ -1,11 +1,11 @@
 # 📊 已发布镜像每日验证报告
 
-> 本文件由 `.github/workflows/verify-published.yml` 自动生成，每次运行整体覆盖（不追加）。
+> 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
 - 生成时间（UTC）：2026-09-03 23:09:36
 - 触发方式：workflow_dispatch
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）
-- 验证脚本：`.github/scripts/health-check/verify-published.sh`
+- 验证脚本：`.github/scripts/health-check/published-check.sh`
 
 ## 概要
 

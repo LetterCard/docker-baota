@@ -14,7 +14,7 @@
 
 > 社区里另一类做法是把 `/etc`、`/usr` 首启 `cp -a` 拷到宿主目录、再 `mount --bind` 盖回去。
 > 它更简单、对底层文件系统无要求，但会**让镜像升级在这两个目录上彻底失效**
-> （持久层那份全量快照永久屏蔽镜像层）。完整取舍见 `docs/persistence-alternatives.md`。
+> （持久层那份全量快照永久屏蔽镜像层）。完整取舍见 `docs/alternatives.md`。
 
 ### `index=off` 是正确性要求，不是调优
 
@@ -23,7 +23,12 @@
 
 ### workdir 为什么用固定名 + 启动时清理
 
-内核要求 workdir 与 upperdir 同文件系统，所以数据层放在 `/data/.baota/work/`、系统层放在 `/data/system/.baota/work/`。
+内核要求 workdir 与 upperdir 同文件系统。所有 overlay（面板 `/www` + 系统层 7 个目录）
+的 upper 都在系统层，所以 workdir 统一放在 `/data/system/.baota/<目录>.work`；
+`/data/.baota/` 只放数据层的并发锁，不涉及 workdir。
+
+路径里 `.work` 之后的**最后一层 `work` 是内核建的**（`<目录>.work/work`），省不掉。
+早期版本在外面还多套了一层容器目录（`.baota/work/<目录>.work/work`），已简化掉一层。
 清理与挂载都在 `flock` 独占锁的保护下，同一时刻不可能有另一个实例在用。
 锁由内核持有、容器死亡自动释放，非正常退出不会留下死锁。
 

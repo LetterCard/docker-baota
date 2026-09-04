@@ -16,7 +16,7 @@ name: 🔬 日巡检：已发布镜像回归
 #    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
 #
 #  验什么
-#    .github/scripts/health-check/verify-published.sh：19 项，覆盖持久化
+#    .github/scripts/health-check/published-check.sh：19 项，覆盖持久化
 #    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
 #    备份包结构 / 首启凭据 / 补丁生效），外加一段脱敏后的首次启动日志
 #
@@ -51,7 +51,7 @@ on:
 
 # 让它跑完再排下一次：中途取消会留下残缺的报告
 concurrency:
-  group: verify-published
+  group: published-check
   cancel-in-progress: false
 
 env:
@@ -98,7 +98,7 @@ jobs:
 
       - name: 🔬 运行回归验证（${{ needs.prep.outputs.stable }}）
         run: |
-          bash "${HC}/verify-published.sh" \
+          bash "${HC}/published-check.sh" \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.stable }}" \
             "${{ needs.prep.outputs.stable }}" \
             /tmp/report-stable.md
@@ -123,7 +123,7 @@ jobs:
 
       - name: 🔬 运行回归验证（${{ needs.prep.outputs.release }}）
         run: |
-          bash "${HC}/verify-published.sh" \
+          bash "${HC}/published-check.sh" \
             "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.release }}" \
             "${{ needs.prep.outputs.release }}" \
             /tmp/report-release.md
@@ -186,12 +186,12 @@ jobs:
           {
             echo '# 📊 已发布镜像每日验证报告'
             echo
-            echo '> 本文件由 `.github/workflows/verify-published.yml` 自动生成，每次运行整体覆盖（不追加）。'
+            echo '> 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。'
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
             echo "- 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）"
-            echo "- 验证脚本：\`${HC}/verify-published.sh\`"
+            echo "- 验证脚本：\`${HC}/published-check.sh\`"
             echo
             echo '## 概要'
             echo

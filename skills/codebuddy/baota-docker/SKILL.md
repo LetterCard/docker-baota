@@ -28,8 +28,8 @@ allowed-tools: Read,Bash,Grep,Glob
  ├── system/       ← 系统层
  │    ├── panel/          /www 面板 overlay upper（server/panel、wwwlogs 增量）
  │    ├── etc usr var root opt home srv
- │    └── .baota/  ← 元数据：work/ lock image-version boot-history.log
- └── .baota/       ← 数据层状态（lock + overlay workdir）
+ │    └── .baota/  ← 元数据：lock image-version boot-history.log + <目录>.work/work
+ └── .baota/       ← 数据层状态（并发锁）
 
 启动链：/busybox sh /baota/init-mounts.sh  →  bash /baota/entrypoint.sh  →  systemd
 ```
@@ -81,13 +81,17 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
 | `stable/` `release/` | 两个通道的 Dockerfile / compose / VERSION |
-| `.github/scripts/health-check*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/health-check/verify-published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
+| `.github/scripts/health-check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
+| `.github/scripts/drift-check/install-diff.sh` | 漂移检测：一次性容器原样跑官方安装脚本，比对目录漂移与升级入口漂移 |
+| `.github/scripts/drift-check/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/inject-report.py` | 把 `report.md` 注入 README 的报告标记区 |
-| `.github/workflows/verify-published.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
+| `.github/workflows/published-check.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
+| `.github/workflows/drift-check.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
 | `.github/dependabot.yml` | 每周升级 Actions 版本（只开 PR，不自动合并） |
 | `report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
-| `docs/persistence-alternatives.md` | 方案选型：overlay vs bind mount 的取舍 |
+| `drift.md` | 漂移检测报告（CI 生成并回写，勿手改） |
+| `docs/alternatives.md` | 方案选型：overlay vs bind mount 的取舍 |
 | `docs/` | 使用文档；`docs/development.md` 是开发者入口 |
 
 ## 常用命令

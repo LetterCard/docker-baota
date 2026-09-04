@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# ==============================================================================
+#  [漂移检测] 在一次性容器中原样执行官方安装脚本，检测两类会破坏本项目的上游变更：
+#
+#   1) 目录漂移：安装产生的文件是否仍只落在已知的 overlay 持久化目录集合内。
+#      落到集合之外 = 那部分数据不会被持久化（静默丢数据）。
+#   2) 升级入口漂移：shared/scripts/patch-panel.sh 依赖的面板升级脚本集合
+#      是否被上游改名 / 删除 / 新增。一旦漏掉新入口，面板就会绕过禁用逻辑
+#      自行升级，破坏「面板版本由镜像决定」这条核心契约。
+#
+#  做法与 docs/persistence.md 的实测一致：装前快照 → 装 → 装后快照 → 比对。
+#  注意前置软件包必须在「装前快照」之前装完，否则 apt 自身写入的文件会被
+#  误算成宝塔的写入。
+#
+#  入参（环境变量）：
+#    INSTALL_URL    官方安装脚本地址（必填）
+#    BASE_IMAGE     基础镜像（默认 debian:12，与 stable/Dockerfile 的默认值一致）
+#    OUT_MD         markdown 报告输出路径（默认 drift.md）
+#    CRIT_FILE      关键标记输出路径，内容 1 表示存在关键漂移
+#    TARGETS_OUT    升级入口集合输出路径（每行一个文件名，供基线比对）
+#
+#  退出码：安装失败等非预期错误为 1。检测到漂移不改变退出码，由 CRIT_FILE 表达，
+#          由工作流据此决定是否提醒。
+# ==============================================================================
+set -euo pipefail
+
+INSTALL_URL="${INSTALL_URL:?未指定 INSTALL_URL}"
+BASE_IMAGE="${BASE_IMAGE:-debian:12}"
+OUT_MD="${OUT_MD:-drift.md}"
+CRIT_FILE="${CRIT_FILE:-drift-critical}"
+TARGETS_OUT="${TARGETS_OUT:-drift-targets.txt}"
+
+# 已知 overlay 持久化目录集合（须与 shared/scripts/init-mounts.sh 保持一致）
+KNOWNS='www etc usr var root opt home srv'
+
+# shared/scripts/patch-panel.sh disable_update() 的目标列表（须保持一致）
+TARGETS='upgrade_panel.py
+upgrade_panel_optimized.py
+upgrade_py313.py
+update_prep_script.sh
+update_prep_script_v1.sh
+upgrade_py313.sh
+upgrade_py313_bundle.sh'
+
+PANEL_SCRIPT_DIR=/www/server/panel/script
+AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
+INSTALL_LOG=/tmp/btpanel-install.log
+
+CNAME="bt-drift-$$"
+CRIT=0
+
+log()  { echo "🔭 [drift] $*"; }
+warn() { echo "⚠️ [drift][WARN] $*" >&2; }
+die()  { echo "❌ [drift][ERROR] $*" >&2; exit 1; }
+
+cleanup() { docker rm -f "$CNAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+in_knowns() {
+    local d="$1" k
+    # shellcheck disable=SC2086
+    for k in $KNOWNS; do [ "$k" = "$d" ] && return 0; done
+    return 1
+}
+
+is_target() {
+    local n="$1" t
+    # shellcheck disable=SC2086
+    for t in $TARGETS; do [ "$t" = "$n" ] && return 0; done
+    return 1
+}
+
+# 统计每个顶层目录的文件数（排除虚拟文件系统与临时目录）
+snapshot() {
+    docker exec -i "$CNAME" bash -s <<'EOS'
+for d in /*; do
+    [ -d "$d" ] || continue
+    case "$d" in /proc|/sys|/dev|/run|/tmp) continue ;; esac
+    n=$(find "$d" -xdev -type f 2>/dev/null | wc -l | tr -d ' ')
+    printf '%s %s\n' "${d#/}" "$n"
+done
+EOS
+}
+
+: > "$OUT_MD"
+: > "$TARGETS_OUT"
+echo 0 > "$CRIT_FILE"
+
+# ------------------------------------------------------------------------------
+#  0. 起容器并装前置包（清单与 shared/build/base.sh install_packages 一致）
+# ------------------------------------------------------------------------------
+docker run -d --name "$CNAME" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
+log "已启动一次性容器（${BASE_IMAGE}）"
+
+docker exec -i "$CNAME" bash -s <<'EOS'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends \
+    locales tzdata ca-certificates \
+    systemd systemd-sysv dbus dbus-user-session \
+    cron logrotate rsyslog \
+    openssh-server \
+    procps psmisc lsof htop \
+    net-tools iproute2 iputils-ping dnsutils traceroute \
+    curl wget \
+    tar xz-utils zip unzip gzip bzip2 p7zip-full cpio rsync \
+    lsb-release sudo \
+    busybox-static \
+    vim-tiny less file
+apt-get clean
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+EOS
+log '前置软件包已就绪'
+
+# ------------------------------------------------------------------------------
+#  1. 目录漂移检测
+# ------------------------------------------------------------------------------
+BEFORE=$(snapshot)
+
+SECRET="bt-probe-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"
+log '执行官方安装脚本（参数与 shared/build/panel.sh 保持一致）'
+docker exec "$CNAME" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
+    || die "下载安装脚本失败：${INSTALL_URL}"
+
+# 参数故意不加引号：官方脚本要求逐个参数传入（与 panel.sh 一致）
+docker exec "$CNAME" bash -c \
+    "cd /root && bash install.sh -y -P 8888 -u baota -p '${SECRET}' --safe-path '${SECRET}' --ssl-disable" \
+    || { docker exec "$CNAME" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
+         die '官方安装脚本执行失败'; }
+log '安装完成，开始比对'
+
+AFTER=$(snapshot)
+
+declare -A BEFORE_MAP=() AFTER_MAP=()
+while read -r d n; do [ -n "${d:-}" ] && BEFORE_MAP["$d"]="$n"; done <<< "$BEFORE"
+while read -r d n; do [ -n "${d:-}" ] && AFTER_MAP["$d"]="$n"; done <<< "$AFTER"
+
+{
+    echo '### 1. 目录漂移检测'
+    echo
+    echo "> 安装脚本：\`${INSTALL_URL}\`"
+    echo
+    echo '| 顶层目录 | 安装前 | 安装后 | 新增 | 状态 |'
+    echo '|---|---:|---:|---:|---|'
+} >> "$OUT_MD"
+
+DIRS=$(printf '%s\n%s\n' "$BEFORE" "$AFTER" | awk '{print $1}' | sort -u)
+# shellcheck disable=SC2086
+for d in $DIRS; do
+    b="${BEFORE_MAP[$d]:-0}"
+    a="${AFTER_MAP[$d]:-0}"
+    delta=$(( a - b ))
+    [ "$delta" -gt 0 ] || continue
+    if in_knowns "$d"; then
+        printf '| `/%s` | %s | %s | %s | ✅ 已被持久化覆盖 |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
+    else
+        printf '| `/%s` | %s | %s | %s | ❌ **未覆盖，会静默丢数据** |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
+        warn "未覆盖的写入目录：/${d}（新增 ${delta} 个文件）"
+        CRIT=1
+    fi
+done
+
+# ------------------------------------------------------------------------------
+#  2. 升级入口脚本集合检测
+# ------------------------------------------------------------------------------
+if docker exec "$CNAME" bash -c "test -d '${PANEL_SCRIPT_DIR}'" >/dev/null 2>&1; then
+    mapfile -t ENTRIES < <(docker exec -e "SD=${PANEL_SCRIPT_DIR}" -i "$CNAME" bash -s <<'EOS'
+for f in "$SD"/*; do
+    [ -f "$f" ] || continue
+    printf '%s %s\n' "$(basename "$f")" "$(sha256sum "$f" | awk '{print $1}')"
+done
+EOS
+)
+
+    declare -A FOUND=()
+    for line in "${ENTRIES[@]:-}"; do
+        [ -n "${line:-}" ] || continue
+        # shellcheck disable=SC2086
+        set -- $line
+        [ -n "${1:-}" ] && [ -n "${2:-}" ] && FOUND["$1"]="$2"
+    done
+
+    MISSING=()
+    # shellcheck disable=SC2086
+    for t in $TARGETS; do
+        [ -z "${FOUND[$t]:-}" ] && MISSING+=("$t")
+    done
+
+    # 先收集全部文件名再落盘，避免管道把 ADDED 的赋值困在子 shell 里
+    ALL_NAMES=()
+    ADDED=()
+    for name in "${!FOUND[@]}"; do
+        ALL_NAMES+=("$name")
+        case "$name" in
+            upgrade*.py|upgrade*.sh|update*.sh|update*.py)
+                is_target "$name" || ADDED+=("$name")
+                ;;
+        esac
+    done
+    if [ ${#ALL_NAMES[@]} -gt 0 ]; then
+        printf '%s\n' "${ALL_NAMES[@]}" | sort -u > "$TARGETS_OUT"
+    fi
+
+    {
+        echo
+        echo '### 2. 升级入口检测'
+        echo
+        echo '| `patch-panel.sh` 目标 | 状态 |'
+        echo '|---|---|'
+    } >> "$OUT_MD"
+    # shellcheck disable=SC2086
+    for t in $TARGETS; do
+        if [ -n "${FOUND[$t]:-}" ]; then
+            printf '| `%s` | ✅ 存在（`%s…`） |\n' "$t" "${FOUND[$t]:0:12}" >> "$OUT_MD"
+        else
+            printf '| `%s` | ❌ 上游已不存在 |\n' "$t" >> "$OUT_MD"
+        fi
+    done
+
+    if [ ${#MISSING[@]} -gt 0 ]; then
+        warn "上游已移除升级入口：${MISSING[*]}"
+        CRIT=1
+    fi
+
+    if [ ${#ADDED[@]} -gt 0 ]; then
+        {
+            echo
+            echo '⚠️ 上游出现疑似新增的升级入口（补丁目标列表未包含）：'
+            echo
+            for n in "${ADDED[@]}"; do echo "- \`$n\`"; done
+            echo
+            echo '若确认是新的升级入口，需加入 `shared/scripts/patch-panel.sh` 的 targets，'
+            echo '否则面板会绕过禁用逻辑自行升级，破坏「版本由镜像决定」的约定。'
+        } >> "$OUT_MD"
+        warn "疑似新增升级入口：${ADDED[*]}"
+        CRIT=1
+    fi
+else
+    {
+        echo
+        echo '### 2. 升级入口检测'
+        echo
+        echo "❌ 未找到面板脚本目录 \`${PANEL_SCRIPT_DIR}\`，上游路径可能已变更。"
+        echo
+        echo '   `shared/scripts/patch-panel.sh` 会在此直接失败，必须更新路径。'
+    } >> "$OUT_MD"
+    warn "未找到 ${PANEL_SCRIPT_DIR}"
+    CRIT=1
+fi
+
+# ------------------------------------------------------------------------------
+#  3. 自动更新标记（信息项）
+# ------------------------------------------------------------------------------
+if docker exec "$CNAME" bash -c "test -f '${AUTO_UPDATE_PL}'" >/dev/null 2>&1; then
+    AUTO_FLAG='安装后存在（补丁会在启动期删除，属正常）'
+else
+    AUTO_FLAG='安装后不存在（上游默认未开启自动更新）'
+fi
+{
+    echo
+    echo '### 3. 自动更新标记'
+    echo
+    echo "\`${AUTO_UPDATE_PL}\`：${AUTO_FLAG}"
+} >> "$OUT_MD"
+
+# ------------------------------------------------------------------------------
+#  结论
+# ------------------------------------------------------------------------------
+{
+    echo
+    echo '### 结论'
+    echo
+    if [ "$CRIT" -eq 0 ]; then
+        echo '✅ 未检测到会破坏本项目的上游变更。'
+    else
+        echo '❌ 检测到关键漂移，需人工介入（详见上文）。'
+    fi
+} >> "$OUT_MD"
+
+echo "$CRIT" > "$CRIT_FILE"
+log "检测完成（关键漂移：${CRIT}），报告：${OUT_MD}"

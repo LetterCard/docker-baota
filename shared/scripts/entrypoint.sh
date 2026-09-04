@@ -6,7 +6,7 @@
 #  等目录的写入都会落入 data/ 对应层（www 在 /data/www，系统层在 /data/system/<dir>），
 #  容器销毁、重建、升级都不丢。
 #
-#  可用环境变量（详见 docs/getting-started.md「首次登录凭据」）：
+#  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
 #    PANEL_PORT / PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
 #    除 TZ 每次生效外，其余都只在首次启动（data/ 为空）时生效，
 #    避免每次启动都覆盖用户在面板里改过的设置。

@@ -50,7 +50,7 @@
 ## 环境变量
 
 除 `TZ` 外，下面这些**只在首次启动（`data/` 为空）时生效**，详见
-[快速开始](getting-started.md#首次登录凭据)。
+[快速开始](quickstart.md#首次登录凭据)。
 
 | 变量 | 当前状态 | 不写 / 留空的效果 | 如何启用 |
 |---|---|---|---|
@@ -66,7 +66,7 @@
 | 变量 | 默认值 | 用途 |
 |---|---|---|
 | `PERSIST_DATA_ROOT` | `/data` | 数据层根目录（面板 / 站点 / 数据库 / 备份） |
-| `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc/usr/var/root/opt/home/srv 的 overlay 上层） |
+| `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc usr var root opt home srv 的 overlay 上层） |
 | `PERSIST_DATA_DIRS` | `www` | 数据层需要 overlay 持久化的顶层目录 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（`www` 属于数据层，不在这里） |
 | `CRITICAL_DIRS` | `etc var www` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录 |
@@ -104,18 +104,18 @@ data/                         （./data:/data，host 侧一目录）
 │   └── server/data/              ← MySQL data/www/server/data ↔ /www/server/data
 ├── system/                   ← 系统层
 │   ├── panel/                    ← /www 面板 overlay upper（server/panel、wwwlogs 增量）
-│   ├── etc/ usr/ var/ root/ opt/ home/ srv/   ← 各目录 overlay upper
-│   └── .baota/                   ← 项目元数据（锁、版本记录、启动历史）
-└── .baota/                   ← 数据层状态（锁 + overlay workdir）
+│   ├── etc usr var root opt home srv   ← 各目录 overlay upper
+│   └── .baota/                   ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
+└── .baota/                   ← 数据层状态（并发锁）
 ```
 
 `data/system/.baota/` 是项目元数据目录（隐藏），备份时用一条
 `--exclude='.baota'` 全部排除（`baota-backup` 已自动排除）；`data/.baota/`
-是数据层状态（并发锁 + overlay workdir），同样被排除：
+是数据层状态（并发锁），同样被排除：
 
 | 文件/目录 | 用途 |
 |---|---|
-| `work/<目录>.work` | overlay 内部工作目录，每次启动清理重建，只有几十 KB |
+| `<目录>.work/work` | overlay 内部工作目录，每次启动清理重建，只有几十 KB |
 | `lock` | 持久化层独占锁。同一份数据不允许两个容器同时挂载，锁由内核持有、容器死亡自动释放 |
 | `image-version` | 上次启动时的镜像版本，用于检测升级 / 降级并触发自动快照 |
 | `boot-history.log` | 持久化降级的启动历史，只在出问题时才追加 |
@@ -129,7 +129,7 @@ data/                         （./data:/data，host 侧一目录）
 |---|---|---|
 | `AUTO_BACKUP_KEEP` | `3` | 快照保留份数，`0` 关闭快照 |
 
-**为什么只快照这一个目录**（实测确证，见[持久化原理](persistence.md#为什么换镜像后数据不会丢)）：
+**为什么只快照这一个目录**（实测确证，见[持久化原理](persistence.md#换镜像后会发生什么)）：
 
 站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 都在 `/www`
 这一层 overlay 里，但镜像自带的 `/www/wwwroot`、`/www/server/data`、`/www/backup`

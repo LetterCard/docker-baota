@@ -74,6 +74,17 @@ data/                        （./data:/data）
   版本记录回写、降级不阻断启动
 - `docs/` 专题文档（9 篇）、`skills/` AI 助手技能包（CodeBuddy + Trae 预留）、
   `Makefile`、`.editorconfig`、`.shellcheckrc`、`LICENSE`、本文件
+- **每日上游漂移检测**（`.github/workflows/drift-check.yml` + `.github/scripts/drift-check/`）：
+  在一次性容器里原样执行官方安装脚本，比对「装前 / 装后」的顶层目录新增量，
+  拦两类会破坏本项目的上游变更 —— 目录漂移（写入落到已知持久化目录集合之外 =
+  静默丢数据）与升级入口漂移（`patch-panel.sh` 的目标被上游改名 / 删除 / 新增，
+  面板会绕过禁用逻辑自行升级）。两级节奏控制成本：probe 每天取版本与脚本 sha256
+  对基线比对，有变更才真装一遍；报告回写 `drift.md`，
+  关键漂移开 issue 并持续失败提醒。检测用的目录集合与升级入口清单必须分别与
+  `init-mounts.sh` / `patch-panel.sh` 保持一致
+- **`make lint` 自动定位 pip 安装的 shellcheck**：macOS 系统 Python 的 `--user`
+  安装位置在 `~/Library/Python/<版本>/bin`、不在默认 PATH，此前会静默跳过。
+  Makefile 找到就自动加进 PATH，找不到才跳过（安装与排查见 docs/development.md「本地构建」）
 
 ### 🐛 修复
 
@@ -131,6 +142,17 @@ data/                        （./data:/data）
 - **代码规范**：统一 4 空格缩进、日志前缀（`[build]` / `[init]` / `[entrypoint]` /
   `[patch]` / `[backup]`）、函数命名（`check_*` / `audit_*` / `setup_*` / `refresh_*`）、
   变量全部加引号、函数内变量全部 `local`
+- **发布改为手动**：stable / release 两个工作流移除定时触发。release 会推进
+  `latest`，每天自动发布意味着上游一出问题坏镜像会立刻扩散给所有 `latest` 用户；
+  改为手动后，发布前必然先看漂移检测的报告与 issue。
+  巡检工作流与脚本随之更名 `verify-published` → `published-check`，
+  与 `health-check` / `drift-check` 命名家族对齐
+- **文档重命名与锚点修复**：`getting-started` → `quickstart`、`backup-restore` → `backup`、
+  `persistence-alternatives` → `alternatives`（与全仓单词式文件名一致）；
+  README 重写为「原理 / 用法 / 对比」的完整版并加目录；
+  6 个被链接的标题去 emoji（GitHub 剥 emoji 生成锚点，此前 8 处链接断链）、
+  2 处指向不存在标题的死链改指、修复 development.md 的未闭合围栏、
+  术语表更正残留的旧布局描述；compose 清理「逐项说明见 X」类交叉引用注释
 
 ---
 

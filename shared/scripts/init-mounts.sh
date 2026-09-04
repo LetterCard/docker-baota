@@ -50,7 +50,11 @@ PROBE=.persist-writable-probe
 # overlay 要求 workdir 与 upperdir 位于同一文件系统（内核硬性要求），
 # 所以 work 放在对应持久化层内、且必须与 upper 同盘。
 # 面板（/www overlay）upper 在系统层下（data/system/panel），work 用系统层的工作目录
-SYS_WORK_ROOT="${PERSIST_SYSTEM_ROOT}/.baota/work"
+#
+# 各 overlay 的 workdir 形如 <STATE_DIR>/<目录>.work。内核挂载后会**在它里面再建一层
+# work**（即 <目录>.work/work）—— 那层是内核行为，省不掉；能省的只有外面那层容器目录，
+# 所以这里不再多套一层 work/，直接挂在 .baota 下（少一层、少一次重复命名）
+SYS_WORK_ROOT="${PERSIST_SYSTEM_ROOT}/.baota"
 DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
 DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
 STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
@@ -236,6 +240,12 @@ mount_passthrough() {
 # ==============================================================================
 main() {
     acquire_lock || exit 1
+
+    # ---- 0. 清理旧版 workdir 容器 ----
+    # 早期版本把各 overlay 的 workdir 收在 .baota/work/<目录>.work 下，
+    # 现在直接放在 .baota/<目录>.work。旧目录里没有任何持久数据（workdir 每次启动
+    # 都重建），直接删掉，避免它在用户的 data/ 里留下孤儿目录
+    rm -rf "${STATE_DIR}/work" 2> /dev/null || true
 
     # ---- 1. 暂存 Docker 动态注入的文件（/etc 即将被 overlay 盖住）----
     rm -rf "${DOCKER_META}"

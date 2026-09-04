@@ -1,13 +1,5 @@
 # ==============================================================================
 #  📦 宝塔 Linux 面板容器化 —— release 通道（官方正式版最新）
-#
-#  与 stable/docker-compose.yml 只有一处不同：image 标签。
-#    release 通道发布 <版本> 与 latest 两个标签，latest 永远指向最新的正式版
-#    （由 .github/workflows/release-build-push.yml 每天自动构建发布）。
-#    想锁定版本防意外升级，把 latest 改成具体版本号即可。
-#
-#  其余配置（持久化、端口、安全、探活、日志）与 stable 完全一致，
-#  逐项的原理说明与注意事项见 stable/docker-compose.yml 与 docs/。
 # ==============================================================================
 name: baota
 
@@ -50,7 +42,6 @@ services:
     #   例：8G 机器、飞牛占 2G → 给 4g 左右
     # ⚠️ 先设好 limit 再装 MySQL：宝塔按「容器看到的内存」自动调大 buffer pool，
     #    装完请在面板「数据库 → 设置」压到 limit 的 25%~50%
-    #    详见 docs/operations.md「资源上限与规划」
     # mem_limit: 4g
     # cpus: 2.0
 

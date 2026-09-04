@@ -35,9 +35,9 @@ data/                        （./data:/data）
 │   └── server/data/   ↔ 容器 /www/server/data （MySQL）
 ├── system/                   系统层
 │   ├── panel/         ← /www 面板 overlay upper（server/panel、wwwlogs 等增量）
-│   ├── etc/ usr/ var/ root/ opt/ home/ srv/   ← 各目录 overlay upper
-│   └── .baota/        ← 项目元数据（锁、版本记录、启动历史）
-└── .baota/                   ← 数据层状态（overlay workdir，隐藏）
+│   ├── etc usr var root opt home srv   ← 各目录 overlay upper
+│   └── .baota/        ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
+└── .baota/                   ← 数据层状态（并发锁，隐藏）
 ```
 
 容器内看到的路径与官方一致：面板在 `/www/server/panel`，站点在
@@ -65,20 +65,23 @@ data/                        （./data:/data）
 ### 挂载原理
 
 ```
-/www（面板）  ←overlay→  upper = data/system/panel，work = data/system/.baota/work
-/etc usr …    ←overlay→  upper = data/system/<同名>
-/www/wwwroot  ←bind→     源 = data/www/wwwroot        （直通）
-/www/backup   ←bind→     源 = data/www/backup
-/www/server/data ←bind→  源 = data/www/server/data
+/www（面板）    ←overlay→  upper = data/system/panel，work = data/system/.baota/www.work
+/etc usr …      ←overlay→  upper = data/system/<同名>，work = data/system/.baota/<同名>.work
+/www/wwwroot    ←bind→     源 = data/www/wwwroot        （直通）
+/www/backup     ←bind→     源 = data/www/backup
+/www/server/data ←bind→    源 = data/www/server/data
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
 ```
 
 overlay 挂载显式带 `index=off`：同 upper 换 lower（升级）需要它。
 overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
+> workdir 路径最后那一层 `work`（`<目录>.work/work`）是**内核**在挂载时建的，
+> 属内核行为、无法省。workdir 每次启动都会清空重建，里面没有需要保留的数据。
+
 > 有人会问：为什么不直接 `mount --bind` 把 `/etc`、`/usr` 挂出来，那样更简单。
 > 那种做法能让数据不丢，但会让镜像升级在这两个目录上**彻底失效**。
-> 完整对比与取舍见[持久化方案选型](persistence-alternatives.md)。
+> 完整对比与取舍见[持久化方案选型](alternatives.md)。
 
 ### 换镜像后会发生什么
 
@@ -122,7 +125,7 @@ overlay 把「删除镜像自带文件」记成字符设备节点（0:0）、「
 
 ---
 
-## ⛔ 硬约束
+## 硬约束
 
 - **`data/` 必须落在 ext4 / btrfs / xfs 上**。SMB/NFS/exFAT/NTFS/macOS 目录会
   「挂载成功但只读」、写入静默失败（启动时会实测并告警）

@@ -2,9 +2,6 @@
 #  🐳 宝塔 Linux 面板（stable 通道：稳定线 12.x）—— 容器编排
 #     已按飞牛 NAS / fnOS 适配；非飞牛的 x86_64 Linux 服务器可直接用本文件。
 #
-#     release/docker-compose.yml 与本文件只有 image 标签一处不同，
-#     那里不再重复这些注释，两边的原理与注意事项以本文件为准。
-#
 #  🐂 飞牛部署：Docker → 项目 → 新建项目 → 项目名 baota → 粘贴本文件
 #            → 把 image 改成自己的镜像名 → 立即构建
 #            → 日志里拿首次登录信息（或 docker compose logs -f baota）
@@ -12,10 +9,7 @@
 #  💾 数据默认存在本文件同级的 data/ 目录（飞牛项目就落在存储池上，直接用）；
 #  要换盘就改成绝对路径，例如 /vol2/baota/data。
 #
-#  🔌 端口：fnOS 占用 80/443/22，这里分别挪到 8880/8443/2222；
-#        需要宿主机 80/443 时的改法见 docs/getting-started.md。
-#
-#  📖 逐项说明见 docs/configuration.md，备份见 docs/backup-restore.md
+#  🔌 端口：fnOS 占用 80/443/22，这里分别挪到 8880/8443/2222。
 # ==============================================================================
 name: baota
 
@@ -73,7 +67,6 @@ services:
     #   例：8G 机器、飞牛占 2G → 给 4g 左右
     # ⚠️ 先设好 limit 再装 MySQL：宝塔按「容器看到的内存」自动调大 buffer pool，
     #    装完请在面板「数据库 → 设置」压到 limit 的 25%~50%
-    #    详见 docs/operations.md「资源上限与规划」
     # mem_limit: 4g
     # cpus: 2.0
 
@@ -84,7 +77,7 @@ services:
     #   PANEL_PASSWORD    随机 12 位，见首次启动日志
     #   PANEL_SAFE_PATH   随机 8 位，见面板地址 /login 前那一段
     #   ROOT_PASSWORD     随机 12 位，见首次启动日志
-    # 想自己指定就取消注释填写，详见 docs/getting-started.md「首次登录凭据」。
+    # 想自己指定就取消注释填写。
     # 口令写在本文件等于公开，既要固定又要保密请改用同目录的 .env。
     #
     # ★ 这些只在首次启动（data/ 为空）生效，之后再改这里无效，改用：

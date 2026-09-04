@@ -9,14 +9,15 @@ baota-docker/
 ├── LICENSE                    MIT
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
 ├── report.md                  每日巡检报告（CI 生成并回写，不要手改）
+├── drift.md                   漂移检测报告（CI 生成并回写，不要手改）
 │
 ├── docs/                      使用文档（本目录）
 │   ├── README.md              文档索引
-│   ├── getting-started.md     快速开始、端口、首次登录凭据
+│   ├── quickstart.md          快速开始、端口、首次登录凭据
 │   ├── persistence.md         持久化原理、候选方案、硬约束
-│   ├── persistence-alternatives.md  方案选型：overlay vs bind mount
+│   ├── alternatives.md        方案选型：overlay vs bind mount
 │   ├── configuration.md       compose 逐项配置详解
-│   ├── backup-restore.md      备份与恢复
+│   ├── backup.md              备份与恢复
 │   ├── upgrade.md             镜像升级、回滚、跨机器迁移
 │   ├── operations.md          运维手册
 │   ├── faq.md                 常见问题
@@ -50,8 +51,9 @@ baota-docker/
     ├── dependabot.yml             每周检查并升级 Actions 版本（只开 PR，不自动合并）
     ├── scripts/
     │   ├── inject-report.py       把 report.md 注入 README 的报告标记区
-    │   └── health-check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
-    └── workflows/                 两个通道的构建发布 + 每日巡检工作流
+    │   ├── health-check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
+    │   └── drift-check/           漂移检测脚本（目录漂移 + 升级入口漂移）
+    └── workflows/                 两个通道的构建发布 + 每日巡检 + 漂移检测工作流
 ```
 
 ### 关键约定
@@ -67,6 +69,35 @@ baota-docker/
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。
   改告警文案不会影响 CI 门禁
 
+## 漂移检测
+
+`.github/workflows/drift-check.yml` 每天跑一次，**只监测、不发布**。
+它盯的是两类会破坏本项目的上游变更：
+
+| 风险 | 后果 | 检测方式 |
+|---|---|---|
+| **目录漂移** | 安装产生的文件落到已知持久化目录集合之外 → 那部分数据不会被持久化（静默丢数据） | 在一次性容器里装前 / 装后各做一次文件系统快照，比对顶层目录新增量 |
+| **升级入口漂移** | `patch-panel.sh` 依赖的面板升级脚本被上游改名 / 删除 / 新增 → 面板绕过禁用逻辑自行升级，破坏「版本由镜像决定」 | 扫描 `/www/server/panel/script`，核对目标清单是否缺失，并发现疑似新增的升级脚本 |
+
+两级节奏，控制成本：
+
+- **probe**（每天，几十秒）：取两个通道安装脚本的 sha256 与版本号，
+  与 `.github/scripts/drift-check/baseline.json` 比对，判断是否有变更
+- **analyze**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面两项比对
+
+产物与提醒：
+
+- 报告写入仓库根目录 `drift.md`（CI 回写，不要手改）
+- 检测到关键漂移时，开一个带 `upstream-change` 标签的 issue，
+  并让工作流失败以持续提醒 —— **处理完之前每天都会提醒**，处理后关闭 issue 即可
+
+维护要点（改上游相关代码时同步）：
+
+- 已知持久化目录集合在 `.github/scripts/drift-check/install-diff.sh` 的 `KNOWNS`，
+  须与 `shared/scripts/init-mounts.sh` 保持一致
+- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 targets 保持一致
+- 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
+
 ## 🛠️ 本地构建
 
 ```bash
@@ -81,9 +112,23 @@ make lint                        # shellcheck + bash -n + YAML 语法
 
 > ⚠️ `make lint` 里的 shellcheck **未安装时会被直接跳过**（本地很常见），但 CI 上会真正
 > 执行，且 **warning 级别即判失败** —— 本地跑通不代表 CI 能过。
-> 装一个再验：`brew install shellcheck`；没有 brew 时用
-> `python3 -m pip install --user shellcheck-py`（装完确认它在 `PATH` 里，否则 make 仍会跳过）。
+
+安装与启用：
+
+```bash
+brew install shellcheck                        # 有 brew 用这个
+python3 -m pip install --user shellcheck-py    # 没有 brew 时的替代
 ```
+
+⚠️ 装完**必须确认 shellcheck 真的进了 `PATH`**，否则 make 仍会静默跳过——
+pip 的 `--user` 安装位置不一定是 `~/.local/bin`：macOS 系统 Python 装在
+`~/Library/Python/<版本>/bin`。临时启用一行搞定：
+
+```bash
+PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/dev/null | head -1)"):$PATH" make lint
+```
+
+验证是否生效：`make lint` 输出应出现「shellcheck 通过」，而不是「未安装，跳过」。
 
 ## 🧩 架构支持
 

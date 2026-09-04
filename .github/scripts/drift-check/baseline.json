@@ -1,0 +1,10 @@
+{
+  "stable_sha": "",
+  "release_sha": "",
+  "stable_version": "",
+  "release_version": "",
+  "targets": {
+    "stable": [],
+    "release": []
+  }
+}

@@ -28,6 +28,13 @@ SHELL   := /bin/bash
 ROOT_DIR   := $(shell pwd)
 CHANNEL_DIR := $(ROOT_DIR)/$(CHANNEL)
 
+# shellcheck 可能由 pip --user 安装（macOS 系统 Python 在 ~/Library/Python/<版本>/bin，
+# 不在默认 PATH）。已在 PATH 就直接用，否则自动定位，避免本地 lint 静默跳过
+SHELLCHECK_BIN := $(shell command -v shellcheck 2>/dev/null || find $(HOME)/Library/Python $(HOME)/.local -name shellcheck -type f 2>/dev/null | head -1)
+ifneq ($(SHELLCHECK_BIN),)
+export PATH := $(dir $(SHELLCHECK_BIN)):$(PATH)
+endif
+
 .DEFAULT_GOAL := help
 .PHONY: help build up down restart logs ps exec health health-mounts health-upgrade \
         health-all backup reset-system reset-panel lint version
@@ -197,7 +204,8 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@echo '--- bash -n ---'
 	@for f in shared/build/*.sh shared/scripts/entrypoint.sh \
 	          shared/scripts/patch-panel.sh shared/scripts/backup.sh \
-	          .github/scripts/health-check/*.sh; do \
+	          .github/scripts/health-check/*.sh \
+	          .github/scripts/drift-check/*.sh; do \
 	    bash -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- sh -n (POSIX) ---'
@@ -209,9 +217,10 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@if command -v shellcheck >/dev/null 2>&1; then \
 	    shellcheck -x -S warning shared/build/*.sh shared/scripts/*.sh \
 	               .github/scripts/health-check/*.sh \
+	               .github/scripts/drift-check/*.sh \
 	        && echo '  shellcheck 通过'; \
 	 else \
-	    echo '  未安装 shellcheck，跳过（brew install shellcheck）'; \
+	    echo '  未安装 shellcheck，跳过（安装与排查见 docs/development.md「本地构建」）'; \
 	 fi
 	@echo '--- YAML 语法 ---'
 	@for f in stable/docker-compose.yml release/docker-compose.yml \

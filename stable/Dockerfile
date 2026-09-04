@@ -11,7 +11,7 @@
 #    /etc /usr /var /www /root /opt /home /srv 采用 overlay 分层持久化
 #      lowerdir = 镜像内的同名目录（随镜像升级而更新）
 #      upperdir = /data/<dir> 或 /data/system/<dir>（可写层直接就叫目录名，与容器内路径一一对应）
-#      workdir  = /data/.baota/work/<dir>.work 或 /data/system/.baota/work/<dir>.work（内部工作目录，须与 upper 同文件系统）
+#      workdir  = /data/system/.baota/<dir>.work（内部工作目录，内核会在其中再建一层 work；须与 upper 同文件系统）
 #    容器内看到的仍是原路径，读写无感知；所有新增 / 修改 / 删除
 #    （含 overlay whiteout）都落在 /data/<dir> 里。
 #    对比「直接 VOLUME ["/etc","/usr","/www"]」的朴素做法：卷为空时 Docker 不会复制

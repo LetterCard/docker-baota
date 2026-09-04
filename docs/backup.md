@@ -130,7 +130,7 @@ docker exec baota baota-backup --rsync /backup
 
 ```
 /backup/
-├── data/            ← 整份 data 卷：业务 www/（wwwroot·backup·server/data）
+├── data/            ← 整份 data 卷：业务 www/（wwwroot / backup / server/data）
 │                      + 面板 upper system/panel/ + 系统层 system/<dir>/
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
@@ -172,7 +172,7 @@ tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|system/panel
 
 ---
 
-## ♻️ 恢复
+## 恢复
 
 ```bash
 docker compose down
