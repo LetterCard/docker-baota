@@ -216,7 +216,7 @@ docker compose logs baota
 
 > 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-09-04 11:50:17
+- 生成时间（UTC）：2026-09-04 12:48:24
 - 触发方式：workflow_dispatch
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）
 - 验证脚本：`.github/scripts/health-check/published-check.sh`
@@ -239,7 +239,7 @@ docker compose logs baota
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ✅ 通过 19 / 失败 0 |
-| 耗时 | 120s |
+| 耗时 | 124s |
 
 #### 测试项
 
@@ -266,35 +266,35 @@ docker compose logs baota
 #### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 19:48:40 - 已获得系统层持久化层独占锁
-⚙️ [init] 19:48:43 - 已获得数据层持久化层独占锁
-⚙️ [init] 19:48:43 - 持久化层并发保护已就位
-⚙️ [init] 19:48:43 - 持久化已挂载 /www <- /data/system/panel
-⚙️ [init] 19:48:43 - 持久化已挂载 /etc <- /data/system/etc
-⚙️ [init] 19:48:43 - 持久化已挂载 /usr <- /data/system/usr
-⚙️ [init] 19:48:43 - 持久化已挂载 /var <- /data/system/var
-⚙️ [init] 19:48:43 - 持久化已挂载 /root <- /data/system/root
-⚙️ [init] 19:48:43 - 持久化已挂载 /opt <- /data/system/opt
-⚙️ [init] 19:48:43 - 持久化已挂载 /home <- /data/system/home
-⚙️ [init] 19:48:43 - 持久化已挂载 /srv <- /data/system/srv
-⚙️ [init] 19:48:43 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 19:48:43 - 直通挂载 /www/backup <- /data/www/backup
-⚙️ [init] 19:48:43 - 直通挂载 /www/server/data <- /data/www/server/data
-🚀 [entrypoint] 19:48:43 - 首次使用这份持久化数据，记录镜像版本 12.0.0
-🩹 [patch] 19:48:43 - 校验通过：面板自更新已禁用（不波及插件 / 依赖更新通道）
-🩹 [patch] 19:48:43 - 已替换 8 个面板更新脚本，并关闭自动更新
-🚀 [entrypoint] 19:48:43 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
-🚀 [entrypoint] 19:48:43 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
-🚀 [entrypoint] 19:48:43 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+⚙️ [init] 20:46:50 - 已获得系统层持久化层独占锁
+⚙️ [init] 20:46:53 - 已获得数据层持久化层独占锁
+⚙️ [init] 20:46:53 - 持久化层并发保护已就位
+⚙️ [init] 20:46:53 - 持久化已挂载 /www <- /data/system/panel
+⚙️ [init] 20:46:53 - 持久化已挂载 /etc <- /data/system/etc
+⚙️ [init] 20:46:53 - 持久化已挂载 /usr <- /data/system/usr
+⚙️ [init] 20:46:53 - 持久化已挂载 /var <- /data/system/var
+⚙️ [init] 20:46:53 - 持久化已挂载 /root <- /data/system/root
+⚙️ [init] 20:46:53 - 持久化已挂载 /opt <- /data/system/opt
+⚙️ [init] 20:46:53 - 持久化已挂载 /home <- /data/system/home
+⚙️ [init] 20:46:53 - 持久化已挂载 /srv <- /data/system/srv
+⚙️ [init] 20:46:53 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
+⚙️ [init] 20:46:53 - 直通挂载 /www/backup <- /data/www/backup
+⚙️ [init] 20:46:53 - 直通挂载 /www/server/data <- /data/www/server/data
+🚀 [entrypoint] 20:46:53 - 首次使用这份持久化数据，记录镜像版本 12.0.0
+🩹 [patch] 20:46:53 - 校验通过：面板自更新已禁用（不波及插件 / 依赖更新通道）
+🩹 [patch] 20:46:53 - 已替换 8 个面板更新脚本，并关闭自动更新
+🚀 [entrypoint] 20:46:53 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
+🚀 [entrypoint] 20:46:53 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
+🚀 [entrypoint] 20:46:53 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 19:48:44 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 19:48:44 - 面板用户：baota
-🚀 [entrypoint] 19:48:44 - 面板口令：***已脱敏***
-🚀 [entrypoint] 19:48:44 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 19:48:44 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 19:48:44 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 20:46:53 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 20:46:53 - 面板用户：baota
+🚀 [entrypoint] 20:46:53 - 面板口令：***已脱敏***
+🚀 [entrypoint] 20:46:53 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 20:46:53 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 20:46:53 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 19:48:44 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 20:46:53 - 移交 systemd：/usr/sbin/init
 ```
 
 ---
@@ -308,7 +308,7 @@ docker compose logs baota
 | 镜像 | `bugseeker/baota:13.0.0` |
 | 期望宝塔版本 | `13.0.0` |
 | 结果 | ✅ 通过 19 / 失败 0 |
-| 耗时 | 114s |
+| 耗时 | 117s |
 
 #### 测试项
 
@@ -335,35 +335,35 @@ docker compose logs baota
 #### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 19:48:35 - 已获得系统层持久化层独占锁
-⚙️ [init] 19:48:38 - 已获得数据层持久化层独占锁
-⚙️ [init] 19:48:38 - 持久化层并发保护已就位
-⚙️ [init] 19:48:38 - 持久化已挂载 /www <- /data/system/panel
-⚙️ [init] 19:48:38 - 持久化已挂载 /etc <- /data/system/etc
-⚙️ [init] 19:48:38 - 持久化已挂载 /usr <- /data/system/usr
-⚙️ [init] 19:48:38 - 持久化已挂载 /var <- /data/system/var
-⚙️ [init] 19:48:38 - 持久化已挂载 /root <- /data/system/root
-⚙️ [init] 19:48:38 - 持久化已挂载 /opt <- /data/system/opt
-⚙️ [init] 19:48:38 - 持久化已挂载 /home <- /data/system/home
-⚙️ [init] 19:48:38 - 持久化已挂载 /srv <- /data/system/srv
-⚙️ [init] 19:48:38 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 19:48:38 - 直通挂载 /www/backup <- /data/www/backup
-⚙️ [init] 19:48:38 - 直通挂载 /www/server/data <- /data/www/server/data
-🚀 [entrypoint] 19:48:38 - 首次使用这份持久化数据，记录镜像版本 13.0.0
-🩹 [patch] 19:48:38 - 校验通过：面板自更新已禁用（不波及插件 / 依赖更新通道）
-🩹 [patch] 19:48:38 - 已替换 8 个面板更新脚本，并关闭自动更新
-🚀 [entrypoint] 19:48:38 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
-🚀 [entrypoint] 19:48:38 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
-🚀 [entrypoint] 19:48:38 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+⚙️ [init] 20:46:39 - 已获得系统层持久化层独占锁
+⚙️ [init] 20:46:42 - 已获得数据层持久化层独占锁
+⚙️ [init] 20:46:42 - 持久化层并发保护已就位
+⚙️ [init] 20:46:42 - 持久化已挂载 /www <- /data/system/panel
+⚙️ [init] 20:46:42 - 持久化已挂载 /etc <- /data/system/etc
+⚙️ [init] 20:46:42 - 持久化已挂载 /usr <- /data/system/usr
+⚙️ [init] 20:46:42 - 持久化已挂载 /var <- /data/system/var
+⚙️ [init] 20:46:42 - 持久化已挂载 /root <- /data/system/root
+⚙️ [init] 20:46:42 - 持久化已挂载 /opt <- /data/system/opt
+⚙️ [init] 20:46:42 - 持久化已挂载 /home <- /data/system/home
+⚙️ [init] 20:46:42 - 持久化已挂载 /srv <- /data/system/srv
+⚙️ [init] 20:46:42 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
+⚙️ [init] 20:46:42 - 直通挂载 /www/backup <- /data/www/backup
+⚙️ [init] 20:46:42 - 直通挂载 /www/server/data <- /data/www/server/data
+🚀 [entrypoint] 20:46:42 - 首次使用这份持久化数据，记录镜像版本 13.0.0
+🩹 [patch] 20:46:42 - 校验通过：面板自更新已禁用（不波及插件 / 依赖更新通道）
+🩹 [patch] 20:46:42 - 已替换 8 个面板更新脚本，并关闭自动更新
+🚀 [entrypoint] 20:46:42 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
+🚀 [entrypoint] 20:46:42 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
+🚀 [entrypoint] 20:46:42 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 19:48:39 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 19:48:39 - 面板用户：baota
-🚀 [entrypoint] 19:48:39 - 面板口令：***已脱敏***
-🚀 [entrypoint] 19:48:39 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 19:48:39 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 19:48:39 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 20:46:43 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 20:46:43 - 面板用户：baota
+🚀 [entrypoint] 20:46:43 - 面板口令：***已脱敏***
+🚀 [entrypoint] 20:46:43 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 20:46:43 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 20:46:43 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 19:48:39 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 20:46:43 - 移交 systemd：/usr/sbin/init
 ```
 <!-- DAILY-VERIFY-REPORT:END -->
 
