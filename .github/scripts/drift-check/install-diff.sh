@@ -465,7 +465,7 @@ else
 fi
 {
     echo
-    echo '### 3. 自动更新标记'
+    echo '### 4. 自动更新标记'
     echo
     echo "\`${AUTO_UPDATE_PL}\`：${AUTO_FLAG}"
 } >> "$OUT_MD"

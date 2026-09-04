@@ -54,7 +54,7 @@
 - `class/system.py:update6.sh`
 - `class/jobs.py:update_panel.sh`
 
-### 3. 自动更新标记
+### 4. 自动更新标记
 
 `/www/server/panel/data/autoUpdate.pl`：安装后不存在（上游默认未开启自动更新）
 
@@ -108,7 +108,7 @@
 - `class/system.py:update6.sh`
 - `class/jobs.py:update_panel.sh`
 
-### 3. 自动更新标记
+### 4. 自动更新标记
 
 `/www/server/panel/data/autoUpdate.pl`：安装后不存在（上游默认未开启自动更新）
 

@@ -126,6 +126,27 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 所以 `baota-backup` 必须带 `--xattrs`；用图形界面「压缩 / 复制」备份 `data/` 会丢扩展属性。
 NAS 快照（btrfs / zfs）是文件系统级的，天然保留一切，是最省心的方案。
 
+## 每日巡检：源码漂移检测（drift-check）
+
+与镜像验证并行的另一条每日线：**对上游源码的漂移检测**（`drift-check.yml`，只监测、不发布）。
+
+```
+probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号，与 baseline.json 比对
+  └─ 有变更 → analyze（真装一遍，几分钟）
+        ├─ 1. 目录漂移：装前 / 装后快照，新文件是否落在已知持久化目录集合外
+        ├─ 2. 升级入口：script/ 目标清单核对 + 隐藏入口（local_fix.sh 类）内容兜底扫描
+        ├─ 3. 代码级更新旁路：全量扫描「curl|bash / wget&&bash 现拉 /install/update*.sh」，
+        │     与 KNOWN_BYPASS 基线比对 —— 这类路径不经 script/，stub 拦不住，
+        │     运行期只能靠 audit_panel_version 兜底发现（见 docs/development.md）
+        └─ 4. 自动更新标记（信息项）
+```
+
+- 报告 CI 回写 `drift.md`；关键漂移开 BUG issue 并让工作流失败，**处理前每天都会提醒**
+- 基线与 `patch-panel.sh` 的同步关系（TARGETS / EXEMPT / KNOWN_BYPASS）
+  见 docs/development.md「漂移检测」与「禁用面板更新的防御边界」
+- 面板代码里已知 3 处代码级旁路（task.py / class/system.py / class/jobs.py，
+  12.0.0 与 13.0.0 一致），属**文档化的已知残余**，出现在报告里不算漂移
+
 ## 每日巡检：验证已发布镜像
 
 ```
