@@ -50,10 +50,12 @@ EXEMPT='upgrade_gevent.sh
 upgrade_flask.sh
 upgrade_firewall.py'
 
-# 内容分类的静态特征（启发式，宁误报不漏报——误放行的代价是面板自更新、静默破坏契约）
-# ① 面板自身升级：命中任一即视为升级入口，必须纳入 patch-panel.sh 的 targets
+# 内容分类的静态特征（启发式，仅作报告提示，不做安全判定）
+# 正向上游特征难跟上宝塔变化，故绝不据其自动豁免：命中②也只转人工确认，
+# 宁可多一次人工、不可静默放过（误豁免 = 面板自更新、破坏版本契约）
+# ① 面板自身升级：命中任一 → 记为「疑似面板升级入口」，转人工确认
 PANEL_UPDATE_SIGNALS='panel_version|update_panel|updateLinux|/www/server/panel/class|更新面板|面板升级|安装面板'
-# ② 依赖 / 插件升级：命中且未命中① → 自动豁免（仅信息项）
+# ② 依赖 / 插件升级：命中仅作提示，仍转人工确认（确认后加入 EXEMPT）
 DEP_PLUGIN_SIGNALS='pyenv/bin/pip|pip3? install|panel/plugin|gevent|flask|防火墙|流量统计'
 
 PANEL_SCRIPT_DIR=/www/server/panel/script
@@ -91,7 +93,7 @@ is_exempt() {
     return 1
 }
 
-# 对未纳入补丁目标的候选脚本做内容分类：panel=面板升级入口 / dep=依赖或插件 / unknown=存疑
+# 对未纳入补丁目标的候选脚本做内容分类（仅作提示，安全判定一律转人工）：panel / dep / unknown
 classify_entry() {
     local name="$1" content
     content=$(docker exec "$CNAME" cat "${PANEL_SCRIPT_DIR}/${name}" 2>/dev/null || true)
@@ -224,9 +226,9 @@ EOS
     # 先收集全部文件名再落盘，避免管道把各分类数组的赋值困在子 shell 里
     ALL_NAMES=()
     ADDED_PANEL=()
-    AUTO_EXEMPT=()
     UNKNOWN=()
     EXEMPT_FOUND=()
+    declare -A HINT=()
     for name in "${!FOUND[@]}"; do
         ALL_NAMES+=("$name")
         is_target "$name" && continue
@@ -241,8 +243,7 @@ EOS
         kind=$(classify_entry "$name")
         case "$kind" in
             panel)   ADDED_PANEL+=("$name") ;;
-            dep)     AUTO_EXEMPT+=("$name") ;;
-            *)       UNKNOWN+=("$name") ;;
+            *)       UNKNOWN+=("$name"); HINT["$name"]="$kind" ;;
         esac
     done
     if [ ${#ALL_NAMES[@]} -gt 0 ]; then
@@ -292,25 +293,21 @@ EOS
         CRIT=1
     fi
 
-    if [ ${#AUTO_EXEMPT[@]} -gt 0 ]; then
-        {
-            echo
-            echo '✅ 内容判定为依赖 / 插件升级（自动豁免，信息项）：'
-            echo
-            for n in "${AUTO_EXEMPT[@]}"; do echo "- \`$n\`"; done
-        } >> "$OUT_MD"
-    fi
-
     if [ ${#UNKNOWN[@]} -gt 0 ]; then
         {
             echo
-            echo '⚠️ 无法自动分类的升级脚本（需人工确认，宁误报不漏报）：'
+            echo '⚠️ 未纳入补丁目标与 EXEMPT 的升级脚本（需人工确认，宁误报不漏报）：'
             echo
-            for n in "${UNKNOWN[@]}"; do echo "- \`$n\`"; done
+            for n in "${UNKNOWN[@]}"; do
+                echo "- \`$n\`"
+                if [ "${HINT[$n]:-}" = "dep" ]; then
+                    echo '    （内容命中依赖 / 插件升级特征，疑似依赖或插件升级；确认后加入 EXEMPT 而非 targets）'
+                fi
+            done
             echo
-            echo '确认是依赖 / 插件升级后加入本脚本的 EXEMPT；是面板升级入口则加入 targets。'
+            echo '确认是依赖 / 插件升级 → 加入本脚本的 EXEMPT；是面板升级入口 → 加入 patch-panel.sh 的 targets。'
         } >> "$OUT_MD"
-        warn "无法自动分类的升级脚本：${UNKNOWN[*]}"
+        warn "需人工确认的升级脚本：${UNKNOWN[*]}"
         CRIT=1
     fi
 else
