@@ -106,7 +106,55 @@ baota-docker/
   专门抓名字不带 upgrade/update 前缀的升级入口（如 local_fix.sh），避免被文件名模式漏掉。
   改 `PANEL_UPDATE_SIGNALS` / `DEP_PLUGIN_SIGNALS` / `HIDDEN_SIGNALS` 时先核对真实脚本内容。
   两通道面板源码包可用 `bash .github/scripts/drift-check/analyze-versions.sh [stable|release]` 真装后抓取分析。
+- 代码级更新旁路基线在同一文件的 `KNOWN_BYPASS`（签名 = `文件:拉取的update脚本名`，
+  同文件多行 / 注释行自动合并）。上游新增签名即关键漂移；旁路明细与加固方案见下文
+  「禁用面板更新的防御边界」
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
+
+## 禁用面板更新的防御边界
+
+「面板版本由镜像决定」靠三层机制，每层各挡一类失效：
+
+| 层 | 机制 | 挡什么 | 性质 |
+|---|---|---|---|
+| ① | `patch-panel.sh` 把 `script/` 下 8 个升级入口替换为 stub，并删 `autoUpdate.pl` | 经由 `script/` 目录的常规更新流（面板「更新」按钮、`local_fix.sh` 修复流） | 阻断 |
+| ② | 每次启动重放补丁并 `verify`（entrypoint 自动执行） | 补丁被用户还原备份 / 覆盖文件冲掉后未生效 | 阻断（不生效就拦下启动） |
+| ③ | `entrypoint` 的 `audit_panel_version`：比对 `public.version()` 与镜像 `VERSION` | 一切未被 ①② 挡住的更新——升级一旦成功，版本必然对不上 | **仅检测**（告警不阻断） |
+
+### 已知的代码级更新旁路（stub 拦不住）
+
+宝塔的 Python 代码里存在**绕过 `script/` 目录**、现拉官方更新脚本直接执行的路径
+（12.0.0 / 13.0.0 真装实测，两通道一致，共 3 处）：
+
+| 位置 | 代码 | 触发条件 |
+|---|---|---|
+| `task.py` `update_panel()` | `curl -k https://…/install/update6.sh\|bash` | 仅当 `/www/server/panel/init.sh` 缺失时面板启动（修复场景） |
+| `class/system.py` `_repair_panel()` | `wget …/install/update6.sh && bash update.sh` | 面板「修复」且 `script/local_fix.sh` 不存在时（正常被 stub 占位，不走此分支） |
+| `class/jobs.py` `update_py37()` | `curl …/install/update_panel.sh\|bash` | 「升级到独立运行环境」类动作 |
+
+这些路径不经过任何被 stub 的文件，且**本项目刻意不修改面板代码**，所以无法在此层阻断：
+
+- 每日漂移检测对解包源码全量扫描这类路径（`install-diff.sh` 的 `KNOWN_BYPASS` 基线），
+  上游新增 / 改动 / 消失都会出现在 `drift.md`；
+- 即使真被触发，第 ③ 层会在下次启动时以「面板实际版本与镜像版本不一致」告警暴露，
+  `make reset-panel CONFIRM=yes` 可把面板代码重置回镜像版本。
+
+### 可选加固：网络层拦截更新脚本（egress）
+
+不改面板代码的前提下还能在网络层收紧。用 iptables 字符串匹配**只拦官方更新脚本的
+HTTP 路径**，不误伤插件与软件商店——插件走 `/install/plugin/...`、依赖库走
+`/install/libsh/...`、软件走 `/install/0/...`，均不含 `install/update`：
+
+```bash
+# 容器内执行；容器重建后会丢失，需自行持久化（如 compose 的 post_start）
+iptables -I OUTPUT -p tcp --dport 80 -m string --string '/install/update' --algo bm -j REJECT
+```
+
+局限要清楚：
+
+- 只对 **HTTP** 有效（路径明文可见）。3 条旁路里经 `public.get_url()` 的两条（节点多为 `http://IP`）可被拦住；
+- `task.py` 硬编码的 `https://download.bt.cn/install/update6.sh` 走 TLS，路径已加密无法按路径匹配；
+  按域名拦 `download.bt.cn` 会连插件市场一起断——这一条仍靠第 ③ 层兜底。
 
 ## 🛠️ 本地构建
 

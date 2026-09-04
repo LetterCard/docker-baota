@@ -58,6 +58,12 @@ echo "===== 全目录内引用自更新机制的脚本（任意文件名，按�
 grep -rlE 'panel_version|update_panel|UpdatePanel|autoUpdate|SetPanelUpdate|/www/server/panel/class' "$SD" 2>/dev/null \
   | sed "s#$SD/##" | sort
 echo
+echo "===== 代码级更新旁路（现拉 /install/update*.sh 直接执行，不经 script/，stub 拦不住） ====="
+grep -rInE 'curl[^|]*\|[[:space:]]*bash|wget[^;&]*&&[[:space:]]*bash' "$PD" \
+    --exclude-dir=script --exclude-dir=install --exclude-dir=pyenv \
+    --exclude-dir=data --exclude-dir=logs --exclude-dir=vhost 2>/dev/null \
+  | grep -E '/install/update[A-Za-z0-9_.-]*\.sh' || echo '（无）'
+echo
 echo "===== upgrade*/update* 前缀文件：头部 + 信号命中 ====="
 for f in "$SD"/upgrade* "$SD"/update*; do
   [ -e "$f" ] || continue

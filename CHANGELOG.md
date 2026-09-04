@@ -32,6 +32,17 @@ data/                        （./data:/data）
 
 ### ✨ 新增
 
+- **代码级更新旁路检测**（`install-diff.sh` 新增第 3 节，`analyze-versions.sh` 同步）。
+  宝塔面板代码里存在绕过 `script/` stub、现拉 `/install/update*.sh` 直接执行的更新路径
+  （12.0.0 / 13.0.0 真装实测各 3 处，经 `task.py` / `class/system.py` / `class/jobs.py`）。
+  漂移检测现按 `KNOWN_BYPASS` 基线全量扫描：新增签名即关键漂移（CRIT=1），
+  已知旁路消失则提示复核文档；特征为「执行习语 + 官方更新路径」双条件，
+  依赖库 / 软件安装等合法 `curl|bash` 不误报（实测误报 0）
+- **docs/development.md 新增「禁用面板更新的防御边界」**：三层防御的分工与性质
+  （阻断 / 阻断 / 仅检测）、3 条已知代码级旁路的触发条件、可选的网络层拦截配方
+  （HTTP 路径精准匹配，不误伤插件市场；HTTPS 旁路靠版本一致性检测兜底）
+- **README / docs/quickstart.md 补边界说明与「已知限制」**：版本一致性告警是检测
+  而非阻断，处理方式为 `make reset-panel`
 - **`baota-backup` 备份工具**（`shared/scripts/backup.sh`，软链到
   `/usr/local/bin/baota-backup`）。在容器里 `docker exec baota baota-backup` 即可，
   替你绕开手工 tar 的三个坑：

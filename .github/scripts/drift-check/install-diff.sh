@@ -7,6 +7,10 @@
 #   2) 升级入口漂移：shared/scripts/patch-panel.sh 依赖的面板升级脚本集合
 #      是否被上游改名 / 删除 / 新增。一旦漏掉新入口，面板就会绕过禁用逻辑
 #      自行升级，破坏「面板版本由镜像决定」这条核心契约。
+#   3) 代码级更新旁路：面板 Python 代码里「现拉官方更新脚本并直接执行」的路径
+#      （curl|bash / wget&&bash 拉取 /install/update*.sh）。这类路径不经 script/
+#      目录，stub 拦不住，只能靠运行期版本一致性检测兜底发现（检测而非阻断）。
+#      与 KNOWN_BYPASS 基线比对：新增签名 = 关键漂移，需评估加固或更新文档。
 #
 #  做法与 docs/persistence.md 的实测一致：装前快照 → 装 → 装后快照 → 比对。
 #  注意前置软件包必须在「装前快照」之前装完，否则 apt 自身写入的文件会被
@@ -63,6 +67,17 @@ DEP_PLUGIN_SIGNALS='pyenv/bin/pip|pip3? install|panel/plugin|gevent|flask|防火
 # upgrade/update 前缀、却会触发面板升级的脚本，如 local_fix.sh：下载 update6.sh
 # 把面板升到最新版）。这类入口会被文件名模式漏掉，必须靠内容特征兜底
 HIDDEN_SIGNALS='update6\.sh|将面板升级|升级至最新|upgrade_panel'
+
+# 代码级更新旁路基线（12.0.0 / 13.0.0 真装实测，两通道完全一致）：
+# 面板 Python 代码里存在「现拉官方更新脚本并直接执行」的路径，不经 script/ 目录，
+# patch-panel.sh 的 stub 拦不住（详见 docs/development.md「禁用面板更新的防御边界」）。
+# 签名 = 相对 panel 根的文件路径 : 拉取的 /install/update* 脚本名（同文件多个
+# 命中行、被注释的旧代码，都会合并到同一签名——按「哪类旁路」而非「哪一行」跟踪）。
+# 上游新增签名 → 关键漂移（CRIT=1，需评估加固或纳入文档）；已知签名消失 →
+# 仅提示复核文档（旁路减少是好事，不视为关键）
+KNOWN_BYPASS='task.py:update6.sh
+class/system.py:update6.sh
+class/jobs.py:update_panel.sh'
 
 PANEL_SCRIPT_DIR=/www/server/panel/script
 AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
@@ -357,7 +372,91 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-#  3. 自动更新标记（信息项）
+#  3. 代码级更新旁路检测
+#
+#  script/ 的 stub 只能挡住「经过 script/ 目录」的更新入口。宝塔的 Python 代码
+#  里还存在另一类：现拉官方更新脚本（/install/update*.sh）并以 curl|bash /
+#  wget&&bash 直接执行 —— 全程不碰 script/，stub 拦不住，只能靠运行期的版本
+#  一致性检测（entrypoint audit_panel_version）兜底发现。本节把这类路径全量
+#  扫出来与 KNOWN_BYPASS 基线比对：新增 = 关键漂移；消失 = 提示复核文档。
+#
+#  特征 = 「执行习语」（curl … | bash / wget … && bash）与 /install/update*.sh
+#  同行命中。只按官方更新路径过滤，依赖库（install/libsh）、软件安装
+#  （install/0）、站点统计（site_total）等合法 curl|bash 不命中，实测误报 0。
+#  排除目录：script（第 2 节已覆盖且会被 stub）、install（安装器，运行期不执行）、
+#  pyenv / data / logs / vhost（第三方包与用户数据）
+# ------------------------------------------------------------------------------
+if docker exec "$CNAME" bash -c "test -d /www/server/panel" >/dev/null 2>&1; then
+    BYPASS_HITS=$(docker exec -i "$CNAME" bash -s <<'EOS'
+cd /www/server/panel || exit 0
+grep -rInE 'curl[^|]*\|[[:space:]]*bash|wget[^;&]*&&[[:space:]]*bash' . \
+    --exclude-dir=script --exclude-dir=install --exclude-dir=pyenv \
+    --exclude-dir=data --exclude-dir=logs --exclude-dir=vhost 2>/dev/null \
+  | grep -E '/install/update[A-Za-z0-9_.-]*\.sh' \
+  | while IFS= read -r line; do
+        # 行形如 ./task.py:1902:内容 —— 取文件路径与 /install/update*.sh 脚本名拼成签名
+        f=${line%%:*}
+        sig=$(printf '%s\n' "${line#*:}" | grep -oE '/install/update[A-Za-z0-9_.-]*\.sh' | head -1)
+        printf '%s:%s\n' "${f#./}" "${sig#/install/}"
+    done | sort -u
+EOS
+)
+
+    declare -A KNOWN_BYPASS_MAP=() BYPASS_SEEN=()
+    # shellcheck disable=SC2086
+    for kb in $KNOWN_BYPASS; do KNOWN_BYPASS_MAP["$kb"]=1; done
+
+    NEW_BYPASS=()
+    while IFS= read -r sig; do
+        [ -n "${sig:-}" ] || continue
+        BYPASS_SEEN["$sig"]=1
+        [ -n "${KNOWN_BYPASS_MAP[$sig]:-}" ] || NEW_BYPASS+=("$sig")
+    done <<< "$BYPASS_HITS"
+
+    GONE_BYPASS=()
+    # shellcheck disable=SC2086
+    for kb in $KNOWN_BYPASS; do
+        [ -n "${BYPASS_SEEN[$kb]:-}" ] || GONE_BYPASS+=("$kb")
+    done
+
+    {
+        echo
+        echo '### 3. 代码级更新旁路检测'
+        echo
+        echo '> 面板代码里「现拉 `/install/update*.sh` 直接执行」的路径不经 `script/`，'
+        echo '> stub 拦不住，运行期只能靠版本一致性检测兜底发现（详见 docs/development.md）。'
+        echo
+        if [ ${#NEW_BYPASS[@]} -eq 0 ] && [ ${#GONE_BYPASS[@]} -eq 0 ]; then
+            echo "✅ 与基线一致（${#BYPASS_SEEN[@]} 处，全部已知）："
+            echo
+            # shellcheck disable=SC2086
+            for kb in $KNOWN_BYPASS; do echo "- \`$kb\`"; done
+        fi
+        if [ ${#NEW_BYPASS[@]} -gt 0 ]; then
+            echo '❌ 发现基线之外的代码级更新旁路（stub 拦不住，需评估加固或更新文档）：'
+            echo
+            for n in "${NEW_BYPASS[@]}"; do echo "- \`$n\`"; done
+            echo
+        fi
+        if [ ${#GONE_BYPASS[@]} -gt 0 ]; then
+            echo '⚠️ 基线中的旁路已不存在（上游改动，请复核 docs/development.md 的旁路清单）：'
+            echo
+            for n in "${GONE_BYPASS[@]}"; do echo "- \`$n\`"; done
+            echo
+        fi
+    } >> "$OUT_MD"
+
+    if [ ${#NEW_BYPASS[@]} -gt 0 ]; then
+        warn "新增代码级更新旁路：${NEW_BYPASS[*]}"
+        CRIT=1
+    fi
+    if [ ${#GONE_BYPASS[@]} -gt 0 ]; then
+        warn "基线中的更新旁路已消失：${GONE_BYPASS[*]}"
+    fi
+fi
+
+# ------------------------------------------------------------------------------
+#  4. 自动更新标记（信息项）
 # ------------------------------------------------------------------------------
 if docker exec "$CNAME" bash -c "test -f '${AUTO_UPDATE_PL}'" >/dev/null 2>&1; then
     AUTO_FLAG='安装后存在（补丁会在启动期删除，属正常）'
