@@ -80,8 +80,16 @@ data/                        （./data:/data）
   静默丢数据）与升级入口漂移（`patch-panel.sh` 的目标被上游改名 / 删除 / 新增，
   面板会绕过禁用逻辑自行升级）。两级节奏控制成本：probe 每天取版本与脚本 sha256
   对基线比对，有变更才真装一遍；报告回写 `drift.md`，
-  关键漂移开 issue 并持续失败提醒。检测用的目录集合与升级入口清单必须分别与
+  关键漂移开 issue 并持续失败提醒。  检测用的目录集合与升级入口清单必须分别与
   `init-mounts.sh` / `patch-panel.sh` 保持一致
+- **面板自更新禁用的效果断言**（`shared/scripts/patch-panel.sh` 的 `verify_update_disabled`）：
+  此前「替换升级脚本 + 删 autoUpdate.pl」之后没有任何东西确认它真的生效。新增自检——
+  只对已知的面板自身升级入口检查是否已被替换为禁用 stub、并确认 autoUpdate.pl 已删除，
+  只读不写。它**只覆盖「面板自身版本更新」通道，不检查也不阻断**软件商店的插件 / 依赖
+  更新（gevent / flask / 防火墙、nginx / php 等走另一套机制），故不影响插件或依赖更新。
+  `disable_update` 末尾自动调用（构建期 `<- services.sh` 与每次启动 `<- entrypoint.sh` 都跑，
+  失败即拦下发布 / 启动），也可单独以 `patch-panel.sh verify` 调用。升级入口清单抽成
+  文件级 `UPDATE_TARGETS` 一处维护、与禁用逻辑共用，避免两份清单漂移
 - **`make lint` 自动定位 pip 安装的 shellcheck**：macOS 系统 Python 的 `--user`
   安装位置在 `~/Library/Python/<版本>/bin`、不在默认 PATH，此前会静默跳过。
   Makefile 找到就自动加进 PATH，找不到才跳过（安装与排查见 docs/development.md「本地构建」）
