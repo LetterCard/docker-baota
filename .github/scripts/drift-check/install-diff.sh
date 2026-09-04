@@ -50,6 +50,12 @@ EXEMPT='upgrade_gevent.sh
 upgrade_flask.sh
 upgrade_firewall.py'
 
+# 内容分类的静态特征（启发式，宁误报不漏报——误放行的代价是面板自更新、静默破坏契约）
+# ① 面板自身升级：命中任一即视为升级入口，必须纳入 patch-panel.sh 的 targets
+PANEL_UPDATE_SIGNALS='panel_version|update_panel|updateLinux|/www/server/panel/class|更新面板|面板升级|安装面板'
+# ② 依赖 / 插件升级：命中且未命中① → 自动豁免（仅信息项）
+DEP_PLUGIN_SIGNALS='pyenv/bin/pip|pip3? install|panel/plugin|gevent|flask|防火墙|流量统计'
+
 PANEL_SCRIPT_DIR=/www/server/panel/script
 AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
 INSTALL_LOG=/tmp/btpanel-install.log
@@ -83,6 +89,19 @@ is_exempt() {
     # shellcheck disable=SC2086
     for e in $EXEMPT; do [ "$e" = "$n" ] && return 0; done
     return 1
+}
+
+# 对未纳入补丁目标的候选脚本做内容分类：panel=面板升级入口 / dep=依赖或插件 / unknown=存疑
+classify_entry() {
+    local name="$1" content
+    content=$(docker exec "$CNAME" cat "${PANEL_SCRIPT_DIR}/${name}" 2>/dev/null || true)
+    if printf '%s\n' "$content" | grep -Eq "$PANEL_UPDATE_SIGNALS"; then
+        echo panel
+    elif printf '%s\n' "$content" | grep -Eq "$DEP_PLUGIN_SIGNALS"; then
+        echo dep
+    else
+        echo unknown
+    fi
 }
 
 # 统计每个顶层目录的文件数（排除虚拟文件系统与临时目录）
@@ -202,9 +221,11 @@ EOS
         [ -z "${FOUND[$t]:-}" ] && MISSING+=("$t")
     done
 
-    # 先收集全部文件名再落盘，避免管道把 ADDED 的赋值困在子 shell 里
+    # 先收集全部文件名再落盘，避免管道把各分类数组的赋值困在子 shell 里
     ALL_NAMES=()
-    ADDED=()
+    ADDED_PANEL=()
+    AUTO_EXEMPT=()
+    UNKNOWN=()
     EXEMPT_FOUND=()
     for name in "${!FOUND[@]}"; do
         ALL_NAMES+=("$name")
@@ -214,7 +235,14 @@ EOS
             continue
         fi
         case "$name" in
-            upgrade*.py|upgrade*.sh|update*.sh|update*.py) ADDED+=("$name") ;;
+            upgrade*.py|upgrade*.sh|update*.sh|update*.py) ;;
+            *) continue ;;
+        esac
+        kind=$(classify_entry "$name")
+        case "$kind" in
+            panel)   ADDED_PANEL+=("$name") ;;
+            dep)     AUTO_EXEMPT+=("$name") ;;
+            *)       UNKNOWN+=("$name") ;;
         esac
     done
     if [ ${#ALL_NAMES[@]} -gt 0 ]; then
@@ -251,17 +279,38 @@ EOS
         } >> "$OUT_MD"
     fi
 
-    if [ ${#ADDED[@]} -gt 0 ]; then
+    if [ ${#ADDED_PANEL[@]} -gt 0 ]; then
         {
             echo
-            echo '⚠️ 上游出现疑似新增的升级入口（补丁目标列表未包含）：'
+            echo '❌ 内容判定为「面板自身升级入口」，但不在 `patch-panel.sh` 的 targets：'
             echo
-            for n in "${ADDED[@]}"; do echo "- \`$n\`"; done
+            for n in "${ADDED_PANEL[@]}"; do echo "- \`$n\`"; done
             echo
-            echo '若确认是新的升级入口，需加入 `shared/scripts/patch-panel.sh` 的 targets，'
-            echo '否则面板会绕过禁用逻辑自行升级，破坏「版本由镜像决定」的约定。'
+            echo '需加入 targets，否则面板会绕过禁用逻辑自行升级，破坏「版本由镜像决定」的约定。'
         } >> "$OUT_MD"
-        warn "疑似新增升级入口：${ADDED[*]}"
+        warn "未纳入补丁的面板升级入口：${ADDED_PANEL[*]}"
+        CRIT=1
+    fi
+
+    if [ ${#AUTO_EXEMPT[@]} -gt 0 ]; then
+        {
+            echo
+            echo '✅ 内容判定为依赖 / 插件升级（自动豁免，信息项）：'
+            echo
+            for n in "${AUTO_EXEMPT[@]}"; do echo "- \`$n\`"; done
+        } >> "$OUT_MD"
+    fi
+
+    if [ ${#UNKNOWN[@]} -gt 0 ]; then
+        {
+            echo
+            echo '⚠️ 无法自动分类的升级脚本（需人工确认，宁误报不漏报）：'
+            echo
+            for n in "${UNKNOWN[@]}"; do echo "- \`$n\`"; done
+            echo
+            echo '确认是依赖 / 插件升级后加入本脚本的 EXEMPT；是面板升级入口则加入 targets。'
+        } >> "$OUT_MD"
+        warn "无法自动分类的升级脚本：${UNKNOWN[*]}"
         CRIT=1
     fi
 else
