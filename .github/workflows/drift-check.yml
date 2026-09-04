@@ -223,6 +223,15 @@ jobs:
           name: drift-check-detail
           path: /tmp/uw
 
+      # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
+      # 否则 drift.md / baseline.json 已处于 modified，git rebase 会因 dirty tree 中止
+      - name: 🔄 对齐远端
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin "${GITHUB_REF_NAME}"
+          git rebase "origin/${GITHUB_REF_NAME}"
+
       - name: 📝 生成报告并更新基线
         run: |
           set -euo pipefail
@@ -275,11 +284,8 @@ jobs:
       - name: 💾 回写报告与基线
         run: |
           set -euo pipefail
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # 报告区会被本工作流覆盖，rebase 前先取回远端最新，避免 push 冲突
-          git fetch origin "${GITHUB_REF_NAME}"
-          git rebase "origin/${GITHUB_REF_NAME}"
+          # 远端已在「🔄 对齐远端」步骤 rebase 对齐（当时 working tree 还是干净的），
+          # 这里只提交本次生成的报告与基线
           git add "$REPORT" "$BASELINE"
           if git diff --cached --quiet; then
             echo '报告与基线无变化，跳过提交。'
