@@ -32,7 +32,6 @@ LABEL org.opencontainers.image.title="Baota Panel" \
 ARG PANEL_PORT=8888
 ARG PANEL_USER=baota
 ARG DISABLE_PANEL_SSL=true
-ARG DISABLE_PANEL_UPDATE=true
 
 # 官方安装脚本。release 通道用引导式的 install_panel.sh：
 # 它是引导脚本、自身不含版本号，装出的版本由官方服务端决定，
@@ -51,8 +50,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     TZ=Asia/Shanghai \
-    PANEL_PORT=${PANEL_PORT} \
-    DISABLE_PANEL_UPDATE=${DISABLE_PANEL_UPDATE}
+    PANEL_PORT=${PANEL_PORT}
 
 # ==============================================================================
 #  🏗️ 构建（三阶段脚本由两个通道共用，构建日志以 [build] 开头）
@@ -73,7 +71,6 @@ RUN bash /opt/baota/build/panel.sh
 
 # 运行期脚本一律放在 /baota（rootfs 根部，不属于任何持久化目录）：
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖
-COPY shared/scripts/patch-panel.sh /baota/patch-panel.sh
 COPY shared/scripts/healthcheck.sh /baota/healthcheck.sh
 COPY shared/scripts/backup.sh      /baota/backup.sh
 COPY shared/conf/defaults.env      /baota/defaults.env

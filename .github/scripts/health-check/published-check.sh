@@ -158,13 +158,6 @@ case "$CRED" in
     *)             ok "首启凭据已随机生成（非构建期占位）" ;;
 esac
 
-# --- 定制补丁生效：升级入口必须是 stub ---
-if docker exec "$C" sh -c 'grep -q "baota-docker" /www/server/panel/script/upgrade_panel.py 2>/dev/null'; then
-    ok "定制补丁生效（面板升级入口已被替换为 stub）"
-else
-    bad "定制补丁未生效（升级入口不是 stub）"
-fi
-
 # --- 并发锁：第二实例必须被拦截 ---
 log "验证并发锁（起第二实例）"
 docker run -d --name "$C_DUP" --privileged \

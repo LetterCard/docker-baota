@@ -6,7 +6,6 @@
 #  config/menu.json 才存在，补丁才有替换目标。
 #
 #  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量，可直接读取）：
-#    DISABLE_PANEL_UPDATE  是否禁用面板自身更新
 #    IMAGE_VERSION         镜像版本，写入 /baota/VERSION 供运行期版本护栏使用
 #    PERSIST_DATA_ROOT     数据层根目录（面板/站点/数据库/备份）
 #    PERSIST_SYSTEM_ROOT   系统层根目录（etc/usr/var/root/opt/home/srv）
@@ -14,7 +13,6 @@
 #    PERSIST_SYSTEM_DIRS   系统层需要持久化的顶层目录
 #
 #  以下运行期文件由 Dockerfile 在调用本脚本前 COPY 到位：
-#    /baota/patch-panel.sh     面板定制补丁
 #    /baota/healthcheck.sh     健康检查入口
 #    /baota/backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 #    /baota/defaults.env       运行期配置真源
@@ -52,19 +50,15 @@ log()  { echo "🔨 [build] $*"; }
 warn() { echo "⚠️ [build][WARN] $*" >&2; }
 
 # ==============================================================================
-#  1. 应用面板定制补丁
+#  1. 运行期脚本权限
+#
+#  不再内置「禁用面板更新」补丁：面板版本由使用者自己决定，本项目只保证
+#  「销毁容器重建后数据不丢」。想让面板回到镜像自带的版本，用 make reset-panel
 # ==============================================================================
-apply_panel_patch() {
-    log '1/5 应用面板定制补丁'
+setup_script_perms() {
+    log '1/5 设置运行期脚本权限'
 
-    chmod 0755 "${BAOTA_DIR}/patch-panel.sh"
     chmod 0755 "${BAOTA_DIR}/healthcheck.sh"
-
-    if [ "${DISABLE_PANEL_UPDATE:-true}" = 'true' ]; then
-        "${BAOTA_DIR}/patch-panel.sh" disable-update
-    else
-        warn '保留面板内更新（DISABLE_PANEL_UPDATE 未设为 true）'
-    fi
 }
 
 # ==============================================================================
@@ -188,7 +182,7 @@ drop_build_scripts() {
 #  入口
 # ==============================================================================
 main() {
-    apply_panel_patch
+    setup_script_perms
     setup_systemd
     save_panel_launcher
     install_runtime_files

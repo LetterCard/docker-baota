@@ -55,15 +55,19 @@ docker exec baota ls /www/server/panel/BT-Panel /www/server/panel/pyenv/bin/pyth
 - pyenv 缺 `psutil` / `pyinotify`（常见于 arm64 构建）→ 面板无法启动，这是发布门禁会拦的项
 - 启动器被 copy-up 锁死 → 改镜像版本时 `refresh_panel_launcher` 会自动刷回 `/baota/launcher/`
 
-### 镜像版本与面板版本不一致
+### 面板版本与镜像版本不一致
 
-有人在面板里点过更新，新版文件已写进持久化层、永久屏蔽镜像层。
-`entrypoint` 的 `audit_panel_version` 会告警。补丁只挡住 `script/` 下的入口，
-API 层入口（BTPanel/__init__.py 的 upgrade_panel 等）挡不住。
+有人在面板里点过更新，新版文件已写进持久化层并会一直保留。
+这是预期行为（本项目不禁止面板内更新），`audit_panel_version` 只给信息提示、不告警。
 
-恢复：删除 `data/system/panel/server/panel` 中被更新的文件后重启
-（面板 overlay 的 upper 在 `data/system/panel`，所以容器里的 `/www/server/panel`
-对应宿主这一层；站点与数据库在 `data/www/` 下，不受影响）。
+想让面板回到镜像自带的版本：
+
+```bash
+make reset-panel CONFIRM=yes
+```
+
+（只重置面板代码；面板 overlay 的 upper 在 `data/system/panel`，容器里的
+`/www/server/panel` 对应宿主这一层；站点与数据库在 `data/www/` 下，不受影响。）
 
 ### 备份体积逐次翻倍
 

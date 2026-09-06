@@ -71,19 +71,18 @@ allowed-tools: Read,Bash,Grep,Glob
 |---|---|
 | `shared/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
 | `shared/build/panel.sh` | 官方脚本安装宝塔 + 防火墙复位 + 清 swap + 账号链路预热 |
-| `shared/build/services.sh` | 面板补丁、systemd 复位、启动器副本、目录基线、删构建脚本 |
+| `shared/build/services.sh` | 运行期脚本权限、systemd 复位、启动器副本、目录基线、删构建脚本 |
 | `shared/scripts/init-mounts.sh` | 阶段 0：并发锁 → overlay 持久化 → 交棒 |
-| `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏 → 快照 → 补丁复位 → 首启初始化 → exec systemd |
-| `shared/scripts/patch-panel.sh` | 禁用面板内更新（幂等，每次启动重放） |
+| `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏 → 快照 → 首启初始化 → 版本提示 → exec systemd |
 | `shared/scripts/healthcheck.sh` | 三段判据：降级标记 / 磁盘水位 / 面板端口 |
 | `shared/scripts/backup.sh` | `baota-backup`：全量备份、校验、体积分布 |
 | `shared/conf/defaults.env` | ★ 运行期配置真源 |
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
 | `stable/` `release/` | 两个通道的 Dockerfile / compose / VERSION |
-| `.github/scripts/health-check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
-| `.github/scripts/drift-check/install-diff.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移 / 升级入口漂移 / 代码级更新旁路（KNOWN_BYPASS 基线） |
+| `.github/scripts/health-check/*.sh` | 发布门禁三套：18 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 18 项 |
+| `.github/scripts/drift-check/install-diff.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift-check/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/inject-report.py` | 把 `report.md` 注入 README 的报告标记区 |
 | `.github/workflows/published-check.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
@@ -128,9 +127,9 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
   启动器被 copy-up 锁死时改镜像版本会自动刷回 `/baota/launcher/`
 - 想看历史上哪次启动开始降级 → `cat data/system/.baota/boot-history.log`
 
-**镜像版本与面板版本不一致** → 有人在面板里点过更新，新版文件已写进持久化层。
-补丁只挡住 `script/` 下的入口，API 层入口挡不住，靠 `entrypoint` 的
-`audit_panel_version` 检测并告警。
+**面板版本与镜像版本不一致** → 有人在面板里点过更新，新版文件已写进持久化层。
+这是预期行为（本项目不禁止面板内更新），`entrypoint` 的 `audit_panel_version`
+只给信息提示。想回到镜像版本：`make reset-panel CONFIRM=yes`（配置与数据保留）。
 
 **每日巡检失败或 report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
 

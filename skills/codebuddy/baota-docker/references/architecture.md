@@ -60,7 +60,7 @@ ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
        └─ prepare_runtime_dirs    /run 复位，/var/run → /run
        └─ refresh_consistency     mtab / machine-id / 时区，变了才写
        └─ version_guard           版本护栏 + 升级前快照
-       └─ reset_panel_patches     禁用面板更新，幂等重放
+       └─ audit_panel_version     版本提示（不阻断）
        └─ refresh_panel_launcher  版本变了才刷启动器
        └─ setup_log_limits        journald 重放 / logrotate 缺失才生成
        └─ init_first_boot         首启：端口 / 安全入口 / 账号 / root 口令
@@ -133,19 +133,12 @@ NAS 快照（btrfs / zfs）是文件系统级的，天然保留一切，是最�
 ```
 probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号，与 baseline.json 比对
   └─ 有变更 → analyze（真装一遍，几分钟）
-        ├─ 1. 目录漂移：装前 / 装后快照，新文件是否落在已知持久化目录集合外
-        ├─ 2. 升级入口：script/ 目标清单核对 + 隐藏入口（local_fix.sh 类）内容兜底扫描
-        ├─ 3. 代码级更新旁路：全量扫描「curl|bash / wget&&bash 现拉 /install/update*.sh」，
-        │     与 KNOWN_BYPASS 基线比对 —— 这类路径不经 script/，stub 拦不住，
-        │     运行期只能靠 audit_panel_version 兜底发现（见 docs/development.md）
-        └─ 4. 自动更新标记（信息项）
+        └─ 目录漂移：装前 / 装后快照，新文件是否落在已知持久化目录集合外
 ```
 
 - 报告 CI 回写 `drift.md`；关键漂移开 BUG issue 并让工作流失败，**处理前每天都会提醒**
-- 基线与 `patch-panel.sh` 的同步关系（TARGETS / EXEMPT / KNOWN_BYPASS）
-  见 docs/development.md「漂移检测」与「禁用面板更新的防御边界」
-- 面板代码里已知 3 处代码级旁路（task.py / class/system.py / class/jobs.py，
-  12.0.0 与 13.0.0 一致），属**文档化的已知残余**，出现在报告里不算漂移
+- 刻意只检测目录漂移：面板版本由使用者决定（详见 docs/development.md「面板版本策略」），
+  跟踪上游脚本清单永远跟不完、且不影响数据安全
 
 ## 每日巡检：验证已发布镜像
 

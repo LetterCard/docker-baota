@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  [漂移检测] 在一次性容器中原样执行官方安装脚本，检测两类会破坏本项目的上游变更：
+#  [漂移检测] 在一次性容器中原样执行官方安装脚本，检测会破坏持久化的上游变更：
 #
-#   1) 目录漂移：安装产生的文件是否仍只落在已知的 overlay 持久化目录集合内。
-#      落到集合之外 = 那部分数据不会被持久化（静默丢数据）。
-#   2) 升级入口漂移：shared/scripts/patch-panel.sh 依赖的面板升级脚本集合
-#      是否被上游改名 / 删除 / 新增。一旦漏掉新入口，面板就会绕过禁用逻辑
-#      自行升级，破坏「面板版本由镜像决定」这条核心契约。
-#   3) 代码级更新旁路：面板 Python 代码里「现拉官方更新脚本并直接执行」的路径
-#      （curl|bash / wget&&bash 拉取 /install/update*.sh）。这类路径不经 script/
-#      目录，stub 拦不住，只能靠运行期版本一致性检测兜底发现（检测而非阻断）。
-#      与 KNOWN_BYPASS 基线比对：新增签名 = 关键漂移，需评估加固或更新文档。
+#   目录漂移：安装产生的文件是否仍只落在已知的 overlay 持久化目录集合内。
+#    落到集合之外 = 那部分数据不会被持久化（静默丢数据）。
+#
+#  为什么只检测这一项：本项目的核心保证是「销毁容器重建后数据不丢」，而数据
+#  落点就是唯一会影响这条保证的上游行为。曾经还检测「面板升级入口」与「代码级
+#  更新旁路」——它们要求逐项跟踪上游脚本名、脚本内容乃至代码里的执行路径，与
+#  上游内部实现强耦合、永远跟不完，且并不影响数据安全，已移除。
 #
 #  做法与 docs/persistence.md 的实测一致：装前快照 → 装 → 装后快照 → 比对。
 #  注意前置软件包必须在「装前快照」之前装完，否则 apt 自身写入的文件会被
@@ -21,7 +19,6 @@
 #    BASE_IMAGE     基础镜像（默认 debian:12，与 stable/Dockerfile 的默认值一致）
 #    OUT_MD         markdown 报告输出路径（默认 drift.md）
 #    CRIT_FILE      关键标记输出路径，内容 1 表示存在关键漂移
-#    TARGETS_OUT    升级入口集合输出路径（每行一个文件名，供基线比对）
 #
 #  退出码：安装失败等非预期错误为 1。检测到漂移不改变退出码，由 CRIT_FILE 表达，
 #          由工作流据此决定是否提醒。
@@ -32,55 +29,10 @@ INSTALL_URL="${INSTALL_URL:?未指定 INSTALL_URL}"
 BASE_IMAGE="${BASE_IMAGE:-debian:12}"
 OUT_MD="${OUT_MD:-drift.md}"
 CRIT_FILE="${CRIT_FILE:-drift-critical}"
-TARGETS_OUT="${TARGETS_OUT:-drift-targets.txt}"
 
 # 已知 overlay 持久化目录集合（须与 shared/scripts/init-mounts.sh 保持一致）
 KNOWNS='www etc usr var root opt home srv'
 
-# shared/scripts/patch-panel.sh disable_update() 的目标列表（须保持一致）
-TARGETS='upgrade_panel.py
-upgrade_panel_optimized.py
-upgrade_py313.py
-update_prep_script.sh
-update_prep_script_v1.sh
-upgrade_py313.sh
-upgrade_py313_bundle.sh
-local_fix.sh'
-
-# patch-panel.sh 刻意保持原样的依赖 / 插件升级脚本（见其 disable_update 注释：
-# 「其余升级脚本（gevent / flask / 防火墙 / 流量统计）保持原样」）。
-# 它们升级的是 Python 库与插件、不碰面板程序版本，不破坏「版本由镜像决定」，
-# 不应被当成新增升级入口误报
-EXEMPT='upgrade_gevent.sh
-upgrade_flask.sh
-upgrade_firewall.py'
-
-# 内容分类的静态特征（启发式，仅作报告提示，不做安全判定）
-# 正向上游特征难跟上宝塔变化，故绝不据其自动豁免：命中②也只转人工确认，
-# 宁可多一次人工、不可静默放过（误豁免 = 面板自更新、破坏版本契约）
-# ① 面板自身升级：命中任一 → 记为「疑似面板升级入口」，转人工确认
-PANEL_UPDATE_SIGNALS='panel_version|update_panel|updateLinux|/www/server/panel/class|更新面板|面板升级|安装面板'
-# ② 依赖 / 插件升级：命中仅作提示，仍转人工确认（确认后加入 EXEMPT）
-DEP_PLUGIN_SIGNALS='pyenv/bin/pip|pip3? install|panel/plugin|gevent|flask|防火墙|流量统计'
-
-# 隐藏升级入口的内容特征（比 PANEL_UPDATE_SIGNALS 更紧，专抓名字不带
-# upgrade/update 前缀、却会触发面板升级的脚本，如 local_fix.sh：下载 update6.sh
-# 把面板升到最新版）。这类入口会被文件名模式漏掉，必须靠内容特征兜底
-HIDDEN_SIGNALS='update6\.sh|将面板升级|升级至最新|upgrade_panel'
-
-# 代码级更新旁路基线（12.0.0 / 13.0.0 真装实测，两通道完全一致）：
-# 面板 Python 代码里存在「现拉官方更新脚本并直接执行」的路径，不经 script/ 目录，
-# patch-panel.sh 的 stub 拦不住（详见 docs/development.md「禁用面板更新的防御边界」）。
-# 签名 = 相对 panel 根的文件路径 : 拉取的 /install/update* 脚本名（同文件多个
-# 命中行、被注释的旧代码，都会合并到同一签名——按「哪类旁路」而非「哪一行」跟踪）。
-# 上游新增签名 → 关键漂移（CRIT=1，需评估加固或纳入文档）；已知签名消失 →
-# 仅提示复核文档（旁路减少是好事，不视为关键）
-KNOWN_BYPASS='task.py:update6.sh
-class/system.py:update6.sh
-class/jobs.py:update_panel.sh'
-
-PANEL_SCRIPT_DIR=/www/server/panel/script
-AUTO_UPDATE_PL=/www/server/panel/data/autoUpdate.pl
 INSTALL_LOG=/tmp/btpanel-install.log
 
 CNAME="bt-drift-$$"
@@ -100,33 +52,6 @@ in_knowns() {
     return 1
 }
 
-is_target() {
-    local n="$1" t
-    # shellcheck disable=SC2086
-    for t in $TARGETS; do [ "$t" = "$n" ] && return 0; done
-    return 1
-}
-
-is_exempt() {
-    local n="$1" e
-    # shellcheck disable=SC2086
-    for e in $EXEMPT; do [ "$e" = "$n" ] && return 0; done
-    return 1
-}
-
-# 对未纳入补丁目标的候选脚本做内容分类（仅作提示，安全判定一律转人工）：panel / dep / unknown
-classify_entry() {
-    local name="$1" content
-    content=$(docker exec "$CNAME" cat "${PANEL_SCRIPT_DIR}/${name}" 2>/dev/null || true)
-    if printf '%s\n' "$content" | grep -Eq "$PANEL_UPDATE_SIGNALS"; then
-        echo panel
-    elif printf '%s\n' "$content" | grep -Eq "$DEP_PLUGIN_SIGNALS"; then
-        echo dep
-    else
-        echo unknown
-    fi
-}
-
 # 统计每个顶层目录的文件数（排除虚拟文件系统与临时目录）
 snapshot() {
     docker exec -i "$CNAME" bash -s <<'EOS'
@@ -140,7 +65,6 @@ EOS
 }
 
 : > "$OUT_MD"
-: > "$TARGETS_OUT"
 echo 0 > "$CRIT_FILE"
 
 # ------------------------------------------------------------------------------
@@ -194,7 +118,7 @@ while read -r d n; do [ -n "${d:-}" ] && BEFORE_MAP["$d"]="$n"; done <<< "$BEFOR
 while read -r d n; do [ -n "${d:-}" ] && AFTER_MAP["$d"]="$n"; done <<< "$AFTER"
 
 {
-    echo '### 1. 目录漂移检测'
+    echo '### 目录漂移检测'
     echo
     echo "> 安装脚本：\`${INSTALL_URL}\`"
     echo
@@ -219,258 +143,6 @@ for d in $DIRS; do
 done
 
 # ------------------------------------------------------------------------------
-#  2. 升级入口脚本集合检测
-# ------------------------------------------------------------------------------
-if docker exec "$CNAME" bash -c "test -d '${PANEL_SCRIPT_DIR}'" >/dev/null 2>&1; then
-    mapfile -t ENTRIES < <(docker exec -e "SD=${PANEL_SCRIPT_DIR}" -i "$CNAME" bash -s <<'EOS'
-for f in "$SD"/*; do
-    [ -f "$f" ] || continue
-    printf '%s %s\n' "$(basename "$f")" "$(sha256sum "$f" | awk '{print $1}')"
-done
-EOS
-)
-
-    declare -A FOUND=()
-    for line in "${ENTRIES[@]:-}"; do
-        [ -n "${line:-}" ] || continue
-        # shellcheck disable=SC2086
-        set -- $line
-        [ -n "${1:-}" ] && [ -n "${2:-}" ] && FOUND["$1"]="$2"
-    done
-
-    MISSING=()
-    # shellcheck disable=SC2086
-    for t in $TARGETS; do
-        [ -z "${FOUND[$t]:-}" ] && MISSING+=("$t")
-    done
-
-    # 先收集全部文件名再落盘，避免管道把各分类数组的赋值困在子 shell 里
-    ALL_NAMES=()
-    ADDED_PANEL=()
-    UNKNOWN=()
-    EXEMPT_FOUND=()
-    HIDDEN_PANEL=()
-    declare -A HINT=()
-    for name in "${!FOUND[@]}"; do
-        ALL_NAMES+=("$name")
-        is_target "$name" && continue
-        if is_exempt "$name"; then
-            EXEMPT_FOUND+=("$name")
-            continue
-        fi
-        case "$name" in
-            upgrade*.py|upgrade*.sh|update*.sh|update*.py) ;;
-            *) continue ;;
-        esac
-        kind=$(classify_entry "$name")
-        case "$kind" in
-            panel)   ADDED_PANEL+=("$name") ;;
-            *)       UNKNOWN+=("$name"); HINT["$name"]="$kind" ;;
-        esac
-    done
-
-    # 隐藏入口扫描：名字不带 upgrade/update 前缀、却仍含面板升级触发特征的脚本。
-    # 仅按文件名模式（upgrade*/update*）会漏掉这类入口（如 local_fix.sh 会下载
-    # update6.sh 把面板升到最新版），必须靠内容特征兜底，否则面板仍可绕过禁用逻辑
-    # 自行升级。已知依赖 / 插件升级脚本（gevent / flask / 防火墙）不含这些特征，不误报。
-    for name in "${!FOUND[@]}"; do
-        is_target "$name" && continue
-        is_exempt "$name" && continue
-        case "$name" in upgrade*|update*) continue ;; esac
-        if docker exec "$CNAME" bash -c "grep -qE '$HIDDEN_SIGNALS' '${PANEL_SCRIPT_DIR}/${name}'" 2>/dev/null; then
-            HIDDEN_PANEL+=("$name")
-        fi
-    done
-    if [ ${#ALL_NAMES[@]} -gt 0 ]; then
-        printf '%s\n' "${ALL_NAMES[@]}" | sort -u > "$TARGETS_OUT"
-    fi
-
-    {
-        echo
-        echo '### 2. 升级入口检测'
-        echo
-        echo '| `patch-panel.sh` 目标 | 状态 |'
-        echo '|---|---|'
-    } >> "$OUT_MD"
-    # shellcheck disable=SC2086
-    for t in $TARGETS; do
-        if [ -n "${FOUND[$t]:-}" ]; then
-            printf '| `%s` | ✅ 存在（`%s…`） |\n' "$t" "${FOUND[$t]:0:12}" >> "$OUT_MD"
-        else
-            printf '| `%s` | ❌ 上游已不存在 |\n' "$t" >> "$OUT_MD"
-        fi
-    done
-
-    if [ ${#MISSING[@]} -gt 0 ]; then
-        warn "上游已移除升级入口：${MISSING[*]}"
-        CRIT=1
-    fi
-
-    if [ ${#EXEMPT_FOUND[@]} -gt 0 ]; then
-        {
-            echo
-            echo '✅ 已知豁免的依赖 / 插件升级脚本（设计上保持原样，不视为漂移）：'
-            echo
-            for n in "${EXEMPT_FOUND[@]}"; do echo "- \`$n\`"; done
-        } >> "$OUT_MD"
-    fi
-
-    if [ ${#ADDED_PANEL[@]} -gt 0 ]; then
-        {
-            echo
-            echo '❌ 内容判定为「面板自身升级入口」，但不在 `patch-panel.sh` 的 targets：'
-            echo
-            for n in "${ADDED_PANEL[@]}"; do echo "- \`$n\`"; done
-            echo
-            echo '需加入 targets，否则面板会绕过禁用逻辑自行升级，破坏「版本由镜像决定」的约定。'
-        } >> "$OUT_MD"
-        warn "未纳入补丁的面板升级入口：${ADDED_PANEL[*]}"
-        CRIT=1
-    fi
-
-    if [ ${#UNKNOWN[@]} -gt 0 ]; then
-        {
-            echo
-            echo '⚠️ 未纳入补丁目标与 EXEMPT 的升级脚本（需人工确认，宁误报不漏报）：'
-            echo
-            for n in "${UNKNOWN[@]}"; do
-                echo "- \`$n\`"
-                if [ "${HINT[$n]:-}" = "dep" ]; then
-                    echo '    （内容命中依赖 / 插件升级特征，疑似依赖或插件升级；确认后加入 EXEMPT 而非 targets）'
-                fi
-            done
-            echo
-            echo '确认是依赖 / 插件升级 → 加入本脚本的 EXEMPT；是面板升级入口 → 加入 patch-panel.sh 的 targets。'
-        } >> "$OUT_MD"
-        warn "需人工确认的升级脚本：${UNKNOWN[*]}"
-        CRIT=1
-    fi
-
-    if [ ${#HIDDEN_PANEL[@]} -gt 0 ]; then
-        {
-            echo
-            echo '🚨 隐藏的面板升级入口（名字不带 upgrade/update 前缀，却含升级触发特征，如 local_fix.sh）：'
-            echo
-            for n in "${HIDDEN_PANEL[@]}"; do echo "- \`$n\`"; done
-            echo
-            echo '这类入口会被文件名模式漏掉，必须加入本脚本的 TARGETS（与 patch-panel.sh 的 UPDATE_TARGETS 保持一致）。'
-        } >> "$OUT_MD"
-        warn "隐藏的面板升级入口：${HIDDEN_PANEL[*]}"
-        CRIT=1
-    fi
-else
-    {
-        echo
-        echo '### 2. 升级入口检测'
-        echo
-        echo "❌ 未找到面板脚本目录 \`${PANEL_SCRIPT_DIR}\`，上游路径可能已变更。"
-        echo
-        echo '   `shared/scripts/patch-panel.sh` 会在此直接失败，必须更新路径。'
-    } >> "$OUT_MD"
-    warn "未找到 ${PANEL_SCRIPT_DIR}"
-    CRIT=1
-fi
-
-# ------------------------------------------------------------------------------
-#  3. 代码级更新旁路检测
-#
-#  script/ 的 stub 只能挡住「经过 script/ 目录」的更新入口。宝塔的 Python 代码
-#  里还存在另一类：现拉官方更新脚本（/install/update*.sh）并以 curl|bash /
-#  wget&&bash 直接执行 —— 全程不碰 script/，stub 拦不住，只能靠运行期的版本
-#  一致性检测（entrypoint audit_panel_version）兜底发现。本节把这类路径全量
-#  扫出来与 KNOWN_BYPASS 基线比对：新增 = 关键漂移；消失 = 提示复核文档。
-#
-#  特征 = 「执行习语」（curl … | bash / wget … && bash）与 /install/update*.sh
-#  同行命中。只按官方更新路径过滤，依赖库（install/libsh）、软件安装
-#  （install/0）、站点统计（site_total）等合法 curl|bash 不命中，实测误报 0。
-#  排除目录：script（第 2 节已覆盖且会被 stub）、install（安装器，运行期不执行）、
-#  pyenv / data / logs / vhost（第三方包与用户数据）
-# ------------------------------------------------------------------------------
-if docker exec "$CNAME" bash -c "test -d /www/server/panel" >/dev/null 2>&1; then
-    BYPASS_HITS=$(docker exec -i "$CNAME" bash -s <<'EOS'
-cd /www/server/panel || exit 0
-grep -rInE 'curl[^|]*\|[[:space:]]*bash|wget[^;&]*&&[[:space:]]*bash' . \
-    --exclude-dir=script --exclude-dir=install --exclude-dir=pyenv \
-    --exclude-dir=data --exclude-dir=logs --exclude-dir=vhost 2>/dev/null \
-  | grep -E '/install/update[A-Za-z0-9_.-]*\.sh' \
-  | while IFS= read -r line; do
-        # 行形如 ./task.py:1902:内容 —— 取文件路径与 /install/update*.sh 脚本名拼成签名
-        f=${line%%:*}
-        sig=$(printf '%s\n' "${line#*:}" | grep -oE '/install/update[A-Za-z0-9_.-]*\.sh' | head -1)
-        printf '%s:%s\n' "${f#./}" "${sig#/install/}"
-    done | sort -u
-EOS
-)
-
-    declare -A KNOWN_BYPASS_MAP=() BYPASS_SEEN=()
-    # shellcheck disable=SC2086
-    for kb in $KNOWN_BYPASS; do KNOWN_BYPASS_MAP["$kb"]=1; done
-
-    NEW_BYPASS=()
-    while IFS= read -r sig; do
-        [ -n "${sig:-}" ] || continue
-        BYPASS_SEEN["$sig"]=1
-        [ -n "${KNOWN_BYPASS_MAP[$sig]:-}" ] || NEW_BYPASS+=("$sig")
-    done <<< "$BYPASS_HITS"
-
-    GONE_BYPASS=()
-    # shellcheck disable=SC2086
-    for kb in $KNOWN_BYPASS; do
-        [ -n "${BYPASS_SEEN[$kb]:-}" ] || GONE_BYPASS+=("$kb")
-    done
-
-    {
-        echo
-        echo '### 3. 代码级更新旁路检测'
-        echo
-        echo '> 面板代码里「现拉 `/install/update*.sh` 直接执行」的路径不经 `script/`，'
-        echo '> stub 拦不住，运行期只能靠版本一致性检测兜底发现（详见 docs/development.md）。'
-        echo
-        if [ ${#NEW_BYPASS[@]} -eq 0 ] && [ ${#GONE_BYPASS[@]} -eq 0 ]; then
-            echo "✅ 与基线一致（${#BYPASS_SEEN[@]} 处，全部已知）："
-            echo
-            # shellcheck disable=SC2086
-            for kb in $KNOWN_BYPASS; do echo "- \`$kb\`"; done
-        fi
-        if [ ${#NEW_BYPASS[@]} -gt 0 ]; then
-            echo '❌ 发现基线之外的代码级更新旁路（stub 拦不住，需评估加固或更新文档）：'
-            echo
-            for n in "${NEW_BYPASS[@]}"; do echo "- \`$n\`"; done
-            echo
-        fi
-        if [ ${#GONE_BYPASS[@]} -gt 0 ]; then
-            echo '⚠️ 基线中的旁路已不存在（上游改动，请复核 docs/development.md 的旁路清单）：'
-            echo
-            for n in "${GONE_BYPASS[@]}"; do echo "- \`$n\`"; done
-            echo
-        fi
-    } >> "$OUT_MD"
-
-    if [ ${#NEW_BYPASS[@]} -gt 0 ]; then
-        warn "新增代码级更新旁路：${NEW_BYPASS[*]}"
-        CRIT=1
-    fi
-    if [ ${#GONE_BYPASS[@]} -gt 0 ]; then
-        warn "基线中的更新旁路已消失：${GONE_BYPASS[*]}"
-    fi
-fi
-
-# ------------------------------------------------------------------------------
-#  4. 自动更新标记（信息项）
-# ------------------------------------------------------------------------------
-if docker exec "$CNAME" bash -c "test -f '${AUTO_UPDATE_PL}'" >/dev/null 2>&1; then
-    AUTO_FLAG='安装后存在（补丁会在启动期删除，属正常）'
-else
-    AUTO_FLAG='安装后不存在（上游默认未开启自动更新）'
-fi
-{
-    echo
-    echo '### 4. 自动更新标记'
-    echo
-    echo "\`${AUTO_UPDATE_PL}\`：${AUTO_FLAG}"
-} >> "$OUT_MD"
-
-# ------------------------------------------------------------------------------
 #  结论
 # ------------------------------------------------------------------------------
 {
@@ -478,7 +150,7 @@ fi
     echo '### 结论'
     echo
     if [ "$CRIT" -eq 0 ]; then
-        echo '✅ 未检测到会破坏本项目的上游变更。'
+        echo '✅ 未检测到会破坏持久化的上游变更（数据仍全部落在持久化目录内）。'
     else
         echo '❌ 检测到关键漂移，需人工介入（详见上文）。'
     fi

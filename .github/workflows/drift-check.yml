@@ -3,12 +3,12 @@ name: 🔭 官方源：变更与漂移检测
 # ==============================================================================
 #  本工作流只做「看」，绝不发布任何镜像。
 #
-#  目的是在宝塔上游更新后，第一时间发现两类会破坏本项目的变更：
-#    1) 目录漂移：安装产生的文件落到已知 overlay 持久化目录集合之外
-#       → 那部分数据不会被持久化，属于静默丢数据
-#    2) 升级入口漂移：shared/scripts/patch-panel.sh 依赖的面板升级脚本
-#       被上游改名 / 删除 / 新增
-#       → 补丁漏掉新入口，面板会自行升级，破坏「版本由镜像决定」的约定
+#  目的是在宝塔上游更新后，第一时间发现会破坏持久化的变更：
+#    目录漂移：安装产生的文件落到已知 overlay 持久化目录集合之外
+#      → 那部分数据不会被持久化，属于静默丢数据
+#
+#  刻意不检测「面板升级入口 / 代码级更新路径」：那要求逐项跟踪上游脚本名与
+#  代码内的执行路径，与上游内部实现强耦合、永远跟不完，且并不影响数据安全
 #
 #  两级节奏（控制成本）：
 #    · probe  每天跑：只取版本号与安装脚本 sha256，与基线比对，几十秒完成
@@ -179,7 +179,6 @@ jobs:
             BASE_IMAGE="$BASE_IMAGE" \
             OUT_MD="/tmp/uw/${CH}.md" \
             CRIT_FILE="/tmp/uw/${CH}.crit" \
-            TARGETS_OUT="/tmp/uw/${CH}.targets" \
               bash .github/scripts/drift-check/install-diff.sh \
               || { echo "::error::${CH} 通道检测失败"; exit 1; }
             echo "$CH $(cat "/tmp/uw/${CH}.crit")" >> /tmp/uw/critical
@@ -267,17 +266,12 @@ jobs:
 
           # 基线仅在成功跑完分析后更新，避免把失败运行的中间值写进去
           if [ "${{ needs.drift.result }}" = 'success' ]; then
-            S_T=$(sort -u /tmp/uw/stable.targets  | jq -R -s 'split("\n") | map(select(length>0))')
-            R_T=$(sort -u /tmp/uw/release.targets | jq -R -s 'split("\n") | map(select(length>0))')
             jq -n \
               --arg ss '${{ needs.probe.outputs.stable_sha }}' \
               --arg rs '${{ needs.probe.outputs.release_sha }}' \
               --arg sv '${{ needs.probe.outputs.stable_version }}' \
               --arg rv '${{ needs.probe.outputs.release_version }}' \
-              --argjson st "$S_T" \
-              --argjson rt "$R_T" \
-              '{stable_sha:$ss, release_sha:$rs, stable_version:$sv, release_version:$rv,
-                targets:{stable:$st, release:$rt}}' > "$BASELINE"
+              '{stable_sha:$ss, release_sha:$rs, stable_version:$sv, release_version:$rv}' > "$BASELINE"
             echo '基线已更新。'
           fi
 

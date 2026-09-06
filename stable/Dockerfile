@@ -52,11 +52,6 @@ ARG PANEL_USER=baota
 # 因此默认关闭；需要 HTTPS 时在面板里挂正式证书即可
 ARG DISABLE_PANEL_SSL=true
 
-# 禁用「面板自身」的更新：面板版本应当由镜像决定。
-# 允许面板内更新会让新版文件写进持久化层，进而永久屏蔽镜像层，重建镜像也不再生效。
-# 设为 false 可恢复（不推荐）
-ARG DISABLE_PANEL_UPDATE=true
-
 # 官方安装脚本。stable 通道固定为稳定线 12.x，上游发新版时 URL 不变，
 # 所以跟进新版本无需改动本文件
 ARG INSTALL_URL=https://download.bt.cn/install/installStable_12.sh
@@ -92,8 +87,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     TZ=Asia/Shanghai \
-    PANEL_PORT=${PANEL_PORT} \
-    DISABLE_PANEL_UPDATE=${DISABLE_PANEL_UPDATE}
+    PANEL_PORT=${PANEL_PORT}
 
 # ==============================================================================
 #  🏗️ 构建（三阶段脚本由两个通道共用，构建日志以 [build] 开头）
@@ -116,7 +110,6 @@ RUN bash /opt/baota/build/panel.sh
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖。
 # 旧版放在 /opt/baota，而 /opt 是持久化目录 —— 还原备份时旧脚本副本会
 # 反过来屏蔽新镜像，属于「持久化层反向屏蔽镜像」的隐患
-COPY shared/scripts/patch-panel.sh /baota/patch-panel.sh
 COPY shared/scripts/healthcheck.sh /baota/healthcheck.sh
 COPY shared/scripts/backup.sh      /baota/backup.sh
 COPY shared/conf/defaults.env      /baota/defaults.env

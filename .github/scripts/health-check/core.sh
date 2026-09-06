@@ -316,19 +316,7 @@ inside systemctl is-active btpanel >/dev/null 2>&1 \
     || fail "btpanel 服务未处于 active"
 pass "btpanel 已启用且运行中"
 
-step "A11) 校验定制补丁生效"
-inside test ! -e /www/server/panel/data/autoUpdate.pl \
-    || fail "自动更新未关闭（autoUpdate.pl 仍存在）"
-
-# 更新脚本被换成 stub 后必须返回非零
-if inside test -f /www/server/panel/script/upgrade_panel.py; then
-    if inside /www/server/panel/script/upgrade_panel.py >/dev/null 2>&1; then
-        fail "面板更新脚本未被禁用（仍可执行成功）"
-    fi
-fi
-pass "自动更新已关闭、升级脚本已禁用"
-
-step "A12) 校验防火墙默认关闭"
+step "A11) 校验防火墙默认关闭"
 # 官方脚本会 ufw enable + ufw default deny。容器有特权，若开机套用 deny，
 # 面板端口会被直接封死，必须确认镜像里已复位为关闭
 if inside test -f /etc/ufw/ufw.conf; then
@@ -339,12 +327,12 @@ else
     pass "未安装 ufw，跳过"
 fi
 
-step "A13) 校验 SSH 与 bt 命令"
+step "A12) 校验 SSH 与 bt 命令"
 inside pgrep -x sshd >/dev/null || fail "sshd 未运行"
 inside bt status >/dev/null 2>&1 || fail "bt 命令执行失败"
 pass "sshd 运行中、bt 命令可用"
 
-step "A14) 校验备份工具"
+step "A13) 校验备份工具"
 # 备份是「持久化承诺」的兑现手段，工具本身必须随镜像可用：
 #   --list  能读出体积分布（依赖 du / PERSIST_DIRS 解析正确）
 #   生成一份备份并通过自校验（依赖排除项、xattrs、路径解析都正确）

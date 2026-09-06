@@ -203,7 +203,7 @@ version: ## 打印两个通道记录的宝塔版本
 lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@echo '--- bash -n ---'
 	@for f in shared/build/*.sh shared/scripts/entrypoint.sh \
-	          shared/scripts/patch-panel.sh shared/scripts/backup.sh \
+	          shared/scripts/backup.sh \
 	          .github/scripts/health-check/*.sh \
 	          .github/scripts/drift-check/*.sh; do \
 	    bash -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \

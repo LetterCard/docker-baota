@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  下载并详细分析两个通道的宝塔面板升级入口脚本
+#  下载并详细分析两个通道的宝塔面板脚本与数据落点
 #
 #  目的：用项目自己的安装法（debian:12 + 官方脚本原样执行）在一次性容器里
 #  真装 stable（12.x）与 release（官方服务端决定的正式版，实测 13.0.0），
-#  抓取 /www/server/panel/script/ 的全量清单与升级脚本内容，用于核对本项目
-#  patch-panel.sh 的 UPDATE_TARGETS / TARGETS 是否完整、正确，以及排查是否存在
-#  「非 upgrade/update 前缀」的隐藏自更新入口。
+#  抓取 /www/server/panel/script/ 的全量清单、面板目录结构与数据落点，
+#  供人工排查「上游把数据写到哪了」。本项目不跟踪上游脚本清单，
+#  这个工具只在需要摸清上游时手动跑，不参与每日检测。
 #
 #  用法：bash .github/scripts/drift-check/analyze-versions.sh [stable|release]
 #  输出：/tmp/analyze-12.txt（stable）与 /tmp/analyze-13.txt（release）

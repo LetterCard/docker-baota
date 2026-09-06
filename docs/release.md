@@ -27,7 +27,7 @@
 1. 🔍 下载安装脚本，从横幅提取版本号（`| 您正在安装宝塔面板 12.0.0 稳定版`）
 2. ⚖️ 与 `stable/VERSION` 比对：上游更新 → 按新版本发布；一致 → 按原版本重新构建
    （横幅低于文件则告警并**绝不自动降级**）
-3. 🏗️ 双架构构建 → 三套发布前检查（19 项功能检查 / 挂载与降级场景 / 升级与降级路径）
+3. 🏗️ 双架构构建 → 三套发布前检查（18 项功能检查 / 挂载与降级场景 / 升级与降级路径）
 4. 🚀 全部通过才推送 `bugseeker/baota:<版本>`
 5. ✏️ 发布成功后回写 `stable/VERSION`——文件永远对应已推送的版本，
    构建失败时文件不动，下次运行自动重试
@@ -121,14 +121,14 @@ publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不�
 
 ```
 prep（读两个通道 VERSION）
-  ├─ verify-stable （并行）→ 拉 bugseeker/baota:<stable>  → 19 项回归 → 上传片段
-  └─ verify-release（并行）→ 拉 bugseeker/baota:<release> → 19 项回归 → 上传片段
+  ├─ verify-stable （并行）→ 拉 bugseeker/baota:<stable>  → 18 项回归 → 上传片段
+  └─ verify-release（并行）→ 拉 bugseeker/baota:<release> → 18 项回归 → 上传片段
 collect（汇总）→ 生成 report.md → 注入 README → 回写仓库
 ```
 
 - **版本号取自 `stable/VERSION` 与 `release/VERSION`**（这两个文件由发布流水线在推送
   成功后回写，永远对应已发布的标签），不是重新探测上游 —— 本工作流不做版本判断
-- 19 项回归复用 `.github/scripts/health-check/published-check.sh`，覆盖持久化全生命周期
+- 18 项回归复用 `.github/scripts/health-check/published-check.sh`，覆盖持久化全生命周期
   （四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / 补丁生效）
 - 两个通道**并行**跑，各自独立 job，在 Actions 里并排显示进度，墙钟时间约等于单通道
 - **只验 linux/amd64**：arm64 镜像要跑 QEMU 模拟，而本方案的核心是 overlay 持久化，

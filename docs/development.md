@@ -33,7 +33,7 @@ baota-docker/
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
-│   │   └── services.sh        面板补丁 + 开机自启 + 运行期脚本 + 目录基线
+│   │   └── services.sh        运行期脚本权限 + 开机自启 + 目录基线
 │   ├── conf/
 │   │   ├── btpanel.service    systemd unit
 │   │   ├── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
@@ -41,7 +41,6 @@ baota-docker/
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
 │       ├── init-mounts.sh     阶段 0：并发锁 + overlay 持久化
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
-│       ├── patch-panel.sh     面板定制补丁（构建期执行、运行期每次启动复位）
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
 │       └── backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 │
@@ -52,7 +51,7 @@ baota-docker/
     ├── scripts/
     │   ├── inject-report.py       把 report.md 注入 README 的报告标记区
     │   ├── health-check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
-    │   └── drift-check/           漂移检测脚本（目录漂移 + 升级入口漂移）
+    │   └── drift-check/           漂移检测脚本（目录漂移）
     └── workflows/                 两个通道的构建发布 + 每日巡检 + 漂移检测工作流
 ```
 
@@ -65,25 +64,27 @@ baota-docker/
   `CRITICAL_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
   `health-check/` 下的三套检查脚本也从该文件解析，不再硬编码一份
-- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[patch]` / `[backup]` / `[health]`
+- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]`
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。
   改告警文案不会影响 CI 门禁
 
 ## 漂移检测
 
 `.github/workflows/drift-check.yml` 每天跑一次，**只监测、不发布**。
-它盯的是两类会破坏本项目的上游变更：
+它只盯一件会破坏本项目的上游变更：
 
 | 风险 | 后果 | 检测方式 |
 |---|---|---|
 | **目录漂移** | 安装产生的文件落到已知持久化目录集合之外 → 那部分数据不会被持久化（静默丢数据） | 在一次性容器里装前 / 装后各做一次文件系统快照，比对顶层目录新增量 |
-| **升级入口漂移** | `patch-panel.sh` 依赖的面板升级脚本被上游改名 / 删除 / 新增 → 面板绕过禁用逻辑自行升级，破坏「版本由镜像决定」 | 扫描 `/www/server/panel/script`，核对目标清单是否缺失，并发现疑似新增的升级脚本 |
+
+> 刻意不检测「面板升级入口 / 代码级更新路径」：那要求逐项跟踪上游脚本名与代码内的
+> 执行路径，与上游内部实现强耦合、永远跟不完，且并不影响数据安全。
 
 两级节奏，控制成本：
 
 - **probe**（每天，几十秒）：取两个通道安装脚本的 sha256 与版本号，
   与 `.github/scripts/drift-check/baseline.json` 比对，判断是否有变更
-- **analyze**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面两项比对
+- **analyze**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面的比对
 
 产物与提醒：
 
@@ -95,66 +96,28 @@ baota-docker/
 
 - 已知持久化目录集合在 `.github/scripts/drift-check/install-diff.sh` 的 `KNOWNS`，
   须与 `shared/scripts/init-mounts.sh` 保持一致
-- 升级入口清单在同一文件的 `TARGETS`，须与 `shared/scripts/patch-panel.sh` 的 `UPDATE_TARGETS` 保持一致
-  （含 `local_fix.sh`：名字不带 upgrade/update 前缀、却会下载 update6.sh 把面板升到最新版的隐藏入口，
-  经对 12.0.0 / 13.0.0 真装实测确认由 `class/system.py` 触发，已纳入禁用）；
-  `EXEMPT`（gevent / flask / 防火墙等依赖与插件升级脚本，设计上保持原样、不视为漂移）同样须与其注释保持一致。
-  文件名疑似升级脚本、但不在 TARGETS 与 EXEMPT 的，会 `cat` 内容做提示性分类（panel / dep / unknown），
-  **仅作报告提示、不做安全判定**——命中任何特征都仍转人工确认，绝不自动豁免，
-  以免正向上游特征过时导致误豁免、面板自更新。此外还有一层**隐藏入口扫描**：对 script/ 下所有文件
-  按 `HIDDEN_SIGNALS`（`update6.sh` / 将面板升级 / 升级至最新 / upgrade_panel）做内容兜底，
-  专门抓名字不带 upgrade/update 前缀的升级入口（如 local_fix.sh），避免被文件名模式漏掉。
-  改 `PANEL_UPDATE_SIGNALS` / `DEP_PLUGIN_SIGNALS` / `HIDDEN_SIGNALS` 时先核对真实脚本内容。
-  两通道面板源码包可用 `bash .github/scripts/drift-check/analyze-versions.sh [stable|release]` 真装后抓取分析。
-- 代码级更新旁路基线在同一文件的 `KNOWN_BYPASS`（签名 = `文件:拉取的update脚本名`，
-  同文件多行 / 注释行自动合并）。上游新增签名即关键漂移；旁路明细与加固方案见下文
-  「禁用面板更新的防御边界」
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
+- 两通道面板源码包可用 `bash .github/scripts/drift-check/analyze-versions.sh [stable|release]` 真装后抓取分析
 
-## 禁用面板更新的防御边界
+## 面板版本策略
 
-「面板版本由镜像决定」靠三层机制，每层各挡一类失效：
+**面板版本由使用者自己决定，本项目不禁止面板内更新。**
 
-| 层 | 机制 | 挡什么 | 性质 |
-|---|---|---|---|
-| ① | `patch-panel.sh` 把 `script/` 下 8 个升级入口替换为 stub，并删 `autoUpdate.pl` | 经由 `script/` 目录的常规更新流（面板「更新」按钮、`local_fix.sh` 修复流） | 阻断 |
-| ② | 每次启动重放补丁并 `verify`（entrypoint 自动执行） | 补丁被用户还原备份 / 覆盖文件冲掉后未生效 | 阻断（不生效就拦下启动） |
-| ③ | `entrypoint` 的 `audit_panel_version`：比对 `public.version()` 与镜像 `VERSION` | 一切未被 ①② 挡住的更新——升级一旦成功，版本必然对不上 | **仅检测**（告警不阻断） |
+项目的核心保证只有一个：**销毁容器重建后，建站数据、面板配置、插件、环境全部还在**
+（已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、面板口令与数据库不变）。
 
-### 已知的代码级更新旁路（stub 拦不住）
+为此曾经内置过「禁用面板更新」补丁——把 `script/` 下的升级脚本替换为 stub，
+并逐项跟踪上游的脚本名、脚本内容乃至代码里的执行路径。已整体移除：实测证明
+那套清单永远跟不完（上游改一个脚本名就失效），且面板自更新并不影响数据安全。
+现在的行为：
 
-宝塔的 Python 代码里存在**绕过 `script/` 目录**、现拉官方更新脚本直接执行的路径
-（12.0.0 / 13.0.0 真装实测，两通道一致，共 3 处）：
-
-| 位置 | 代码 | 触发条件 |
-|---|---|---|
-| `task.py` `update_panel()` | `curl -k https://…/install/update6.sh\|bash` | 仅当 `/www/server/panel/init.sh` 缺失时面板启动（修复场景） |
-| `class/system.py` `_repair_panel()` | `wget …/install/update6.sh && bash update.sh` | 面板「修复」且 `script/local_fix.sh` 不存在时（正常被 stub 占位，不走此分支） |
-| `class/jobs.py` `update_py37()` | `curl …/install/update_panel.sh\|bash` | 「升级到独立运行环境」类动作 |
-
-这些路径不经过任何被 stub 的文件，且**本项目刻意不修改面板代码**，所以无法在此层阻断：
-
-- 每日漂移检测对解包源码全量扫描这类路径（`install-diff.sh` 的 `KNOWN_BYPASS` 基线），
-  上游新增 / 改动 / 消失都会出现在 `drift.md`；
-- 即使真被触发，第 ③ 层会在下次启动时以「面板实际版本与镜像版本不一致」告警暴露，
-  `make reset-panel CONFIRM=yes` 可把面板代码重置回镜像版本。
-
-### 可选加固：网络层拦截更新脚本（egress）
-
-不改面板代码的前提下还能在网络层收紧。用 iptables 字符串匹配**只拦官方更新脚本的
-HTTP 路径**，不误伤插件与软件商店——插件走 `/install/plugin/...`、依赖库走
-`/install/libsh/...`、软件走 `/install/0/...`，均不含 `install/update`：
-
-```bash
-# 容器内执行；容器重建后会丢失，需自行持久化（如 compose 的 post_start）
-iptables -I OUTPUT -p tcp --dport 80 -m string --string '/install/update' --algo bm -j REJECT
-```
-
-局限要清楚：
-
-- 只对 **HTTP** 有效（路径明文可见）。3 条旁路里经 `public.get_url()` 的两条（节点多为 `http://IP`）可被拦住；
-- `task.py` 硬编码的 `https://download.bt.cn/install/update6.sh` 走 TLS，路径已加密无法按路径匹配；
-  按域名拦 `download.bt.cn` 会连插件市场一起断——这一条仍靠第 ③ 层兜底。
+- 在面板里点更新 → 新版代码写进持久化层并保留，启动日志给出一行信息提示
+  （「面板当前版本 x.y.z（镜像自带 a.b.c）」），属预期行为、不是故障；
+- 想回到镜像自带版本 → `make reset-panel CONFIRM=yes`（只重置面板代码，
+  面板配置、账号、站点与数据库全部保留）；
+- Python 运行环境同理：stable 12.0.0 出厂为 py3.7.16，想用 py3.13 直接执行
+  官方命令 `bash /www/server/panel/script/upgrade_py313_bundle.sh`
+  （release 13.0.0 出厂即 3.13.14，无需操作）。
 
 ## 🛠️ 本地构建
 
@@ -190,7 +153,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 
 ## 🧩 架构支持
 
-**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（19 项功能检查 +
+**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（18 项功能检查 +
 挂载与降级场景 + 升级与降级路径，含容器重建后的持久化验证）。
 拉取时 Docker 会自动选择匹配的架构，无需指定。
 
@@ -230,7 +193,7 @@ CI 专用的 `.github/scripts/health-check/` 目录随 `.github` 整体被 `.doc
 
 发布前共三套检查，覆盖不同的失效面：
 
-### ① `health-check/core.sh` —— 功能检查，两阶段共 19 项
+### ① `health-check/core.sh` —— 功能检查，两阶段共 18 项
 
 **A 阶段（全新数据卷）**
 systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
