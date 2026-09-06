@@ -392,10 +392,6 @@ setup_log_limits() {
     [ -d "${src}" ] || { warn "未找到 ${src}，跳过日志体积防线配置"; return 0; }
 
     # ① journald 体积上限
-    # 旧版曾命名为 10-baota-size.conf（/etc 已持久化，升级后的容器里可能残留）。
-    # 10- 排在本文件之前，残留只会重复加载同一份设置、不改变结果，但易误导排查，
-    # 这里顺手清掉（rm 一个不存在的文件是零成本操作）
-    rm -f /etc/systemd/journald.conf.d/10-baota-size.conf 2> /dev/null || true
     local jtgt=/etc/systemd/journald.conf.d/baota-size.conf
     if [ -f "${src}/log/journald.conf" ]; then
         if ! cmp -s "${src}/log/journald.conf" "${jtgt}" 2> /dev/null; then
