@@ -21,8 +21,10 @@ name: 🚀 稳定版：构建并发布镜像
 #    🖱️ 手动触发（唯一方式，定时已移除）。语义 = 手动跑一次探测：
 #                  先下载安装脚本取横幅版本，与 stable/VERSION 比对，
 #                  有新版本才走完整构建发布，无新版本则到此为止。
-#                  确需不改版本号强制重建时，临时放开 build / publish 的 if 条件
-#                  再手动触发（见 build job 的注释）。
+#    🔧 可选输入「强制更新」：勾选后跳过「已是最新」判断，无条件走完整
+#                  构建发布 —— 用于上游没变但需要重新出镜像的场景，
+#                  无需手改 VERSION。版本仍以探测结果为准（探测失败则用
+#                  VERSION 当前值）。
 #                  ⚠️ 发布前应先看 .github/workflows/drift-check.yml 的报告与
 #                  issue，确认上游无关键漂移。
 #    发布成功后回写 stable/VERSION；文件变更不触发任何工作流。
@@ -55,10 +57,15 @@ on:
   # 分发给用户。改为手动后，发布前必然先看到 .github/workflows/drift-check.yml
   # 的报告与 issue，由人确认无关键漂移后再触发本工作流。
   #
-  # 手动触发不再带任何输入项：该填的都在仓库里，页面上多一个输入框只会
-  # 多一处「这次填的和平时跑的不一样」的隐患（典型后果：探测时用一个脚本、
-  # 构建时又用另一个）
-  workflow_dispatch: {}
+  # 唯一的输入项是「强制更新」：它只影响「是否跳过『已是最新』判断」，
+  # 不改变任何探测 / 构建参数 —— 版本仍来自安装脚本横幅（唯一真源），
+  # 不存在「探测用一个脚本、构建用另一个」的隐患
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '🔧 强制更新：跳过「已是最新」判断，直接重建发布（探测失败则按 VERSION 当前值）'
+        type: boolean
+        default: false
 
 # 同一时刻只保留最新一次运行，避免两套多架构构建互相抢缓存
 concurrency:
@@ -170,6 +177,14 @@ jobs:
             fi
           fi
 
+          # 🔧 强制更新：手动勾选后跳过「已是最新」判断，无条件进入构建发布。
+          # 版本仍以探测结果为准（探测失败则用 VERSION 当前值）——
+          # 强制的是「重建发布」这个动作，不是编造版本号
+          if [ '${{ inputs.force_update }}' = 'true' ]; then
+            CHANGED=true
+            echo "🔧 强制更新模式：跳过版本比对，无条件构建发布（版本 ${VER}）"
+          fi
+
           echo "value=${VER}" >> "$GITHUB_OUTPUT"
           echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
           echo "宝塔版本：${VER}（changed=${CHANGED}）"
@@ -180,16 +195,22 @@ jobs:
           VALUE="${{ steps.resolve.outputs.value }}"
           PROBE="${{ steps.resolve.outputs.probe }}"
           CHANGED="${{ steps.resolve.outputs.changed }}"
+          FORCE='${{ inputs.force_update }}'
 
-          # 只有探测到新版本才进入构建，与触发方式无关（手动 = 手动跑一次探测）。
-          # 探测失败同样阻断：无法确认上游状态时按旧版本继续构建，
-          # 打出的镜像可能与上游不一致，宁可不发，等下次运行自动重试
-          case "${PROBE}:${CHANGED}" in
-            ok:true)  TEXT="🎉 发现上游新版本：${CURRENT} → ${VALUE}，将按新版本发布" ;;
-            ok:false) TEXT="✅ 已是最新（${VALUE}），本次不构建" ;;
-            failed:*) TEXT="⚠️ 探测失败，无法确认上游状态，本次不构建；稍后可手动重跑" ;;
-            *)        TEXT="❓ 未知状态，本次不构建" ;;
-          esac
+          if [ "${FORCE}" = 'true' ]; then
+            # 强制更新：探测到什么用什么，探测失败用 VERSION 当前值
+            TEXT="🔧 强制更新：跳过版本比对，按 ${VALUE} 重建发布"
+          else
+            # 只有探测到新版本才进入构建，与触发方式无关（手动 = 手动跑一次探测）。
+            # 探测失败同样阻断：无法确认上游状态时按旧版本继续构建，
+            # 打出的镜像可能与上游不一致，宁可不发，等下次运行自动重试
+            case "${PROBE}:${CHANGED}" in
+              ok:true)  TEXT="🎉 发现上游新版本：${CURRENT} → ${VALUE}，将按新版本发布" ;;
+              ok:false) TEXT="✅ 已是最新（${VALUE}），本次不构建" ;;
+              failed:*) TEXT="⚠️ 探测失败，无法确认上游状态，本次不构建；稍后可手动重跑" ;;
+              *)        TEXT="❓ 未知状态，本次不构建" ;;
+            esac
+          fi
           {
             echo "### 🔍 stable 版本探测"
             echo ""
@@ -197,6 +218,7 @@ jobs:
             echo "|---|---|"
             echo "| stable/VERSION | \`${CURRENT}\` |"
             echo "| 上游横幅版本 | \`${VALUE}\` |"
+            echo "| 强制更新 | ${FORCE} |"
             echo "| 结果 | ${TEXT} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -230,13 +252,10 @@ jobs:
   build:
     name: 🏗️ 构建 linux/${{ matrix.arch }}
     needs: [version, lint]
-    # 只在探测到新版本才构建：
+    # 只在「探测到新版本」或「手动勾选强制更新」时构建：
     #   - 否则每次手动触发都会空跑一整轮双架构构建（单次约 40 分钟），
     #     还要重复覆盖 DockerHub 上已有的同一个标签。
-    # 确需不改版本号强制重建时：临时把本行 if 改回
-    #   github.event_name == 'workflow_dispatch' || needs.version.outputs.changed == 'true'
-    # 并手动触发。常规渠道走不到这里就对了 —— 常备输入框比临时改条件
-    # 更容易误用
+    # 强制更新由 version job 直接把 changed 置 true，下游 if 无需感知
     if: needs.version.outputs.changed == 'true'
     timeout-minutes: 180
     strategy:

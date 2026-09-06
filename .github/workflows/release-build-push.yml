@@ -40,7 +40,15 @@ on:
   # 坏镜像会立刻被所有使用 `latest` 的用户拉到 —— 这是本项目最大的风险敞口。
   # 改为手动：先确认 .github/workflows/drift-check.yml 的报告无关键漂移，
   # 再手动触发本工作流。
-  workflow_dispatch: {}
+  #
+  # 唯一的输入项是「强制更新」：它只影响「是否跳过『已一致』判断」，
+  # 版本仍来自 get_version API —— 不存在「探测一个版本、构建另一个」的隐患
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '🔧 强制更新：跳过「已一致」判断，直接重建发布'
+        type: boolean
+        default: false
 
 # 同一时刻只跑一个：排队期间上游版本若已被上一次运行发布，
 # 重新探测会得到「已一致」，后续 job 自动跳过
@@ -104,7 +112,17 @@ jobs:
             fi
           fi
 
-          if [ "$RESULT" = "new-version" ]; then
+          # 🔧 强制更新：手动勾选后跳过「已一致」判断，无条件进入构建发布。
+          # 版本仍以 API 探测结果为准 —— 强制的是「重建发布」这个动作，
+          # 不是编造版本号。探测失败（API 无返回）时无法确定版本，直接取消
+          if [ '${{ inputs.force_update }}' = 'true' ]; then
+            if [ -z "$UPSTREAM" ]; then
+              echo "::error::强制更新模式下探测失败（get_version 无返回），无法确定版本，取消构建"
+              exit 1
+            fi
+            echo "🔧 强制更新模式：跳过版本比对，无条件构建发布（版本 ${UPSTREAM}）"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RESULT" = "new-version" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "发现新版本：${CURRENT} → ${UPSTREAM}，进入构建发布"
           else
@@ -117,7 +135,10 @@ jobs:
         if: always()
         run: |
           CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo 未知)
-          if [ "${{ steps.detect.outputs.changed }}" = "true" ]; then
+          FORCE='${{ inputs.force_update }}'
+          if [ "${{ steps.detect.outputs.changed }}" = "true" ] && [ "${FORCE}" = 'true' ]; then
+            TEXT="🔧 强制更新：跳过版本比对，按 ${{ steps.detect.outputs.version }} 重建发布"
+          elif [ "${{ steps.detect.outputs.changed }}" = "true" ]; then
             TEXT="🎉 发现新版本：${CURRENT} → ${{ steps.detect.outputs.version }}"
           elif [ -n "${{ steps.detect.outputs.changed }}" ]; then
             TEXT="✅ 已一致（${CURRENT}），无需发布"
@@ -131,6 +152,7 @@ jobs:
             echo "|---|---|"
             echo "| release/VERSION | \`${CURRENT}\` |"
             echo "| get_version API | \`${{ steps.detect.outputs.version || '获取失败' }}\` |"
+            echo "| 强制更新 | ${FORCE} |"
             echo "| 结果 | ${TEXT} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
