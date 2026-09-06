@@ -1,7 +1,7 @@
 name: 🚀 稳定版：构建并发布镜像
 
 # ==============================================================================
-#  🚀 [stable 通道] 多架构构建 → 19 项健康检查 → 发布到 DockerHub
+#  🚀 [stable 通道] 多架构构建 → 18 项健康检查 → 发布到 DockerHub
 #
 #    与 release 通道（release-build-push.yml）的区别：
 #      - 版本来源：stable/VERSION（version job 每次运行时自动探测校准）
