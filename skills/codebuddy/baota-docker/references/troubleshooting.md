@@ -123,7 +123,7 @@ cat data/system/.baota/boot-history.log
 ## CI 发布被拦住
 
 发布门禁共三套，任一失败即终止：
-- `run.sh core`：19 项功能检查（全新卷 + 同卷重建）
+- `run.sh core`：18 项功能检查（全新卷 + 同卷重建）
 - `run.sh mounts`：混合挂载 + 只读降级场景
 - `run.sh upgrade`：升级 / 降级路径（改写 `.baota/image-version` 触发）
 
