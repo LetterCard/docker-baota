@@ -9,7 +9,7 @@
 #    up / down       用对应通道的 compose 启停
 #    restart / logs / ps / exec
 #  health 系列（三套，覆盖不同的失效面）：
-#    health          19 项功能检查（面板 / 凭据 / 补丁 / 备份 / 重建不丢数据）
+#    health          18 项功能检查（面板 / 凭据 / 备份 / 重建不丢数据）
 #    health-mounts   挂载方式与降级场景（混合挂载 + 只读降级是否真被识别）
 #    health-upgrade  升级 / 降级路径（版本护栏 + 快照 + 启动器刷新）
 #    health-all      一次跑全三套
