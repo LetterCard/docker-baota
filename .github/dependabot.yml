@@ -12,7 +12,5 @@ updates:
       actions:
         patterns:
           - "*"
-    # 前缀对齐仓库提交规范 type(scope)。PR 标题的主体（Bump the actions group…）
-    # 是 Dependabot 平台硬编码英文，无法中文化——能控制的只有前缀
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "ci(actions) 自动更新 Actions 版本"
