@@ -106,6 +106,24 @@ COPY shared/build/ /opt/baota/build/
 RUN bash /opt/baota/build/base.sh
 RUN bash /opt/baota/build/panel.sh
 
+# 🔧 构建期把面板 Python 环境升到 3.13（官方 bundle 预编译包，实测 amd64 约 90 秒；
+#    面板未运行不影响——完整包自带依赖，psutil/flask/gevent 与面板启动/HTTP 均实测通过）。
+#    脚本会自动备份旧环境（pyenv_backup_*，约 600M）——镜像不需要回滚能力，
+#    连同锁文件、日志与下载缓存一并清除，保持纯净（实测残留仅此四处）。
+#    收益：镜像 -360M（py3.13 依赖树 90 包 vs 3.7 的 143 包，体积对齐 13.0.0）。
+#    如需保留 py3.7：--build-arg UPGRADE_PY313=false
+#    ⚠️ arm64：py3.13 的 aarch64 预编译支持未单独验证（官方 13.0.0 arm64 出厂即
+#       3.13.14，大概率 Route 1/2 可用）；若走 Route 3 源码编译，arm64 构建会显著变慢，
+#       首次构建看日志确认路线。
+ARG UPGRADE_PY313=true
+RUN if [ "$UPGRADE_PY313" = "true" ]; then \
+        bash /www/server/panel/script/upgrade_py313_bundle.sh \
+        && rm -rf /www/server/panel/pyenv_backup_* /tmp/py313* /root/.cache \
+        && rm -f /www/server/panel/.upgrade_py313.lock \
+                /www/server/panel/logs/upgrade_py313.log \
+                /www/server/panel/logs/*.pid /www/server/panel/logs/*.log; \
+    fi
+
 # 运行期脚本一律放在 /baota（rootfs 根部，不属于任何持久化目录）：
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖。
 # 旧版放在 /opt/baota，而 /opt 是持久化目录 —— 还原备份时旧脚本副本会

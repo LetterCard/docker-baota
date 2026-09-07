@@ -115,9 +115,10 @@ baota-docker/
   （「面板当前版本 x.y.z（镜像自带 a.b.c）」），属预期行为、不是故障；
 - 想回到镜像自带版本 → `make reset-panel CONFIRM=yes`（只重置面板代码，
   面板配置、账号、站点与数据库全部保留）；
-- Python 运行环境同理：stable 12.0.0 出厂为 py3.7.16，想用 py3.13 直接执行
-  官方命令 `bash /www/server/panel/script/upgrade_py313_bundle.sh`
-  （release 13.0.0 出厂即 3.13.14，无需操作）。
+- Python 运行环境：stable 12.0.0 **构建期已预升 py3.13**（`ARG UPGRADE_PY313`，
+  默认 true；官方 bundle 预编译包，构建日志可见安装路线）。运行期无需再升级；
+  如需回退 py3.7 构建镜像：`--build-arg UPGRADE_PY313=false`。
+  release 13.0.0 出厂即 3.13.14。
 
 ## 🛠️ 本地构建
 
