@@ -120,6 +120,25 @@ baota-docker/
   如需回退 py3.7 构建镜像：`--build-arg UPGRADE_PY313=false`。
   release 13.0.0 出厂即 3.13.14。
 
+## 🧱 自定义基础镜像（BASE_IMAGE）
+
+两个 Dockerfile 都用 `ARG BASE_IMAGE=debian:12`（bookworm，LTS 支持至 2028）。
+**Dockerfile 的 ARG 默认值是唯一真源**——工作流触发时 `base_image` 留空即不传，
+避免同一常量抄两份。
+
+探路 Debian 13（trixie，宝塔官方镜像所用）：
+
+```bash
+# 本地试构建
+docker build --build-arg BASE_IMAGE=debian:13 -f stable/Dockerfile -t baota:trixie .
+# 或在 Actions 触发时把 base_image 填 debian:13（force_update 可同时勾）
+```
+
+⚠️ 切换基座是**最大的变更类型**（所有系统包版本跳变）。切换前必须知道：
+
+1. 同步 `.github/workflows/drift-check.yml` 的 `BASE_IMAGE`（漂移检测要同基座）
+2. 跑完整回归：19 项健康检查 + **实际装一次 PHP 扩展**（验证编译链在新基座可用）
+
 ## 🛠️ 本地构建
 
 ```bash

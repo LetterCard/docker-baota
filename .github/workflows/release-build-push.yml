@@ -49,6 +49,10 @@ on:
         description: '🔧 强制更新：跳过「已一致」判断，直接重建发布'
         type: boolean
         default: false
+      base_image:
+        description: '🧱 基础镜像：留空用 Dockerfile 默认（debian:12）；探路 Debian 13 填 debian:13'
+        type: string
+        default: ''
 
 # 同一时刻只跑一个：排队期间上游版本若已被上一次运行发布，
 # 重新探测会得到「已一致」，后续 job 自动跳过
@@ -220,11 +224,19 @@ jobs:
       - name: 🏗️ 构建镜像（加载到本地，供健康检查）
         run: |
           echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
+          # BASE_IMAGE 留空时不传，用 Dockerfile 的 ARG 默认值（唯一真源）。
+          # 必须用 if 而非 &&：留空时整行返回非零会在 set -e 下中断 step
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.base_image }}" ]; then
+              EXTRA_ARGS+=(--build-arg "BASE_IMAGE=${{ inputs.base_image }}")
+          fi
+
           docker buildx build \
             --file ./release/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --load \
             --provenance=false \
+            "${EXTRA_ARGS[@]}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.detect.outputs.version }}" \
             --tag "baota:candidate" \
@@ -287,10 +299,16 @@ jobs:
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           echo "推送 linux/${{ matrix.arch }}（按 digest，无标签）"
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.base_image }}" ]; then
+              EXTRA_ARGS+=(--build-arg "BASE_IMAGE=${{ inputs.base_image }}")
+          fi
+
           docker buildx build \
             --file ./release/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --provenance=false \
+            "${EXTRA_ARGS[@]}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.detect.outputs.version }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \

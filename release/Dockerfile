@@ -10,6 +10,8 @@
 #  🧱 持久化原理与 stable 完全一致，详见 docs/persistence.md
 # ==============================================================================
 
+# 基础镜像，默认 debian:12（bookworm）。可切换的注意事项与 stable/Dockerfile 一致
+# （那儿有完整说明：探路 debian:13、需同步 drift-check.yml 的 BASE_IMAGE、需完整回归）
 ARG BASE_IMAGE=debian:12
 FROM ${BASE_IMAGE}
 

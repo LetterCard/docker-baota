@@ -19,6 +19,12 @@
 #    镜像内容，零复制、零膨胀，且 lower 可平滑升级。
 # ==============================================================================
 
+# 基础镜像。默认 debian:12（bookworm，LTS 支持至 2028）。
+# 探路 Debian 13（trixie，宝塔官方镜像所用）：--build-arg BASE_IMAGE=debian:13，
+# 或在触发工作流时填 base_image（留空则用本文件默认值——避免常量抄两份）。
+# ⚠️ 切换后必须同步两处并跑完整回归：
+#   1. .github/workflows/drift-check.yml 的 BASE_IMAGE（漂移检测要同基座）
+#   2. 19 项健康检查 + 实际装一次 PHP 扩展（所有系统包版本都会变）
 ARG BASE_IMAGE=debian:12
 FROM ${BASE_IMAGE}
 

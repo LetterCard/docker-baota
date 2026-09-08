@@ -66,6 +66,10 @@ on:
         description: '🔧 强制更新：跳过「已是最新」判断，直接重建发布（探测失败则按 VERSION 当前值）'
         type: boolean
         default: false
+      base_image:
+        description: '🧱 基础镜像：留空用 Dockerfile 默认（debian:12）；探路 Debian 13 填 debian:13'
+        type: string
+        default: ''
 
 # 同一时刻只保留最新一次运行，避免两套多架构构建互相抢缓存
 concurrency:
@@ -293,11 +297,20 @@ jobs:
           echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
           # INSTALL_URL 刻意不传：用 stable/Dockerfile 里 ARG 的默认值，
           # 与 version job 探测时解析到的是同一份（见 env 处的说明）
+          # BASE_IMAGE 留空时不传，用 Dockerfile 的 ARG 默认值（唯一真源）。
+          # 必须用 if 而非 &&：留空时 [ -n "" ] 为假，&& 短路让整行返回非零，
+          # 在 set -e 下会直接中断 step
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.base_image }}" ]; then
+              EXTRA_ARGS+=(--build-arg "BASE_IMAGE=${{ inputs.base_image }}")
+          fi
+
           docker buildx build \
             --file ./stable/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --load \
             --provenance=false \
+            "${EXTRA_ARGS[@]}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
             --tag "baota:candidate" \
@@ -361,10 +374,16 @@ jobs:
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
           echo "推送 linux/${{ matrix.arch }}（按 digest，无标签）"
           # INSTALL_URL 同第一次构建，用 Dockerfile 默认值，不在这里传
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.base_image }}" ]; then
+              EXTRA_ARGS+=(--build-arg "BASE_IMAGE=${{ inputs.base_image }}")
+          fi
+
           docker buildx build \
             --file ./stable/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --provenance=false \
+            "${EXTRA_ARGS[@]}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \

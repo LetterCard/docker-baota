@@ -43,6 +43,8 @@ concurrency:
 env:
   BASELINE: .github/scripts/drift-check/baseline.json
   REPORT: drift.md
+  # 与构建所用的基础镜像保持一致（Dockerfile 的 ARG BASE_IMAGE 默认值）。
+  # 若改用 debian:13 构建，此处必须同步 —— 漂移检测要以同一个基座为基准
   BASE_IMAGE: debian:12
   VERSION_API: https://www.bt.cn/api/panel/get_version
   LABEL: BUG

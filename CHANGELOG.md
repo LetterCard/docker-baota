@@ -20,6 +20,12 @@
 
 ### ✨ 新增
 
+- **基础镜像可配置（BASE_IMAGE）**：两个 Dockerfile 的 `ARG BASE_IMAGE=debian:12`
+  保持为唯一真源；构建发布工作流新增可选输入 `base_image`（留空则不传该
+  build-arg，避免常量抄两份）。探路 Debian 13（trixie，宝塔官方镜像所用）时
+  填 `debian:13` 即可，无需改代码。文档新增「自定义基础镜像」章节说明切换代价
+  （须同步 drift-check.yml 的 BASE_IMAGE + 完整回归）
+
 - **stable 12.0.0 构建期预升 Python 3.13**：Dockerfile 新增 `UPGRADE_PY313`
   （默认 true，可 `--build-arg UPGRADE_PY313=false` 回退 py3.7）。官方 bundle
   预编译包实测约 90 秒完成（Route 1 完整包自带依赖，面板未运行不影响），
