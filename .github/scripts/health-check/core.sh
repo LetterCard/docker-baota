@@ -348,10 +348,14 @@ step "A14) 校验 PHP 扩展编译工具链"
 # 宝塔的扩展脚本会自带库依赖（libzstd-dev 等）但不补工具链——
 # 缺 autoconf 时 igbinary / zstd / redis 等扩展全部失败
 # （报错 Cannot find autoconf），必须由镜像提供
-inside command -v autoconf >/dev/null 2>&1 \
+# 必须用 inside_sh（sh -c）而不是 inside：command 是 shell 内建命令，
+# 磁盘上不存在 /usr/bin/command，docker exec 直接执行会报
+#   exec: "command": executable file not found in $PATH（退出码 127）
+# —— 与 autoconf 是否安装无关，那样写会恒定失败、永远拦住发布
+inside_sh 'command -v autoconf >/dev/null 2>&1' \
     || fail "缺少 autoconf（PHP 扩展安装会报 Cannot find autoconf）"
 # libtool 包提供的可执行文件叫 libtoolize（没有 libtool 这个命令）
-inside command -v libtoolize >/dev/null 2>&1 \
+inside_sh 'command -v libtoolize >/dev/null 2>&1' \
     || fail "缺少 libtool（部分 PHP 扩展编译需要）"
 pass "编译工具链可用（autoconf / libtoolize）"
 

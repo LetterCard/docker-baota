@@ -20,6 +20,15 @@
   12.0.0 与 13.0.0 两个通道都受影响（与 py3.13 无关，属基础层问题）。
   同时新增发布前检查项 **A14「PHP 扩展编译工具链」** 防止回归（18 → 19 项）
 
+- **A14 检查恒定失败（误报，阻断发布）**：新检查写成
+  `inside command -v autoconf`，而 `inside` 是 `docker exec`——它只能执行
+  磁盘上的可执行文件，`command` 是 shell 内建、磁盘上没有，运行时直接报
+  `exec: "command": executable file not found in $PATH`（退出码 127）。
+  与 autoconf 装没装无关：镜像里工具链齐全也会失败，A14 必然红❌，
+  core 整套检查随之失败。**改为 `inside_sh 'command -v autoconf ...'`**
+  （走容器内的 sh）；实测同一写法对已安装命令返回 0、对缺失命令返回非零，
+  判定仍然有效
+
 ### ✨ 新增
 
 - **基础镜像可配置（BASE_IMAGE）**：两个 Dockerfile 的 `ARG BASE_IMAGE=debian:12`
