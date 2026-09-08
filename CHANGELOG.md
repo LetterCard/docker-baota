@@ -13,8 +13,10 @@
   （igbinary / zstd / redis 等）时，`phpize` 需要 `autoconf` 生成 configure 脚本，
   而镜像基础层只装了运维工具、没有编译工具链——宝塔的扩展脚本会自带库依赖
   （libzstd-dev 等）但不补工具链，于是全部扩展报
-  `Cannot find autoconf` 失败。已在 `base.sh` 补装
-  `autoconf automake libtool bison re2c`（合计仅几 MB）。
+  `Cannot find autoconf` 失败。**已把 `base.sh` 的依赖清单换成宝塔官方镜像
+  btpanel/btpanel 的那一套**（60+ 包：编译工具链 + LNMP 所需的各类 dev 库，
+  实测代价约 +160MB）——自己挑包必然漏，采用官方清单可一次性消除这类
+  「漏依赖」隐形 BUG。包名已验证在 Debian 12 下全部有效。
   12.0.0 与 13.0.0 两个通道都受影响（与 py3.13 无关，属基础层问题）。
   同时新增发布前检查项 **A14「PHP 扩展编译工具链」** 防止回归（18 → 19 项）
 

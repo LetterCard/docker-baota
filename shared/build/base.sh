@@ -70,6 +70,11 @@ EOF
 install_packages() {
     log '1/3 安装基础软件包'
 
+    # 下面「编译工具链 + LNMP 依赖」这一段取自宝塔官方镜像
+    # btpanel/btpanel 的 Dockerfile（官方替我们把坑踩完了：装 PHP 扩展、编译
+    # nginx/php/各类组件所需的工具与 dev 库）。我们自己挑包必然漏——缺
+    # autoconf 就会让所有 PHP 扩展报 Cannot find autoconf）。代价约 +160MB，
+    # 换「以后不再补依赖」。包名已实测在 Debian 12 (bookworm) 下全部有效
     apt-get install -y --no-install-recommends \
         locales tzdata ca-certificates \
         systemd systemd-sysv dbus dbus-user-session \
@@ -81,8 +86,15 @@ install_packages() {
         tar xz-utils zip unzip gzip bzip2 p7zip-full cpio rsync \
         lsb-release sudo \
         busybox-static \
-        vim-tiny less file \
-        autoconf automake libtool bison re2c
+        vim-tiny less file dos2unix \
+        autoconf automake libtool bison re2c cmake m4 flex gawk cpp binutils \
+        diffutils gettext patch git build-essential make gcc g++ libc6-dev \
+        libzip-dev libssl-dev libonig-dev libsodium-dev libssh2-1-dev libc-ares-dev \
+        libaio-dev libevent-dev libsasl2-dev libltdl-dev zlib1g-dev libglib2.0-0 \
+        libglib2.0-dev libkrb5-dev libpq-dev libpq5 libcap-dev libxslt1-dev \
+        libncurses-dev libbz2-dev libgd-dev libgd3 libwebp-dev libvpx-dev \
+        libfreetype6-dev libjpeg62-turbo libjpeg62-turbo-dev libudev-dev \
+        libldap2-dev libxml2-dev libcurl4-openssl-dev
 
     sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
     locale-gen en_US.UTF-8
