@@ -154,7 +154,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 
 ## 🧩 架构支持
 
-**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（18 项功能检查 +
+**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（19 项功能检查 +
 挂载与降级场景 + 升级与降级路径，含容器重建后的持久化验证）。
 拉取时 Docker 会自动选择匹配的架构，无需指定。
 
@@ -194,7 +194,7 @@ CI 专用的 `.github/scripts/health-check/` 目录随 `.github` 整体被 `.doc
 
 发布前共三套检查，覆盖不同的失效面：
 
-### ① `health-check/core.sh` —— 功能检查，两阶段共 18 项
+### ① `health-check/core.sh` —— 功能检查，两阶段共 19 项
 
 **A 阶段（全新数据卷）**
 systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /

@@ -8,11 +8,11 @@
 #  镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后，workflow 才登录
 #  并推送。任一检查失败即非零退出，阻断发布。
 #
-#  两阶段共 18 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
+#  两阶段共 19 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
 #    A 全新数据卷：systemd / overlay 可写 / 关键路径（含 pyenv 模块）/
 #                  面板与任务进程 / 安全入口 / 版本号 / 首启凭据 / 写入落盘 /
 #                  自启 / 防火墙关闭 / SSH 与 bt 命令 / 日志体积防线 /
-#                  健康检查判据 / 备份工具
+#                  健康检查判据 / 备份工具 / PHP 扩展编译工具链
 #    B 销毁容器后用同一个卷重建：数据不丢、不会二次初始化、面板自动恢复
 #
 #  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 整体排除，
@@ -342,6 +342,18 @@ inside test -L /usr/local/bin/baota-backup \
     || fail "未创建 /usr/local/bin/baota-backup 软链"
 inside baota-backup --list >/dev/null 2>&1 \
     || fail "baota-backup --list 执行失败"
+
+step "A14) 校验 PHP 扩展编译工具链"
+# 面板里装 PHP 扩展（phpize 编译）需要 autoconf 生成 configure。
+# 宝塔的扩展脚本会自带库依赖（libzstd-dev 等）但不补工具链——
+# 缺 autoconf 时 igbinary / zstd / redis 等扩展全部失败
+# （报错 Cannot find autoconf），必须由镜像提供
+inside command -v autoconf >/dev/null 2>&1 \
+    || fail "缺少 autoconf（PHP 扩展安装会报 Cannot find autoconf）"
+# libtool 包提供的可执行文件叫 libtoolize（没有 libtool 这个命令）
+inside command -v libtoolize >/dev/null 2>&1 \
+    || fail "缺少 libtool（部分 PHP 扩展编译需要）"
+pass "编译工具链可用（autoconf / libtoolize）"
 
 # 跑一次完整备份，把完整输出（stdout + stderr）保留到本地文件
 # —— verify_archive 缺关键文件时 die 走 stderr，之前的 `2>/dev/null` 写法

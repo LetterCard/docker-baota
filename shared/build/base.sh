@@ -81,7 +81,8 @@ install_packages() {
         tar xz-utils zip unzip gzip bzip2 p7zip-full cpio rsync \
         lsb-release sudo \
         busybox-static \
-        vim-tiny less file
+        vim-tiny less file \
+        autoconf automake libtool bison re2c
 
     sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
     locale-gen en_US.UTF-8

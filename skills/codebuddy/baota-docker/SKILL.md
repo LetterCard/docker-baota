@@ -80,8 +80,8 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
 | `stable/` `release/` | 两个通道的 Dockerfile / compose / VERSION |
-| `.github/scripts/health-check/*.sh` | 发布门禁三套：18 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 18 项 |
+| `.github/scripts/health-check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
 | `.github/scripts/drift-check/install-diff.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift-check/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/inject-report.py` | 把 `report.md` 注入 README 的报告标记区 |

@@ -144,7 +144,7 @@ probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号�
 
 ```
 prep  ── 读 stable/VERSION + release/VERSION
-  ├─ verify-stable （并行，独立 job）→ pull 已发布镜像 → 18 项回归 → upload-artifact
+  ├─ verify-stable （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
   └─ verify-release（并行，独立 job）→ 同上
 collect ── 下载片段 → 生成 report.md → 注入 README → 回写仓库
 ```

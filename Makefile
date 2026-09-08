@@ -9,7 +9,7 @@
 #    up / down       用对应通道的 compose 启停
 #    restart / logs / ps / exec
 #  health 系列（三套，覆盖不同的失效面）：
-#    health          18 项功能检查（面板 / 凭据 / 备份 / 重建不丢数据）
+#    health          19 项功能检查（面板 / 凭据 / 备份 / 重建不丢数据）
 #    health-mounts   挂载方式与降级场景（混合挂载 + 只读降级是否真被识别）
 #    health-upgrade  升级 / 降级路径（版本护栏 + 快照 + 启动器刷新）
 #    health-all      一次跑全三套
@@ -69,13 +69,13 @@ exec: ## 进入容器（make exec CMD="bt default"）
 
 # 三套发布前检查的统一入口（.github/scripts/health-check/），
 # 各覆盖一个互不相关的失效面：
-#   core     18 项功能检查 —— 「功能完整性」
+#   core     19 项功能检查 —— 「功能完整性」
 #   mounts   挂载方式与降级场景 —— 「挂载正确性」
 #   upgrade  升级 / 降级路径 —— 「版本演进」
 HC := .github/scripts/health-check
 HC_VERSION := $(or $(VERSION),$(shell tr -d '[:space:]' < $(CHANNEL_DIR)/VERSION))
 
-health: ## 18 项功能检查（全新卷 + 同卷重建）
+health: ## 19 项功能检查（全新卷 + 同卷重建）
 	bash $(HC)/run.sh core "$(IMAGE)" "$(HC_VERSION)"
 
 health-mounts: ## 挂载方式与降级场景（混合挂载 + 只读降级）
