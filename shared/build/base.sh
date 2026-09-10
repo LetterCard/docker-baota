@@ -4,7 +4,7 @@
 #
 #  由 Dockerfile 调用：bash /opt/baota/build/base.sh
 #
-#  三个构建脚本为 stable、release 两个通道共用，按 base → panel → services
+#  三个构建脚本为 12.0.0、13.0.0 两个通道共用，按 base → panel → services
 #  的顺序执行。顺序的真源是 Dockerfile 里那三行 RUN，不在文件名上 ——
 #  文件名只表达「这个脚本是什么」，不重复编码调用顺序。
 #  Dockerfile 只保留各通道的构建参数与元数据差异；构建脚本目录在阶段 3
@@ -20,6 +20,9 @@ set -euxo pipefail
 
 # ---- 入参兜底：与 Dockerfile 中 ARG 的默认值保持一致，手工构建未传参时生效 ----
 APT_MIRROR="${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+# 备用镜像站：APT_MIRROR 不可用（镜像站抖动 / 下线）时自动切到它重试，
+# 避免单一镜像站成为构建的单点故障
+APT_MIRROR_FALLBACK="${APT_MIRROR_FALLBACK:-mirrors.aliyun.com}"
 TZ="${TZ:-Asia/Shanghai}"
 
 log()  { echo "🔨 [build] $*"; }
@@ -64,7 +67,13 @@ EOF
         "${APT_MIRROR}" "${VERSION_CODENAME}" \
         "${APT_MIRROR}" "${VERSION_CODENAME}" > /etc/apt/sources.list
 
-    apt-get update -y
+    # 镜像站兜底：默认用 APT_MIRROR；它不可用时换备用镜像重写源再试一次。
+    # 单一镜像站抖动会让整条构建失败，且表现是「莫名其妙的构建挂」，排查成本高
+    if ! apt-get update -y; then
+        warn "apt-get update 失败（镜像站 ${APT_MIRROR} 可能不可用），切备用镜像 ${APT_MIRROR_FALLBACK} 重试"
+        sed -i "s#${APT_MIRROR}#${APT_MIRROR_FALLBACK}#g" /etc/apt/sources.list
+        apt-get update -y
+    fi
 }
 
 install_packages() {

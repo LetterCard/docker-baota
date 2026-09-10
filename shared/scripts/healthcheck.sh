@@ -6,7 +6,7 @@
 #  脚本：逻辑可以直接执行与测试，改判据不用动 compose。
 #
 #  三段判据，任一失败即非零退出（unhealthy）：
-#    ① 持久化降级标记  /run/baota/degraded-critical 由 init-mounts.sh 在
+#    ① 持久化降级标记  /run/baota/degraded-critical 由 init.sh 在
 #                      关键目录持久化失败 / 只读降级时写入 —— 写入会静默丢失，
 #                      是本方案最危险的失效模式，必须在容器状态里直接可见。
 #    ② /data 磁盘水位  可用 < 1GB 或已用 ≥ 95%。
@@ -24,7 +24,7 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 配置真源：/baota/defaults.env（与 init-mounts / entrypoint / backup 共用同一份）
+# 配置真源：/baota/defaults.env（与 init.sh / entrypoint / backup 共用同一份）
 #
 # 磁盘水位查的是「持久化根」。用户一旦覆盖 PERSIST_DATA_ROOT /
 # PERSIST_SYSTEM_ROOT，这里的路径必须跟着变 ——

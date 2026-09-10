@@ -1,15 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-#  [构建 3/3] 面板补丁、开机自启、运行期脚本与顶层目录基线
+#  [构建 3/3] 开机自启、运行期脚本
 #
-#  必须排在 panel.sh 之后：此时 /www/server/panel 下的 script/ 与
-#  config/menu.json 才存在，补丁才有替换目标。
+#  必须排在 panel.sh 之后：面板已装好，/www/server/panel 才存在。
+#  「不可变面板」下本阶段不打任何面板补丁 —— 面板代码原样来自镜像，
+#  不再需要保存启动器副本，也不再生成顶层目录基线（运行期不巡检上游落点）。
 #
 #  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量，可直接读取）：
 #    IMAGE_VERSION         镜像版本，写入 /baota/VERSION 供运行期版本护栏使用
-#    PERSIST_DATA_ROOT     数据层根目录（面板/站点/数据库/备份）
+#    PERSIST_DATA_ROOT     持久化根（业务 data/www 与面板状态 data/panel 的父目录）
 #    PERSIST_SYSTEM_ROOT   系统层根目录（etc/usr/var/root/opt/home/srv）
-#    PERSIST_DATA_DIRS     数据层需要持久化的顶层目录
 #    PERSIST_SYSTEM_DIRS   系统层需要持久化的顶层目录
 #
 #  以下运行期文件由 Dockerfile 在调用本脚本前 COPY 到位：
@@ -17,7 +17,7 @@
 #    /baota/backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 #    /baota/defaults.env       运行期配置真源
 #    /baota/conf/log/          日志体积防线的配置源
-#    /baota/init-mounts.sh     阶段 0
+#    /baota/init.sh     阶段 0
 #    /baota/entrypoint.sh      阶段 1
 #    /etc/systemd/system/btpanel.service
 #
@@ -43,7 +43,7 @@ fi
 # ---- 入参兜底：仅在 defaults.env 缺失时生效，值与真源保持一致 ----
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
+PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
 log()  { echo "🔨 [build] $*"; }
@@ -52,11 +52,11 @@ warn() { echo "⚠️ [build][WARN] $*" >&2; }
 # ==============================================================================
 #  1. 运行期脚本权限
 #
-#  不再内置「禁用面板更新」补丁：面板版本由使用者自己决定，本项目只保证
-#  「销毁容器重建后数据不丢」。想让面板回到镜像自带的版本，用 make reset-panel
+#  不可变面板下没有「面板补丁」这一步：面板代码原样来自镜像层，
+#  不需要禁用更新、不需要保存启动器副本、也不需要 reset-panel 兜底
 # ==============================================================================
 setup_script_perms() {
-    log '1/5 设置运行期脚本权限'
+    log '1/4 设置运行期脚本权限'
 
     chmod 0755 "${BAOTA_DIR}/healthcheck.sh"
 }
@@ -65,7 +65,7 @@ setup_script_perms() {
 #  2. 开机自启与 systemd 复位
 # ==============================================================================
 setup_systemd() {
-    log '2/5 开机自启与 systemd 复位'
+    log '2/4 开机自启与 systemd 复位'
 
     chmod 0644 /etc/systemd/system/btpanel.service
 
@@ -95,42 +95,22 @@ setup_systemd() {
 }
 
 # ==============================================================================
-#  3. 保存面板启动器原版副本
+#  「保存面板启动器原版副本」（已移除）
 #
-#  背景（已实测确证）：/etc/init.d/bt 每次启动都会
-#      sed -i   改写 BT-Panel / BT-Task 的 shebang（python -> python3）
-#      chmod 700 上述两个文件（无条件执行）
-#  overlay 的 chmod 即便值相同也会触发 copy-up —— 首次启动面板后，
-#  这两个启动器就永久落进持久化层，之后无论换什么镜像都不再更新。
-#
-#  所以必须在镜像里留一份原版，运行期检测到版本变化时刷回去。
+#  旧模型下面板代码走 overlay，而 /etc/init.d/bt 每次启动都 sed + chmod
+#  BT-Panel / BT-Task，触发 copy-up 把启动器锁进持久化层、换镜像不再更新，
+#  于是构建期必须先存一份原版供运行期刷回。
+#  现在面板代码直接来自镜像层、不持久化，启动器永远是当前镜像的那一份，
+#  这一步连同 /baota/launcher 都不再需要。
 # ==============================================================================
-save_panel_launcher() {
-    log '3/5 保存面板启动器原版副本'
-
-    local src="${BAOTA_DIR}/launcher"
-    local name
-    mkdir -p "${src}"
-
-    for name in BT-Panel BT-Task; do
-        if [ -f "/www/server/panel/${name}" ]; then
-            cp -f "/www/server/panel/${name}" "${src}/${name}"
-            chmod 0755 "${src}/${name}"
-        else
-            warn "面板启动器不存在，无法保存副本：/www/server/panel/${name}"
-        fi
-    done
-
-    ls -1 "${src}"
-}
 
 # ==============================================================================
-#  4. 安装运行期脚本、版本信息与顶层目录基线
+#  3. 安装运行期脚本、版本信息与持久化目录骨架
 # ==============================================================================
 install_runtime_files() {
-    log '4/5 安装运行期脚本、版本信息与顶层目录基线'
+    log '3/4 安装运行期脚本、版本信息与持久化目录骨架'
 
-    chmod 0755 "${BAOTA_DIR}/init-mounts.sh" "${BAOTA_DIR}/entrypoint.sh"
+    chmod 0755 "${BAOTA_DIR}/init.sh" "${BAOTA_DIR}/entrypoint.sh"
 
     # 备份工具做一条到 PATH 里的软链，用法简化为 docker exec baota baota-backup
     if [ -f "${BAOTA_DIR}/backup.sh" ]; then
@@ -142,28 +122,17 @@ install_runtime_files() {
     # IMAGE_VERSION 由 CI 传入，与发布标签一致；本地手工构建默认 dev。
     printf '%s\n' "${IMAGE_VERSION:-unknown}" > "${BAOTA_DIR}/VERSION"
 
+    # 持久化目录骨架：预建业务与面板状态的父目录，以及系统层各 upper。
+    # 运行期 init.sh 会逐个 bind 进来；目录先建好，既能省一次 mkdir，
+    # 也能让「持久化根不可写」在建目录这一步就暴露出来。
+    # 只建父目录，不建具体子目录 —— 子目录由 WWW_DATA_SUBDIRS /
+    # PANEL_STATE_SUBDIRS 决定，真源在 defaults.env，这里不重复编码一份
+    mkdir -p "${PERSIST_DATA_ROOT}/www" "${PANEL_STATE_ROOT}"
+
     local dir
-    for dir in ${PERSIST_DATA_DIRS}; do
-        mkdir -p "${PERSIST_DATA_ROOT}/${dir}"
-    done
     for dir in ${PERSIST_SYSTEM_DIRS}; do
         mkdir -p "${PERSIST_SYSTEM_ROOT}/${dir}"
     done
-
-    # 顶层目录基线 = 镜像自带的顶层目录清单，供 entrypoint 每次启动巡检：
-    # 一旦上游把数据放到了新目录，启动日志会立刻告警，提醒把它加进对应目录列表。
-    # 这个文件运行期从不被写入，所以按 overlay 语义它始终跟随当前镜像 ——
-    # 换镜像即自动换基线，无需维护。
-    # 排除列表必须与 entrypoint.sh 的 audit_new_top_dirs 完全一致，
-    # 否则「构建期记进基线」与「运行期跳过检查」会错位，出现误告警或漏告警。
-    # /data 是持久化根，不是镜像自带的顶层目录，必须排除
-    for dir in /*; do
-        [ -d "${dir}" ] || continue
-        case "${dir}" in /proc|/sys|/dev|/run|/tmp|/baota|/data) continue ;; esac
-        echo "${dir#/}"
-    done > "${BAOTA_DIR}/baseline-dirs.txt"
-
-    cat "${BAOTA_DIR}/baseline-dirs.txt"
 }
 
 # ==============================================================================
@@ -173,7 +142,7 @@ install_runtime_files() {
 #  镜像体积不会因此减小（分层特性：只新增 whiteout），这里求的是运行期干净。
 # ==============================================================================
 drop_build_scripts() {
-    log '5/5 移除构建期脚本'
+    log '4/4 移除构建期脚本'
 
     rm -rf /opt/baota/build
 }
@@ -184,7 +153,6 @@ drop_build_scripts() {
 main() {
     setup_script_perms
     setup_systemd
-    save_panel_launcher
     install_runtime_files
     drop_build_scripts
 }

@@ -116,34 +116,35 @@ if inside test -e /run/baota/degraded; then
 fi
 pass "混合挂载下无降级"
 
-# 业务直通源落在宿主机 data/（data/www/wwwroot 等），面板 upper 与系统层在 system/
+# 业务源在宿主机 data/www/，面板状态在 data/panel-state/，系统层在 system/
 # shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
-[ -d "${WORK_ROOT}/data/www" ] || fail "业务直通源目录缺失（宿主机侧）：${WORK_ROOT}/data/www"
+[ -d "${WORK_ROOT}/data/www" ] || fail "业务源目录缺失（宿主机侧）：${WORK_ROOT}/data/www"
+[ -d "${WORK_ROOT}/data/panel-state" ] || fail "面板状态目录缺失（宿主机侧）：${WORK_ROOT}/data/panel-state"
 for d in $PERSIST_SYSTEM_DIRS; do
     [ -d "${WORK_ROOT}/system/${d}" ] || fail "系统层目录缺失（宿主机侧）：${WORK_ROOT}/system/${d}"
 done
-[ -d "${WORK_ROOT}/system/panel" ] || fail "面板 upper 缺失（宿主机侧）：${WORK_ROOT}/system/panel"
-pass "业务源/面板/系统目录在宿主机上分别就位"
+pass "业务源/面板状态/系统目录在宿主机上分别就位"
 
 step "A3) 混合挂载下写入落点正确"
 inside_sh 'echo mix > /etc/_mix_marker'
-inside_sh 'echo mix > /www/_mix_marker'
+inside_sh 'echo mix > /www/server/panel/data/_mix_marker'
 inside_sh 'echo mix > /www/wwwroot/_mix_marker'
-# 落盘路径语义：
-#   /etc           系统层 overlay，upper 在 system/etc/
-#   /www           面板 overlay，upper 在 system/panel/
-#   /www/wwwroot   业务直通 bind，源 = data/www/wwwroot（data 挂在 data/ 上）
-[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]        || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}/system/panel/_mix_marker" ]      || fail "/www 写入未落到面板 upper（system/panel/）"
-[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]  || fail "/www/wwwroot 写入未落到直通源 data/www/wwwroot/"
-pass "写入分别落到 system/etc/、system/panel/ 与 data/www/wwwroot"
+# 落盘路径语义（面板代码 /www/server/panel 本体刻意不落盘，它属于镜像）：
+#   /etc                    系统层 overlay，upper 在 system/etc/
+#   /www/wwwroot            业务 bind，源 = data/www/wwwroot
+#   /www/server/panel/data  面板状态 bind，源 = data/panel-state/data
+[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]            || fail "/etc 写入未落到系统层 system/etc/"
+[ -f "${WORK_ROOT}/data/panel-state/data/_mix_marker" ] || fail "面板状态写入未落到 data/panel-state/data/"
+[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]      || fail "/www/wwwroot 写入未落到绑定源 data/www/wwwroot/"
+pass "写入分别落到 system/etc/、data/panel-state/data 与 data/www/wwwroot"
 
 step "A4) 销毁容器后重建，数据不丢"
 docker rm -f "$CONTAINER" >/dev/null
 start_mixed
 wait_systemd
 inside test -f /etc/_mix_marker || fail "重建后系统层数据丢失"
-inside test -f /www/_mix_marker || fail "重建后数据层数据丢失"
+inside test -f /www/server/panel/data/_mix_marker || fail "重建后面板状态数据丢失"
+inside test -f /www/wwwroot/_mix_marker || fail "重建后业务数据丢失"
 if inside test -e /run/baota/degraded; then
     fail "重建后出现降级：$(docker exec "$CONTAINER" cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
 fi

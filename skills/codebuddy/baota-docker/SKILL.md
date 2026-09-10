@@ -9,7 +9,7 @@ allowed-tools: Read,Bash,Grep,Glob
 
 # baota-docker
 
-把宝塔 Linux 面板跑在容器里，用 overlay 分层实现「容器销毁、重建、换镜像，数据都不丢」。
+把宝塔 Linux 面板跑在容器里，用 overlay（系统层）+ bind（业务与面板状态）实现「容器销毁、重建、换镜像，数据都不丢」。
 
 ## 何时使用
 
@@ -25,13 +25,15 @@ allowed-tools: Read,Bash,Grep,Glob
  │    ├── wwwroot/        站点 data/www/wwwroot  ↔ 容器 /www/wwwroot
  │    ├── backup/         备份 data/www/backup   ↔ 容器 /www/backup
  │    └── server/data/    MySQL data/www/server/data ↔ /www/server/data
- ├── system/       ← 系统层
- │    ├── panel/          /www 面板 overlay upper（server/panel、wwwlogs 增量）
+ ├── panel/        ← 面板状态：逐子目录 bind（data、plugin）
+ │    ├── data/          面板配置 / SQLite  ↔ /www/server/panel/data
+ │    └── plugin/        插件            ↔ /www/server/panel/plugin
+ ├── system/       ← 系统层（overlay upper）
  │    ├── etc usr var root opt home srv
  │    └── .baota/  ← 元数据：lock image-version boot-history.log + <目录>.work/work
  └── .baota/       ← 数据层状态（并发锁）
 
-启动链：/busybox sh /baota/init-mounts.sh  →  bash /baota/entrypoint.sh  →  systemd
+启动链：/busybox sh /baota/init.sh  →  bash /baota/entrypoint.sh  →  systemd
 ```
 
 核心不变式：**你从没动过的文件跟镜像走，你改过的文件跟持久化层走。**
@@ -50,7 +52,7 @@ allowed-tools: Read,Bash,Grep,Glob
    `/run/baota/degraded-critical` 是门读取的对象，改告警文案不能影响门禁。
 5. **持久化层每次写入都不可逆**：新增「每次启动都做的事」时，必须先判断结果是否真的
    需要变化，变了才写（`cmp` / 符号链接检查 / 文件存在性检查）。
-6. **`init-mounts.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。
+6. **`init.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。
    函数内「局部变量」用下划线前缀 `_dir` / `_upper` / `_work` —— 不加前缀会覆盖调用方的循环变量。
 7. **清理必须写在产生垃圾的那一层内**。Docker 分层特性下，后续 `RUN` 删前面层的文件不减小体积。
 8. **CI 回写仓库时，`git rebase` 必须在「生成 / 修改任何文件」之前完成**。
@@ -58,9 +60,9 @@ allowed-tools: Read,Bash,Grep,Glob
    导致回写步骤整体失败 —— 表现为「日志显示成功但文件没变」。
    正确顺序：checkout → rebase（clean）→ 生成文件 → 注入 → add → commit。
 9. **工作流 job 的 `name` 不能含 `${{ }}` 动态表达式**。Actions 在表达式未求值时
-   会 fallback 成英文 job key（`verify-stable`），看不出在跑什么。
+   会 fallback 成英文 job key（`verify-v12`），看不出在跑什么。
    版本号放**步骤名**里，job 名用静态中文。
-10. **`report.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->` 标记区由 CI 维护**，
+10. **`report.md` / `drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
     不要手改 —— 下次巡检运行会被整体覆盖。
 11. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
     本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
@@ -72,33 +74,33 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
 | `shared/build/panel.sh` | 官方脚本安装宝塔 + 防火墙复位 + 清 swap + 账号链路预热 |
 | `shared/build/services.sh` | 运行期脚本权限、systemd 复位、启动器副本、目录基线、删构建脚本 |
-| `shared/scripts/init-mounts.sh` | 阶段 0：并发锁 → overlay 持久化 → 交棒 |
+| `shared/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay + 业务/面板 bind → 交棒 |
 | `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏 → 快照 → 首启初始化 → 版本提示 → exec systemd |
 | `shared/scripts/healthcheck.sh` | 三段判据：降级标记 / 磁盘水位 / 面板端口 |
 | `shared/scripts/backup.sh` | `baota-backup`：全量备份、校验、体积分布 |
 | `shared/conf/defaults.env` | ★ 运行期配置真源 |
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
-| `stable/` `release/` | 两个通道的 Dockerfile / compose / VERSION |
-| `.github/scripts/health-check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/health-check/published-check.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
-| `.github/scripts/drift-check/install-diff.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
-| `.github/scripts/drift-check/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
-| `.github/scripts/inject-report.py` | 把 `report.md` 注入 README 的报告标记区 |
-| `.github/workflows/published-check.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
-| `.github/workflows/drift-check.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
+| `dockerfile/12.0.0/` `dockerfile/13.0.0/` | 两个通道的 Dockerfile / compose / VERSION |
+| `.github/scripts/check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
+| `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
+| `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
+| `.github/scripts/report.py` | 把报告（report.md / drift.md）注入 README 对应标记区 |
+| `.github/workflows/check.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
+| `.github/workflows/drift.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
 | `.github/dependabot.yml` | 每周升级 Actions 版本（只开 PR，不自动合并） |
-| `report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
-| `drift.md` | 漂移检测报告（CI 生成并回写，勿手改） |
+| `.github/reports/report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
+| `.github/reports/drift.md` | 漂移检测报告（CI 生成并回写，勿手改） |
 | `docs/alternatives.md` | 方案选型：overlay vs bind mount 的取舍 |
 | `docs/` | 使用文档；`docs/development.md` 是开发者入口 |
 
 ## 常用命令
 
 ```bash
-make build CHANNEL=stable         # docker build -f stable/Dockerfile -t baota:dev .
-make up CHANNEL=stable            # 起容器
-make logs CHANNEL=stable          # 看日志（首次登录凭据在这里）
+make build CHANNEL=12.0.0         # docker build -f dockerfile/12.0.0/Dockerfile -t baota:dev .
+make up CHANNEL=12.0.0            # 起容器
+make logs CHANNEL=12.0.0          # 看日志（首次登录凭据在这里）
 make ps                           # 健康状态
 make health                       # 跑发布前健康检查
 make lint                         # shellcheck + bash -n + YAML（shellcheck 未装会跳过；CI 上 warning 即失败）
@@ -123,13 +125,13 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
   未 privileged / `/data` 在 SMB·NFS·exFAT·NTFS / `/data` 落在容器可写层
 - 启动被「另一个容器实例正在使用」拦下 → 两份 compose 共用同一 `data/`，
   确认没有别的实例后删 `data/system/.baota/lock`
-- 面板进程起不来 → 检查 `data/system/panel/server/panel` 是否被写坏；
+- 面板进程起不来 → 检查 `data/panel/data` 是否被写坏（面板代码在镜像里、只读，不会因持久化写坏）；
   启动器被 copy-up 锁死时改镜像版本会自动刷回 `/baota/launcher/`
 - 想看历史上哪次启动开始降级 → `cat data/system/.baota/boot-history.log`
 
-**面板版本与镜像版本不一致** → 有人在面板里点过更新，新版文件已写进持久化层。
-这是预期行为（本项目不禁止面板内更新），`entrypoint` 的 `audit_panel_version`
-只给信息提示。想回到镜像版本：`make reset-panel CONFIRM=yes`（配置与数据保留）。
+**面板版本与镜像版本不一致** → `audit_panel_version` 只在镜像版本记录与当前镜像不匹配时提示，
+不告警、不阻断。面板代码本就来自镜像、运行期只读，面板里点「更新」写不进持久层，
+不存在「旧持久层里的面板代码覆盖新镜像」的情况。想换面板版本：直接换镜像标签，无需 `reset-panel`（新架构下该命令已废弃）。
 
 **每日巡检失败或 report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
 

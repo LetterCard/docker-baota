@@ -29,12 +29,14 @@ compose 只挂一个 `data`（`./data:/data`）。三层分得很清楚：
 
 ```
 data/                        （./data:/data）
-├── www/                      业务数据 —— 三个直通目录，宿主机可直接读写
+├── www/                      业务数据 —— bind 目录，宿主机可直接读写
 │   ├── wwwroot/       ↔ 容器 /www/wwwroot     （站点）
 │   ├── backup/        ↔ 容器 /www/backup      （备份）
 │   └── server/data/   ↔ 容器 /www/server/data （MySQL）
+├── panel/              面板状态 —— bind 目录
+│   ├── data/          ↔ 容器 /www/server/panel/data   （面板配置 / SQLite 库）
+│   └── plugin/        ↔ 容器 /www/server/panel/plugin （已安装的插件）
 ├── system/                   系统层
-│   ├── panel/         ← /www 面板 overlay upper（server/panel、wwwlogs 等增量）
 │   ├── etc usr var root opt home srv   ← 各目录 overlay upper
 │   └── .baota/        ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
 └── .baota/                   ← 数据层状态（并发锁，隐藏）
@@ -42,34 +44,43 @@ data/                        （./data:/data）
 
 容器内看到的路径与官方一致：面板在 `/www/server/panel`，站点在
 `/www/wwwroot`，MySQL 在 `/www/server/data`，备份在 `/www/backup`。
+唯一的不同是：**面板代码本身不在 `data/` 里** —— 它属于镜像。
 
-## 为什么这样分
+## 为什么这样分（不可变面板）
 
-`/www` 里混着两类完全不同性质的东西：
+`/www` 里混着三类不同性质的东西：
 
-| | 例子 | 需要什么 |
+| | 例子 | 处理方式 |
 |---|---|---|
-| 面板代码 / 默认配置 | `/www/server/panel`、`/www/wwwlogs` | **overlay**：换镜像自动用新版（lower 更新，upper 留增量） |
-| 纯业务数据 | `/www/wwwroot`（站点）、`/www/server/data`（MySQL）、`/www/backup` | **直通 bind**：镜像里为空、运行期全量，宿主机直改有内核保证 |
+| 面板代码 / 默认配置 | `/www/server/panel`、`/www/wwwlogs` | **不持久化**：直接来自镜像层，换镜像整套换新 |
+| 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin` | **bind 直通**：必须保留，否则等于重装面板 |
+| 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup` | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
 
 所以：
 
-- `/www` 仍是 overlay，但它的 upper 落在 **`data/system/panel`**（面板增量都在这）
-- 站点 / 备份 / MySQL 是 overlay 之后的 **bind 直通**，源在 `data/www/` 下
-  （不在任何 overlay upper 里，宿主机 SMB / 文件管理直接改有保证）
+- `/www/server/panel` **不做任何挂载**，代码原样来自镜像层，换镜像即升级
+- 面板状态（`data`、`plugin`）逐个 **bind** 到 `data/panel/` 下
+- 站点 / 备份 / MySQL 逐个 **bind** 到 `data/www/` 下
 - 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/system/<同名>`
 
-> ⚠️ 可写层是「增量」不是「全量」：`data/system/panel` 里只有你改过的面板文件，
-> 完整面板在镜像 lower 层。而 `data/www/wwwroot` 等是纯运行期数据，**内容完整**。
+> ⚠️ 面板代码不持久化，意味着在面板里点「更新」不会生效（写入被拦截）。
+> 这是刻意的：面板版本只有一个真源（镜像），不会再出现「面板自己更新到一半、
+> 又和镜像版本打架」的情况。升级面板 = 换镜像标签；回退 = 换回上一个标签。
+
+> `data/www/*` 与 `data/panel/*` 都是**内容完整**的目录（不是增量），
+> 可以直接拷贝、打包、迁移；`data/system/<dir>` 是 overlay **增量**，
+> 完整内容 = 镜像 lower 层 + 这里的增量。
 
 ### 挂载原理
 
 ```
-/www（面板）    ←overlay→  upper = data/system/panel，work = data/system/.baota/www.work
 /etc usr …      ←overlay→  upper = data/system/<同名>，work = data/system/.baota/<同名>.work
-/www/wwwroot    ←bind→     源 = data/www/wwwroot        （直通）
-/www/backup     ←bind→     源 = data/www/backup
+/www/wwwroot     ←bind→    源 = data/www/wwwroot
+/www/backup      ←bind→    源 = data/www/backup
 /www/server/data ←bind→    源 = data/www/server/data
+/www/server/panel/data   ←bind→  源 = data/panel/data
+/www/server/panel/plugin ←bind→  源 = data/panel/plugin
+/www/server/panel        ←不挂载→ 直接来自镜像层（只读、不可变）
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
 ```
 
@@ -87,9 +98,10 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 | 内容 | 换镜像后 |
 |---|---|
-| 面板代码 / 默认配置 | lower 换成新版，自动更新 |
-| 面板里你改过的文件 | upper（`data/system/panel`）保留你的版本 |
-| 站点 / MySQL / 备份 | 直通目录，完全不受影响 |
+| 面板代码 / 默认配置 | 整体换成新镜像的版本 —— **升级面板就是这么发生的** |
+| 面板配置与插件 | bind 目录（`data/panel/`），完全不受影响 |
+| 站点 / MySQL / 备份 | bind 目录（`data/www/`），完全不受影响 |
+| 系统目录 | overlay lower 换新，你改过的部分保留在 upper |
 
 ---
 
@@ -99,7 +111,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 所以升级 / 降级前会自动把 `/www/server/panel/data` 复制一份到
 `/www/backup/auto/`（宿主 `data/www/backup/auto/`），默认保留 3 份。
 
-面板数据库的宿主路径：`data/system/panel/server/panel/data/`。
+面板数据库（配置与 SQLite 库）的宿主路径：`data/panel/data/`。
 
 ---
 

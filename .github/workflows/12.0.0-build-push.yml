@@ -1,33 +1,33 @@
-name: 🚀 稳定版：构建并发布镜像
+name: 🚀 12.0.0：构建并发布镜像
 
 # ==============================================================================
-#  🚀 [stable 通道] 多架构构建 → 19 项健康检查 → 发布到 DockerHub
+#  🚀 [12.0.0 通道] 多架构构建 → 19 项健康检查 → 发布到 DockerHub
 #
-#    与 release 通道（release-build-push.yml）的区别：
-#      - 版本来源：stable/VERSION（version job 每次运行时自动探测校准）
+#    与 13.0.0 通道（13.0.0-build-push.yml）的区别：
+#      - 版本来源：dockerfile/12.0.0/VERSION（version job 每次运行时自动探测校准）
 #      - 安装脚本：installStable_12.sh（稳定线 12.x）
 #      - 只发布精确版本标签，不打 latest
-#      - 安装脚本地址：stable 必须显式拿到它 —— version job 要下载脚本、
-#        从横幅里提取版本号（release 走 get_version API，不需要下载）。
-#        地址的唯一真源是 stable/Dockerfile 的 ARG INSTALL_URL，
+#      - 安装脚本地址：12.0.0 必须显式拿到它 —— version job 要下载脚本、
+#        从横幅里提取版本号（13.0.0 走 get_version API，不需要下载）。
+#        地址的唯一真源是 dockerfile/12.0.0/Dockerfile 的 ARG INSTALL_URL，
 #        由 version job 现场解析；build job 不传 --build-arg，用同一份默认值
 #
 #  版本来源
-#    每次运行探测安装脚本横幅版本：高于 stable/VERSION 就按新版本发布，
-#    发布成功后才回写 stable/VERSION（与 release 通道对称：文件永远对应
+#    每次运行探测安装脚本横幅版本：高于 dockerfile/12.0.0/VERSION 就按新版本发布，
+#    发布成功后才回写 dockerfile/12.0.0/VERSION（与 13.0.0 通道对称：文件永远对应
 #    已推送的版本，构建失败时文件不动，可重新手动触发重试）
 #
 #  触发方式
 #    🖱️ 手动触发（唯一方式，定时已移除）。语义 = 手动跑一次探测：
-#                  先下载安装脚本取横幅版本，与 stable/VERSION 比对，
+#                  先下载安装脚本取横幅版本，与 dockerfile/12.0.0/VERSION 比对，
 #                  有新版本才走完整构建发布，无新版本则到此为止。
 #    🔧 可选输入「强制更新」：勾选后跳过「已是最新」判断，无条件走完整
 #                  构建发布 —— 用于上游没变但需要重新出镜像的场景，
 #                  无需手改 VERSION。版本仍以探测结果为准（探测失败则用
 #                  VERSION 当前值）。
-#                  ⚠️ 发布前应先看 .github/workflows/drift-check.yml 的报告与
+#                  ⚠️ 发布前应先看 .github/workflows/drift.yml 的报告与
 #                  issue，确认上游无关键漂移。
-#    发布成功后回写 stable/VERSION；文件变更不触发任何工作流。
+#    发布成功后回写 dockerfile/12.0.0/VERSION；文件变更不触发任何工作流。
 #
 #  并行多架构
 #    amd64 与 arm64 各自跑在「原生」runner 上，总耗时约等于较慢的那个。
@@ -54,7 +54,7 @@ name: 🚀 稳定版：构建并发布镜像
 on:
   # 发布已改为手动，不再定时自动发布。
   # 目的：上游（宝塔官方 / Debian 基础镜像）一旦出问题，自动发布会把坏镜像直接
-  # 分发给用户。改为手动后，发布前必然先看到 .github/workflows/drift-check.yml
+  # 分发给用户。改为手动后，发布前必然先看到 .github/workflows/drift.yml
   # 的报告与 issue，由人确认无关键漂移后再触发本工作流。
   #
   # 唯一的输入项是「强制更新」：它只影响「是否跳过『已是最新』判断」，
@@ -73,14 +73,14 @@ on:
 
 # 同一时刻只保留最新一次运行，避免两套多架构构建互相抢缓存
 concurrency:
-  group: stable-build
+  group: 12.0.0-build
   cancel-in-progress: true
 
 env:
-  # 必须与 stable/docker-compose.yml 里的 image 保持一致
+  # 必须与 dockerfile/docker-compose.yml 里的 image 保持一致
   IMAGE_NAME: baota
   # 这里刻意没有 INSTALL_URL：安装脚本地址的唯一真源是
-  # stable/Dockerfile 的 ARG INSTALL_URL 默认值。
+  # dockerfile/12.0.0/Dockerfile 的 ARG INSTALL_URL 默认值。
   #   · build job  不传 --build-arg，直接用 Dockerfile 的默认值；
   #   · version job 需要它去探测上游版本，从 Dockerfile 现场解析（见该 job）。
   # 在 workflow 里再抄一份，漂移的表现是「探测到的版本」与「实际装出来的
@@ -90,12 +90,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # 版本号只有一个来源，抽出来只读一次，两个构建 job 共用。
   #
-  # 每次运行探测上游横幅版本并与 stable/VERSION 比对：只自动升版、绝不自动
-  # 降级（stable/VERSION 是降级检测的比对基准）。本 job 不回写文件 ——
+  # 每次运行探测上游横幅版本并与 dockerfile/12.0.0/VERSION 比对：只自动升版、绝不自动
+  # 降级（dockerfile/12.0.0/VERSION 是降级检测的比对基准）。本 job 不回写文件 ——
   # 回写发生在发布成功之后（writeback），保证文件永远对应已推送的版本。
   # ---------------------------------------------------------------------------
   version:
-    name: 🔍 探测版本（stable 通道）
+    name: 🔍 探测版本（12.0.0 通道）
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -108,10 +108,10 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      # ---- 安装脚本地址：唯一真源是 stable/Dockerfile 的 ARG ----
+      # ---- 安装脚本地址：唯一真源是 dockerfile/12.0.0/Dockerfile 的 ARG ----
       #
-      # 与 release 通道不同，stable 必须拿到这个地址：本 job 要下载它、从横幅里
-      # 提取版本号（release 走 get_version API，不需要下载脚本，所以它的
+      # 与 13.0.0 通道不同，12.0.0 必须拿到这个地址：本 job 要下载它、从横幅里
+      # 提取版本号（13.0.0 走 get_version API，不需要下载脚本，所以它的
       # workflow 里根本没有这一项）。
       #
       # 从 Dockerfile 现场解析，而不是在 workflow 里再抄一份默认值：
@@ -121,9 +121,9 @@ jobs:
       - name: 🔗 读取安装脚本地址（取自 Dockerfile）
         id: install_url
         run: |
-          URL=$(sed -n 's/^ARG INSTALL_URL=//p' stable/Dockerfile | head -1)
+          URL=$(sed -n 's/^ARG INSTALL_URL=//p' dockerfile/12.0.0/Dockerfile | head -1)
           if [ -z "${URL}" ]; then
-            echo "::error::无法从 stable/Dockerfile 解析 ARG INSTALL_URL"
+            echo "::error::无法从 dockerfile/12.0.0/Dockerfile 解析 ARG INSTALL_URL"
             exit 1
           fi
           case "${URL}" in
@@ -136,12 +136,12 @@ jobs:
       - name: 🔍 探测上游版本并与 VERSION 比对
         id: resolve
         run: |
-          # 地址由上一步从 stable/Dockerfile 解析而来（那里是唯一真源）
+          # 地址由上一步从 dockerfile/12.0.0/Dockerfile 解析而来（那里是唯一真源）
           INSTALL_URL='${{ steps.install_url.outputs.url }}'
 
-          VER=$(tr -d '[:space:]' < stable/VERSION)
+          VER=$(tr -d '[:space:]' < dockerfile/12.0.0/VERSION)
           if [ -z "$VER" ]; then
-            echo "::error::stable/VERSION 为空"
+            echo "::error::dockerfile/12.0.0/VERSION 为空"
             exit 1
           fi
           if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -163,19 +163,19 @@ jobs:
           CHANGED=false
           if [ -z "$ACTUAL" ]; then
             echo "probe=failed" >> "$GITHUB_OUTPUT"
-            echo "::warning::无法探测上游版本（${INSTALL_URL}），按 stable/VERSION(${VER}) 继续；若上游已更新，健康检查的版本校验会拦住"
+            echo "::warning::无法探测上游版本（${INSTALL_URL}），按 dockerfile/12.0.0/VERSION(${VER}) 继续；若上游已更新，健康检查的版本校验会拦住"
           else
             echo "probe=ok" >> "$GITHUB_OUTPUT"
             if [ "$ACTUAL" != "$VER" ]; then
               # 语义比较：只自动升版。横幅低于 VERSION（官方回滚或提取异常）时
-              # 绝不自动降级 —— stable/VERSION 此时就是比对基准
+              # 绝不自动降级 —— dockerfile/12.0.0/VERSION 此时就是比对基准
               LATEST=$(printf '%s\n%s\n' "$VER" "$ACTUAL" | sort -V | tail -1)
               if [ "$LATEST" = "$ACTUAL" ]; then
                 echo "::warning::发现上游新版本：${VER} → ${ACTUAL}，将按新版本构建发布"
                 VER=$ACTUAL
                 CHANGED=true
               else
-                echo "::warning::上游横幅版本(${ACTUAL}) 低于 stable/VERSION(${VER})，"
+                echo "::warning::上游横幅版本(${ACTUAL}) 低于 dockerfile/12.0.0/VERSION(${VER})，"
                 echo "::warning::可能是官方回滚或提取异常，绝不自动降级，按 ${VER} 继续"
               fi
             fi
@@ -216,11 +216,11 @@ jobs:
             esac
           fi
           {
-            echo "### 🔍 stable 版本探测"
+            echo "### 🔍 12.0.0 版本探测"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
-            echo "| stable/VERSION | \`${CURRENT}\` |"
+            echo "| dockerfile/12.0.0/VERSION | \`${CURRENT}\` |"
             echo "| 上游横幅版本 | \`${VALUE}\` |"
             echo "| 强制更新 | ${FORCE} |"
             echo "| 结果 | ${TEXT} |"
@@ -295,7 +295,7 @@ jobs:
       - name: 🏗️ 构建镜像（加载到本地，供健康检查）
         run: |
           echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
-          # INSTALL_URL 刻意不传：用 stable/Dockerfile 里 ARG 的默认值，
+          # INSTALL_URL 刻意不传：用 dockerfile/12.0.0/Dockerfile 里 ARG 的默认值，
           # 与 version job 探测时解析到的是同一份（见 env 处的说明）
           # BASE_IMAGE 留空时不传，用 Dockerfile 的 ARG 默认值（唯一真源）。
           # 必须用 if 而非 &&：留空时 [ -n "" ] 为假，&& 短路让整行返回非零，
@@ -306,7 +306,7 @@ jobs:
           fi
 
           docker buildx build \
-            --file ./stable/Dockerfile \
+            --file ./dockerfile/12.0.0/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --load \
             --provenance=false \
@@ -314,8 +314,8 @@ jobs:
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
             --tag "baota:candidate" \
-            --cache-from "type=gha,scope=stable-${{ matrix.arch }}" \
-            --cache-to "type=gha,scope=stable-${{ matrix.arch }},mode=max" \
+            --cache-from "type=gha,scope=12.0.0-${{ matrix.arch }}" \
+            --cache-to "type=gha,scope=12.0.0-${{ matrix.arch }},mode=max" \
             .
           docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
 
@@ -336,9 +336,9 @@ jobs:
           VER="${{ needs.version.outputs.value }}"
 
           # 后台启动三套，每套单独写日志；前台 wait 等齐；任一非零则整步失败
-          bash .github/scripts/health-check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
-          bash .github/scripts/health-check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
-          bash .github/scripts/health-check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
+          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
 
           FAILED=0
           wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
@@ -380,7 +380,7 @@ jobs:
           fi
 
           docker buildx build \
-            --file ./stable/Dockerfile \
+            --file ./dockerfile/12.0.0/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --provenance=false \
             "${EXTRA_ARGS[@]}" \
@@ -388,7 +388,7 @@ jobs:
             --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \
             --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
-            --cache-from "type=gha,scope=stable-${{ matrix.arch }}" \
+            --cache-from "type=gha,scope=12.0.0-${{ matrix.arch }}" \
             .
           DIGEST=$(jq -r '."containerimage.digest"' "/tmp/meta-${{ matrix.arch }}.json")
           case "${DIGEST}" in
@@ -453,8 +453,8 @@ jobs:
           echo "arm64: ${ARM64}"
           [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少某个架构的 digest"; exit 1; }
 
-          # 约定：stable 是稳定线，只打版本号标签；latest 由 release 通道独占，
-          # 这里绝对不能加 -t "${REPO}:latest" —— 会把 latest 误指向 stable
+          # 约定：12.0.0 是稳定线，只打版本号标签；latest 由 13.0.0 通道独占，
+          # 这里绝对不能加 -t "${REPO}:latest" —— 会把 latest 误指向 12.0.0
           docker buildx imagetools create -t "${REPO}:${VER}" \
             "${REPO}@${AMD64}" \
             "${REPO}@${ARM64}"
@@ -483,7 +483,7 @@ jobs:
           docker buildx imagetools inspect "${REPO}:${TAG}"
 
   # ---------------------------------------------------------------------------
-  # ✏️ 发布成功之后才回写 stable/VERSION —— 与 release 通道对称：
+  # ✏️ 发布成功之后才回写 dockerfile/12.0.0/VERSION —— 与 13.0.0 通道对称：
   # 文件永远对应「已推送」的版本；构建失败时文件不动，下次运行自动重试。
   #
   # 关键约束（之前踩过坑）：
@@ -498,7 +498,7 @@ jobs:
   #      build → publish → writeback，整轮 30 分钟构建浪费。
   # ---------------------------------------------------------------------------
   writeback:
-    name: ✏️ 回写 stable/VERSION
+    name: ✏️ 回写 dockerfile/12.0.0/VERSION
     needs: [version, publish]
     if: needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
@@ -532,22 +532,22 @@ jobs:
           # 2) 再次检查：rebase 后若 VERSION 已是目标值，说明并发运行已先一步
           #    回写完毕（典型场景：两次手动触发重叠），
           #    无需重复 commit，直接成功退出。
-          CURRENT=$(tr -d '[:space:]' < stable/VERSION || true)
+          CURRENT=$(tr -d '[:space:]' < dockerfile/12.0.0/VERSION || true)
           if [ "${CURRENT}" = "${VER}" ]; then
-            echo "stable/VERSION 已是 ${VER}，并发回写已生效，跳过"
+            echo "dockerfile/12.0.0/VERSION 已是 ${VER}，并发回写已生效，跳过"
             exit 0
           fi
 
-          printf '%s\n' "${VER}" > stable/VERSION
-          git add stable/VERSION
-          git commit -m "chore: release baota ${VER} (writeback stable/VERSION)"
+          printf '%s\n' "${VER}" > dockerfile/12.0.0/VERSION
+          git add dockerfile/12.0.0/VERSION
+          git commit -m "chore: release baota ${VER} (writeback dockerfile/12.0.0/VERSION)"
 
           # 3) 直接 push，不再用 if-then-else 包裹。
           #    push 失败（非 fast-forward / 分支保护 / 权限不足）会原样
           #    冒泡成 step 失败：红❌ + ::error::，下次运行会重新探测并重试。
           git push origin HEAD:main
-          echo "已回写 stable/VERSION = ${VER}"
+          echo "已回写 dockerfile/12.0.0/VERSION = ${VER}"
 
       - name: 📋 输出摘要
         run: |
-          echo "### ✏️ stable/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ✏️ dockerfile/12.0.0/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"

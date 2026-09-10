@@ -1,7 +1,7 @@
 # ==============================================================================
 #  仓库根构建上下文排除清单
 #
-#  两个通道都以「仓库根」为构建上下文（docker build -f stable/Dockerfile .），
+#  两个通道都以「仓库根」为构建上下文（docker build -f dockerfile/12.0.0/Dockerfile .），
 #  用 -f 指定各自的 Dockerfile。shared/ 下的构建脚本、运行期脚本与 systemd unit
 #  都是镜像的一部分，必须留在上下文中。
 #
@@ -37,7 +37,6 @@ data/
 !.env.example
 
 # 各通道的编排与版本号文件（镜像内不需要；Dockerfile 本身必须留在上下文中）
-stable/docker-compose.yml
-stable/VERSION
-release/docker-compose.yml
-release/VERSION
+dockerfile/docker-compose.yml
+dockerfile/12.0.0/VERSION
+dockerfile/13.0.0/VERSION

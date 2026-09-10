@@ -1,28 +1,28 @@
-name: 📦 正式版：构建并发布镜像
+name: 📦 13.0.0：构建并发布镜像
 
 # ==============================================================================
-#  📦 release 通道：每日自动跟进宝塔「正式版」并发布镜像
+#  📦 13.0.0 通道：每日自动跟进宝塔「13.0.0」并发布镜像
 #
-#  与 stable 通道的区别：
+#  与 12.0.0 通道的区别：
 #    - 安装脚本用引导式的 install_panel.sh（自身不含版本号，装出的版本由
-#      官方服务端决定），而 stable 用带版本横幅的 installStable_12.sh
-#    - 版本号只取自官方 get_version API，与 release/VERSION 比对决定是否发布，
+#      官方服务端决定），而 12.0.0 用带版本横幅的 installStable_12.sh
+#    - 版本号只取自官方 get_version API，与 dockerfile/13.0.0/VERSION 比对决定是否发布，
 #      不再实装 install_panel.sh 去反查版本
-#    - 发布 <版本> 与 latest 两个标签（stable 只发精确版本标签）
+#    - 发布 <版本> 与 latest 两个标签（12.0.0 只发精确版本标签）
 #
 #  流程（每天自动跑一次，也可手动触发）：
 #    🧹 lint        静态检查（shellcheck + 语法 + YAML），无条件运行，
 #                   与是否有新版本无关
-#    🔍 detect      get_version API 取最新版号，与 release/VERSION 比对；
+#    🔍 detect      get_version API 取最新版号，与 dockerfile/13.0.0/VERSION 比对；
 #                   一致 → 结束；不一致 → 进入构建
 #    🏗️ build       双架构：构建两次 —— 第一次本地构建+三套健康检查
 #                   （19 项功能检查 / 挂载与降级场景 / 升级与降级路径），
 #                   通过后第二次按 digest 推送（不创建 arch 标签）
 #    🚀 publish     合并 digest → 打 repo:<版本> 与 repo:latest
-#    ✏️ writeback   把「实际推送的版本号」回写 release/VERSION，供下次比对
+#    ✏️ writeback   把「实际推送的版本号」回写 dockerfile/13.0.0/VERSION，供下次比对
 #
 #  关键保证：
-#    - release/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
+#    - dockerfile/13.0.0/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
 #    - 构建失败时 VERSION 不动，下次运行会自动重试同一版本
 #    - 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈
 #    - 官方安装脚本若被改坏，构建阶段（安装宝塔 + 19 项健康检查）会失败中断，
@@ -36,9 +36,9 @@ name: 📦 正式版：构建并发布镜像
 
 on:
   # 发布已改为手动，不再定时自动发布。
-  # release 通道会推进 `latest` 标签，每天自动发布意味着上游一旦出问题，
+  # 13.0.0 通道会推进 `latest` 标签，每天自动发布意味着上游一旦出问题，
   # 坏镜像会立刻被所有使用 `latest` 的用户拉到 —— 这是本项目最大的风险敞口。
-  # 改为手动：先确认 .github/workflows/drift-check.yml 的报告无关键漂移，
+  # 改为手动：先确认 .github/workflows/drift.yml 的报告无关键漂移，
   # 再手动触发本工作流。
   #
   # 唯一的输入项是「强制更新」：它只影响「是否跳过『已一致』判断」，
@@ -57,23 +57,23 @@ on:
 # 同一时刻只跑一个：排队期间上游版本若已被上一次运行发布，
 # 重新探测会得到「已一致」，后续 job 自动跳过
 concurrency:
-  group: release-build-push
+  group: 13.0.0-build
   cancel-in-progress: false
 
 env:
-  VERSION_FILE: release/VERSION
-  # 安装脚本地址不再在这里定义：release 通道没有 workflow_dispatch 输入可覆盖它，
-  # 写死会与 release/Dockerfile 的 ARG 默认值重复。由 Dockerfile 默认值提供即可。
+  VERSION_FILE: dockerfile/13.0.0/VERSION
+  # 安装脚本地址不再在这里定义：13.0.0 通道没有 workflow_dispatch 输入可覆盖它，
+  # 写死会与 dockerfile/13.0.0/Dockerfile 的 ARG 默认值重复。由 Dockerfile 默认值提供即可。
   VERSION_API: https://www.bt.cn/api/panel/get_version
   IMAGE_NAME: baota
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 🔍 版本号比对：get_version API vs release/VERSION。
+  # 🔍 版本号比对：get_version API vs dockerfile/13.0.0/VERSION。
   # 一致 → 今天无事可做；不一致 → 输出新版本号，交给 build 构建发布。
   # ---------------------------------------------------------------------------
   detect:
-    name: 🔍 探测版本（release 通道）
+    name: 🔍 探测版本（13.0.0 通道）
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -150,11 +150,11 @@ jobs:
             TEXT="❌ 探测失败，详见日志"
           fi
           {
-            echo "### 📦 release 通道检查"
+            echo "### 📦 13.0.0 通道检查"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
-            echo "| release/VERSION | \`${CURRENT}\` |"
+            echo "| dockerfile/13.0.0/VERSION | \`${CURRENT}\` |"
             echo "| get_version API | \`${{ steps.detect.outputs.version || '获取失败' }}\` |"
             echo "| 强制更新 | ${FORCE} |"
             echo "| 结果 | ${TEXT} |"
@@ -232,7 +232,7 @@ jobs:
           fi
 
           docker buildx build \
-            --file ./release/Dockerfile \
+            --file ./dockerfile/13.0.0/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --load \
             --provenance=false \
@@ -240,8 +240,8 @@ jobs:
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ needs.detect.outputs.version }}" \
             --tag "baota:candidate" \
-            --cache-from "type=gha,scope=release-${{ matrix.arch }}" \
-            --cache-to "type=gha,scope=release-${{ matrix.arch }},mode=max" \
+            --cache-from "type=gha,scope=13.0.0-${{ matrix.arch }}" \
+            --cache-to "type=gha,scope=13.0.0-${{ matrix.arch }},mode=max" \
             .
           docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
 
@@ -262,9 +262,9 @@ jobs:
           VER="${{ needs.detect.outputs.version }}"
 
           # 后台启动三套，每套单独写日志；前台 wait 等齐；任一非零则整步失败
-          bash .github/scripts/health-check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
-          bash .github/scripts/health-check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
-          bash .github/scripts/health-check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
+          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
 
           FAILED=0
           wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
@@ -305,7 +305,7 @@ jobs:
           fi
 
           docker buildx build \
-            --file ./release/Dockerfile \
+            --file ./dockerfile/13.0.0/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
             --provenance=false \
             "${EXTRA_ARGS[@]}" \
@@ -313,7 +313,7 @@ jobs:
             --build-arg "IMAGE_VERSION=${{ needs.detect.outputs.version }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \
             --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
-            --cache-from "type=gha,scope=release-${{ matrix.arch }}" \
+            --cache-from "type=gha,scope=13.0.0-${{ matrix.arch }}" \
             .
           DIGEST=$(jq -r '."containerimage.digest"' "/tmp/meta-${{ matrix.arch }}.json")
           case "${DIGEST}" in
@@ -334,7 +334,7 @@ jobs:
       - name: 📦 上传 digest 产物
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: digest-release-${{ matrix.arch }}
+          name: digest-13.0.0-${{ matrix.arch }}
           path: "/tmp/digests/${{ matrix.arch }}"
           retention-days: 1
 
@@ -355,7 +355,7 @@ jobs:
       - name: 📥 下载 digest 产物
         uses: actions/download-artifact@v8.0.1
         with:
-          pattern: digest-release-*
+          pattern: digest-13.0.0-*
           path: /tmp/digests
           merge-multiple: true
 
@@ -376,8 +376,8 @@ jobs:
           echo "amd64: ${AMD64}  arm64: ${ARM64}"
           [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少 digest"; exit 1; }
 
-          # 约定：release 是正式版通道，同时打版本号与 latest 两个标签，
-          # 让用户 docker pull 不指定版本时无脑拉到最新正式版
+          # 约定：13.0.0 通道同时打版本号与 latest 两个标签，
+          # 让用户 docker pull 不指定版本时无脑拉到最新13.0.0
           docker buildx imagetools create \
             -t "${REPO}:${VER}" -t "${REPO}:latest" \
             "${REPO}@${AMD64}" "${REPO}@${ARM64}"
@@ -390,7 +390,7 @@ jobs:
           REPO="${{ steps.publish.outputs.repo }}"
           TAG="${{ steps.publish.outputs.tag }}"
           {
-            echo "### 🚀 release 通道发布完成"
+            echo "### 🚀 13.0.0 通道发布完成"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
@@ -404,10 +404,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # ✏️ 发布成功之后才回写 release/VERSION —— 保证文件永远对应「已推送」
+  # ✏️ 发布成功之后才回写 dockerfile/13.0.0/VERSION —— 保证文件永远对应「已推送」
   # 的版本。构建失败时 VERSION 不动，下次运行会自动重试同一版本。
   #
-  # 关键约束（与 stable 通道对称，踩过的坑不重复犯）：
+  # 关键约束（与 12.0.0 通道对称，踩过的坑不重复犯）：
   #   1. 必须先 git fetch + rebase 最新 main，再 commit。
   #      publish 跑完通常要 30+ 分钟，期间若有人在 main 上提交（手动改回、
   #      其他 bot、并发 workflow 调度等），bot checkout 时拿到的不是最新 HEAD，
@@ -419,7 +419,7 @@ jobs:
   #      build → publish → writeback，整轮 30 分钟构建浪费。
   # ---------------------------------------------------------------------------
   writeback:
-    name: ✏️ 回写 release/VERSION
+    name: ✏️ 回写 dockerfile/13.0.0/VERSION
     needs: [detect, publish]
     if: needs.detect.outputs.changed == 'true'
     runs-on: ubuntu-latest
@@ -460,7 +460,7 @@ jobs:
 
           printf '%s\n' "${VER}" > "$VERSION_FILE"
           git add "$VERSION_FILE"
-          git commit -m "chore: release baota ${VER} (writeback release/VERSION)"
+          git commit -m "chore: release baota ${VER} (writeback dockerfile/13.0.0/VERSION)"
 
           # 3) 直接 push，不再用 if-then-else 包裹。
           #    push 失败（非 fast-forward / 分支保护 / 权限不足）会原样
@@ -470,4 +470,4 @@ jobs:
 
       - name: 📋 输出摘要
         run: |
-          echo "### ✏️ release/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ✏️ dockerfile/13.0.0/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"

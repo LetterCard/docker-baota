@@ -41,15 +41,12 @@ install_panel() {
     cd /root
     wget -O install.sh "${INSTALL_URL:?未指定 INSTALL_URL}"
 
-    local secret args
-    secret=$(build_secret)
-    # 安装参数含义（已核对官方脚本解析逻辑）：
-    #   -y            跳过交互式确认
-    #   -P            固定端口（脚本默认取 10000~65535 随机值）
-    #   -u / -p       面板用户名 / 口令
-    #   --safe-path   安全入口，脚本会写成 /<值> 存进 data/admin_path.pl
-    #   --ssl-disable 不生成自签证书
-    args="-y -P ${PANEL_PORT} -u ${PANEL_USER} -p ${secret} --safe-path ${secret}"
+    # 只传 -y：端口 / 用户名 / 口令 / 安全入口都在容器首次启动时由 entrypoint 重写
+    # （原 -P -u -p --safe-path 只是装好时的占位值，且依赖对官方脚本参数解析的猜测；
+    #  去掉后安装参数只剩稳定的 -y，不再随上游参数变化而崩）
+    # --ssl-disable：不生成自签证书（默认开，容器多在反代后使用）
+    local args
+    args="-y"
     if [ "${DISABLE_PANEL_SSL}" = 'true' ]; then
         args="${args} --ssl-disable"
     fi

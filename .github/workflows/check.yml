@@ -3,7 +3,7 @@ name: 🔬 日巡检：已发布镜像回归
 # ==============================================================================
 #  🔬 从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写 report.md
 #
-#  与另两个工作流（stable / release 构建发布）的分工：
+#  与另两个工作流（12.0.0 / 13.0.0 构建发布）的分工：
 #    那两个  验的是「本地构建出来的候选镜像」，作用是把坏镜像拦在推送之前，
 #            只在探测到新版本时才构建
 #    本工作流 验的是「DockerHub 上已经发布的镜像」，作用是每天确认线上镜像
@@ -11,12 +11,12 @@ name: 🔬 日巡检：已发布镜像回归
 #            日常回归里第一时间发现，而不是等用户踩到
 #
 #  验的是哪个镜像
-#    版本号取自仓库里的 stable/VERSION 与 release/VERSION（这两个文件由
+#    版本号取自仓库里的 dockerfile/12.0.0/VERSION 与 dockerfile/13.0.0/VERSION（这两个文件由
 #    发布流水线在推送成功后回写，永远对应「已发布」的标签），不是重新探测
 #    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
 #
 #  验什么
-#    .github/scripts/health-check/published-check.sh：19 项，覆盖持久化
+#    .github/scripts/check/published.sh：19 项，覆盖持久化
 #    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
 #    备份包结构 / 首启凭据 / 补丁生效），外加一段脱敏后的首次启动日志
 #
@@ -27,17 +27,17 @@ name: 🔬 日巡检：已发布镜像回归
 #  架构
 #    只验 linux/amd64（GitHub-hosted runner 的原生架构）。arm64 镜像要跑
 #    QEMU 模拟，而本方案的核心是 overlay 持久化 —— 模拟环境下的结论不可信，
-#    宁可不测也不给假绿灯。arm64 的真实覆盖由 stable / release 两个工作流
+#    宁可不测也不给假绿灯。arm64 的真实覆盖由 12.0.0 / 13.0.0 两个工作流
 #    在原生 ARM runner 上的构建期健康检查负责
 #
 #  并行与进度
-#    prep 读取两个通道版本后，verify-stable / verify-release 两个 job 并行
+#    prep 读取两个通道版本后，verify-v12 / verify-v13 两个 job 并行
 #    跑（互不依赖），在 Actions UI 里并排显示、各自可见进度，墙钟时间约为
 #    单通道耗时；collect 在两者都结束后汇总并回写 report.md
 #
 #  触发时机
-#    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 release 每日 17:00 之后、
-#       stable 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
+#    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 13.0.0 每日 17:00 之后、
+#       12.0.0 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
 #    🖱️ 手动：随时触发
 #
 #  注意：本工作流只由 schedule / workflow_dispatch 触发，回写 report.md
@@ -51,13 +51,13 @@ on:
 
 # 让它跑完再排下一次：中途取消会留下残缺的报告
 concurrency:
-  group: published-check
+  group: published
   cancel-in-progress: false
 
 env:
   IMAGE_NAME: baota
   REPORT: report.md
-  HC: .github/scripts/health-check
+  HC: .github/scripts/check
 
 jobs:
   # ── 1) 读取两个通道的已发布版本，作为后续 job 的输入 ──────────────────────
@@ -65,8 +65,8 @@ jobs:
     name: 🔖 读取已发布版本
     runs-on: ubuntu-latest
     outputs:
-      stable: ${{ steps.set.outputs.stable }}
-      release: ${{ steps.set.outputs.release }}
+      v12: ${{ steps.set.outputs.v12 }}
+      v13: ${{ steps.set.outputs.v13 }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
@@ -77,18 +77,18 @@ jobs:
         id: set
         run: |
           set -euo pipefail
-          STABLE=$(tr -d '[:space:]' < stable/VERSION)
-          RELEASE=$(tr -d '[:space:]' < release/VERSION)
-          for v in "${STABLE}" "${RELEASE}"; do
+          V12=$(tr -d '[:space:]' < dockerfile/12.0.0/VERSION)
+          V13=$(tr -d '[:space:]' < dockerfile/13.0.0/VERSION)
+          for v in "${V12}" "${V13}"; do
             [ -n "${v}" ] || { echo "::error::VERSION 文件为空"; exit 1; }
           done
-          echo "stable=${STABLE}" >> "$GITHUB_OUTPUT"
-          echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "稳定版 ${STABLE} / 正式版 ${RELEASE}"
+          echo "v12=${V12}" >> "$GITHUB_OUTPUT"
+          echo "v13=${V13}" >> "$GITHUB_OUTPUT"
+          echo "12.0.0 ${V12} / 13.0.0 ${V13}"
 
   # ── 2) 两个通道并行验证（互不依赖，UI 并排、各自可见进度） ────────────────
-  verify-stable:
-    name: 🐂 验证稳定版
+  verify-v12:
+    name: 🐂 验证12.0.0
     needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -96,24 +96,24 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 运行回归验证（${{ needs.prep.outputs.stable }}）
+      - name: 🔬 运行回归验证（${{ needs.prep.outputs.v12 }}）
         run: |
-          bash "${HC}/published-check.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.stable }}" \
-            "${{ needs.prep.outputs.stable }}" \
-            /tmp/report-stable.md
+          bash "${HC}/published.sh" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.v12 }}" \
+            "${{ needs.prep.outputs.v12 }}" \
+            /tmp/report-v12.md
 
       - name: 📤 上传报告片段
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: report-stable
-          path: /tmp/report-stable.md
+          name: report-v12
+          path: /tmp/report-v12.md
           if-no-files-found: warn
           retention-days: 7
 
-  verify-release:
-    name: 📦 验证正式版
+  verify-v13:
+    name: 📦 验证13.0.0
     needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -121,19 +121,19 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 运行回归验证（${{ needs.prep.outputs.release }}）
+      - name: 🔬 运行回归验证（${{ needs.prep.outputs.v13 }}）
         run: |
-          bash "${HC}/published-check.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.release }}" \
-            "${{ needs.prep.outputs.release }}" \
-            /tmp/report-release.md
+          bash "${HC}/published.sh" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.v13 }}" \
+            "${{ needs.prep.outputs.v13 }}" \
+            /tmp/report-v13.md
 
       - name: 📤 上传报告片段
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: report-release
-          path: /tmp/report-release.md
+          name: report-v13
+          path: /tmp/report-v13.md
           if-no-files-found: warn
           retention-days: 7
 
@@ -141,7 +141,7 @@ jobs:
   #  if: always() —— 即使某通道验证失败，也要把失败现场写进报告
   collect:
     name: 📝 汇总并回写 report.md
-    needs: [prep, verify-stable, verify-release]
+    needs: [prep, verify-v12, verify-v13]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -173,46 +173,46 @@ jobs:
         run: |
           set -euo pipefail
 
-          STABLE="${{ needs.prep.outputs.stable }}"
-          RELEASE="${{ needs.prep.outputs.release }}"
-          [ -n "${STABLE}" ] && [ -n "${RELEASE}" ] \
+          V12="${{ needs.prep.outputs.v12 }}"
+          V13="${{ needs.prep.outputs.v13 }}"
+          [ -n "${V12}" ] && [ -n "${V13}" ] \
             || { echo "::error::prep 未产出版本号，跳过报告生成"; exit 1; }
 
-          S_ICON=$([ "${{ needs.verify-stable.result }}" = 'success' ] && echo '✅' || echo '❌')
-          R_ICON=$([ "${{ needs.verify-release.result }}" = 'success' ] && echo '✅' || echo '❌')
-          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${STABLE}"
-          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${RELEASE}"
+          S_ICON=$([ "${{ needs.verify-v12.result }}" = 'success' ] && echo '✅' || echo '❌')
+          R_ICON=$([ "${{ needs.verify-v13.result }}" = 'success' ] && echo '✅' || echo '❌')
+          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${V12}"
+          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${V13}"
 
           {
             echo '# 📊 已发布镜像每日验证报告'
             echo
-            echo '> 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。'
+            echo '> 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。'
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
             echo "- 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）"
-            echo "- 验证脚本：\`${HC}/published-check.sh\`"
+            echo "- 验证脚本：\`${HC}/published.sh\`"
             echo
             echo '## 概要'
             echo
             echo '| 通道 | 镜像 | 结果 |'
             echo '|---|---|---|'
-            echo "| 🐂 稳定版 stable | \`${S_TAG}\` | ${S_ICON} |"
-            echo "| 📦 正式版 release | \`${R_TAG}\` | ${R_ICON} |"
+            echo "| 🐂 12.0.0 | \`${S_TAG}\` | ${S_ICON} |"
+            echo "| 📦 13.0.0 | \`${R_TAG}\` | ${R_ICON} |"
             echo
             echo '---'
             echo
-            echo '## 🐂 稳定版 stable'
+            echo '## 🐂 12.0.0'
             echo
-            cat /tmp/reports/report-stable/report-stable.md 2>/dev/null \
-              || echo '_（稳定版验证未产出报告，见构建日志）_'
+            cat /tmp/reports/report-v12/report-v12.md 2>/dev/null \
+              || echo '_（12.0.0验证未产出报告，见构建日志）_'
             echo
             echo '---'
             echo
-            echo '## 📦 正式版 release'
+            echo '## 📦 13.0.0'
             echo
-            cat /tmp/reports/report-release/report-release.md 2>/dev/null \
-              || echo '_（正式版验证未产出报告，见构建日志）_'
+            cat /tmp/reports/report-v13/report-v13.md 2>/dev/null \
+              || echo '_（13.0.0验证未产出报告，见构建日志）_'
           } > "${{ env.REPORT }}"
 
           echo '--- report.md 已生成（前 30 行）---'
@@ -223,7 +223,7 @@ jobs:
           set -euo pipefail
 
           # rebase 已在上一独立步骤完成（working tree 干净时执行），这里只注入并提交
-          python3 .github/scripts/inject-report.py "${{ env.REPORT }}"
+          python3 .github/scripts/report.py "${{ env.REPORT }}"
 
           git add "${{ env.REPORT }}" README.md
 
@@ -247,16 +247,16 @@ jobs:
             echo
             echo "| 通道 | 结果 |"
             echo '|---|---|'
-            echo "| 稳定版 ${{ needs.prep.outputs.stable }} | ${{ needs.verify-stable.result }} |"
-            echo "| 正式版 ${{ needs.prep.outputs.release }} | ${{ needs.verify-release.result }} |"
+            echo "| 12.0.0 ${{ needs.prep.outputs.v12 }} | ${{ needs.verify-v12.result }} |"
+            echo "| 13.0.0 ${{ needs.prep.outputs.v13 }} | ${{ needs.verify-v13.result }} |"
             echo
             echo '完整报告见仓库根目录 `report.md`'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🚦 判定
         run: |
-          if [ "${{ needs.verify-stable.result }}" != 'success' ] \
-             || [ "${{ needs.verify-release.result }}" != 'success' ]; then
+          if [ "${{ needs.verify-v12.result }}" != 'success' ] \
+             || [ "${{ needs.verify-v13.result }}" != 'success' ]; then
             echo "::error::镜像回归验证未全部通过，详见 ${{ env.REPORT }}"
             exit 1
           fi

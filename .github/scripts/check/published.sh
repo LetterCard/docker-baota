@@ -2,8 +2,8 @@
 # ==============================================================================
 #  🔬 已发布镜像验证（从 DockerHub 拉取 → 起容器 → 跑检查 → 输出报告片段）
 #
-#  用法：published-check.sh <镜像:标签> <期望的宝塔版本> [输出 md 文件]
-#       例：published-check.sh bugseeker/baota:12.0.0 12.0.0 /tmp/stable.md
+#  用法：published.sh <镜像:标签> <期望的宝塔版本> [输出 md 文件]
+#       例：published.sh bugseeker/baota:12.0.0 12.0.0 /tmp/stable.md
 #
 #  与发布前健康检查（core / mounts / upgrade）的分工：
 #    那三套  验的是「本地构建出来的候选镜像」，用于把坏镜像拦在推送之前
@@ -23,8 +23,8 @@
 # ==============================================================================
 set -uo pipefail
 
-IMAGE=${1:?用法: published-check.sh <镜像:标签> <期望版本> [输出 md]}
-EXPECT=${2:?用法: published-check.sh <镜像:标签> <期望版本> [输出 md]}
+IMAGE=${1:?用法: published.sh <镜像:标签> <期望版本> [输出 md]}
+EXPECT=${2:?用法: published.sh <镜像:标签> <期望版本> [输出 md]}
 OUT_MD=${3:-}
 
 C="baota-verify-$$"
@@ -140,13 +140,13 @@ VER_NOW=$(docker exec "$C" cat /data/system/.baota/image-version 2>/dev/null | t
 docker exec "$C" sh -c '
     echo p > /etc/_v
     mkdir -p /var/spool/cron && echo p > /var/spool/cron/_v
-    echo p > /www/_v
+    echo p > /www/server/panel/data/_v
     echo p > /www/wwwroot/_v' >/dev/null 2>&1
 if docker exec "$C" test -f /data/system/etc/_v \
    && docker exec "$C" test -f /data/system/var/spool/cron/_v \
-   && docker exec "$C" test -f /data/system/panel/_v \
+   && docker exec "$C" test -f /data/panel-state/data/_v \
    && docker exec "$C" test -f /data/www/wwwroot/_v; then
-    ok "四层写入分别落盘（etc / var 计划任务 / 面板 upper / 直通 wwwroot）"
+    ok "四层写入分别落盘（etc / var 计划任务 / 面板状态 / 业务 wwwroot）"
 else
     bad "四层写入落盘失败"
 fi
@@ -179,7 +179,7 @@ if docker exec "$C" baota-backup >/dev/null 2>&1; then
         MEMBERS=$(docker exec "$C" sh -c "tar tzf '$BK' 2>/dev/null" || true)
         m_ok=1
         echo "$MEMBERS" | grep 'www/wwwroot/' >/dev/null || m_ok=0
-        echo "$MEMBERS" | grep 'system/panel/server/panel/data' >/dev/null || m_ok=0
+        echo "$MEMBERS" | grep 'panel-state/data' >/dev/null || m_ok=0
         echo "$MEMBERS" | grep 'MANIFEST.txt' >/dev/null || m_ok=0
         echo "$MEMBERS" | grep -E 'www/backup/(auto|manual|database|rsync)/' >/dev/null && m_ok=0
         echo "$MEMBERS" | grep 'system/var/log/journal' >/dev/null && m_ok=0

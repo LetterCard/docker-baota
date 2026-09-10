@@ -14,7 +14,7 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
-| `degraded-critical` 存在 | `etc`/`var`/`www` 持久化失败或只读降级 | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
+| `degraded-critical` 存在 | `etc`/`var` 等系统层或 `www`/`panel` 关键目录持久化失败或只读降级 | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
 | `degraded` 存在 | 非关键目录未持久化 | 同上，功能受损但不丢核心数据 |
 | 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/www/backup`、`data/www/wwwlogs`；`baota-backup --list` 看分布 |
 | 面板端口无响应 | 面板未启动 / 端口被改 | `docker exec baota bt status`；检查 compose 端口映射与 `port.pl` 是否一致 |
@@ -39,7 +39,7 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 ### 启动被「另一个容器实例正在使用」拦下
 
 同一份 `data/` 不允许两个容器同时挂载（内核 EBUSY / 行为未定义）。
-常见原因：stable 与 release 两个 compose 用了同一个 data 目录，或手工 `docker run` 挂了同一个卷。
+常见原因：12.0.0 与 13.0.0 两个 compose 用了同一个 data 目录，或手工 `docker run` 挂了同一个卷。
 
 确认没有其它实例在跑之后，删除 `data/system/.baota/lock` 再启动。
 
@@ -51,23 +51,18 @@ docker exec baota systemctl status btpanel
 docker exec baota ls /www/server/panel/BT-Panel /www/server/panel/pyenv/bin/python
 ```
 
-- `BT-Panel` 不存在 → 持久化层被写坏，清空 `data/www` 后重启可回退到镜像自带面板
+- `BT-Panel` 不存在 → 镜像面板损坏（面板代码来自镜像、不持久化，清 `data/www` 不会重置它）；重建 / 回退镜像，或清 `data/panel` 重置面板配置（不影响代码）
 - pyenv 缺 `psutil` / `pyinotify`（常见于 arm64 构建）→ 面板无法启动，这是发布门禁会拦的项
 - 启动器被 copy-up 锁死 → 改镜像版本时 `refresh_panel_launcher` 会自动刷回 `/baota/launcher/`
 
 ### 面板版本与镜像版本不一致
 
-有人在面板里点过更新，新版文件已写进持久化层并会一直保留。
-这是预期行为（本项目不禁止面板内更新），`audit_panel_version` 只给信息提示、不告警。
+`audit_panel_version` 只在镜像版本记录与当前镜像不匹配时给信息提示、不告警、不阻断。
+面板代码本就来自镜像、运行期只读，面板里点「更新」写不进持久层，
+不存在「旧持久层里的面板代码覆盖新镜像」的情况。
 
-想让面板回到镜像自带的版本：
-
-```bash
-make reset-panel CONFIRM=yes
-```
-
-（只重置面板代码；面板 overlay 的 upper 在 `data/system/panel`，容器里的
-`/www/server/panel` 对应宿主这一层；站点与数据库在 `data/www/` 下，不受影响。）
+想换面板版本：直接换镜像标签（升级 / 回退），无需 `reset-panel`
+（新架构下面板代码不持久化，该命令已废弃）。
 
 ### 备份体积逐次翻倍
 
@@ -132,7 +127,7 @@ cat data/system/.baota/boot-history.log
 新增检查项时注意：**不要靠 grep 中文告警文案判断**，读 `/run/baota/degraded*` 标记文件。
 `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PERSIST_DATA_ROOT` 等从 `shared/conf/defaults.env` 解析，不要在本脚本里硬编码。
 
-### 每日巡检：report.md 没更新
+### 每日巡检：.github/reports/report.md 没更新
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
@@ -150,7 +145,7 @@ cat data/system/.baota/boot-history.log
 ```bash
 brew install shellcheck                        # 有 brew 时
 python3 -m pip install --user shellcheck-py    # 没有 brew 时（装完确认在 PATH 里）
-shellcheck -x -S warning shared/build/*.sh shared/scripts/*.sh .github/scripts/health-check/*.sh
+shellcheck -x -S warning shared/build/*.sh shared/scripts/*.sh .github/scripts/check/*.sh
 ```
 
 典型：SC2034「变量未使用」——循环计数器用不到就写成 `_`（`for _ in $(seq 1 60)`）。

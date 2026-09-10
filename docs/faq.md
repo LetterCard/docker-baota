@@ -18,7 +18,8 @@ docker exec baota rm -f /www/wwwroot/<站点>/.user.ini
 
 ## 🔌 面板端口被改过之后健康检查失败
 
-健康检查从 `data/system/panel/server/panel/data/port.pl` 现读端口，不会写死 8888。
+健康检查从容器内的 `/www/server/panel/data/port.pl` 现读端口
+（对应宿主机 `data/panel/data/port.pl`），不会写死 8888。
 但 compose 里的端口映射要你自己同步改，否则新端口在容器内生效了却没映射出来，外面连不上。
 
 ## 🔑 忘记面板口令
@@ -37,7 +38,7 @@ docker exec -it baota bt 5         # 重置面板口令
 ## 🔒 启动被「另一个容器实例正在使用」拦下
 
 同一份 `data/` 不允许两个容器同时挂载（内核 EBUSY / 行为未定义）。
-常见原因是 stable 与 release 两个 compose 用了同一个 data 目录，或手工 `docker run` 挂了同一个卷。
+常见原因是 12.0.0 与 13.0.0 两个 compose 用了同一个 data 目录，或手工 `docker run` 挂了同一个卷。
 
 确认没有其它实例在跑之后，删除 `data/system/.baota/lock` 再启动。
 锁由内核持有、容器死亡会自动释放，正常重启不需要手工删。

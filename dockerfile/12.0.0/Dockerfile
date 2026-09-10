@@ -1,36 +1,41 @@
 # syntax=docker/dockerfile:1
 # ==============================================================================
-#  🐳 宝塔 Linux 面板容器化（stable 通道：稳定线 12.x）
+#  🐳 宝塔 Linux 面板容器化（12.0.0 通道：稳定线 12.x）
 #
-#  与 release/Dockerfile 的差异只有两处：INSTALL_URL 默认值与 LABEL 描述。
+#  与 dockerfile/13.0.0/Dockerfile 的差异只有两处：INSTALL_URL 默认值与 LABEL 描述。
 #  构建逻辑抽在 shared/build/ 三阶段脚本里，两个通道共用；
 #  运行期脚本在 shared/scripts/，systemd unit 在 shared/conf/。
-#  两个通道都以「仓库根」为构建上下文：docker build -f stable/Dockerfile .
+#  两个通道都以「仓库根」为构建上下文：docker build -f dockerfile/12.0.0/Dockerfile .
 #
-#  🧱 持久化原理（本方案的核心，详见 docs/persistence.md）：
-#    /etc /usr /var /www /root /opt /home /srv 采用 overlay 分层持久化
-#      lowerdir = 镜像内的同名目录（随镜像升级而更新）
-#      upperdir = /data/<dir> 或 /data/system/<dir>（可写层直接就叫目录名，与容器内路径一一对应）
-#      workdir  = /data/system/.baota/<dir>.work（内部工作目录，内核会在其中再建一层 work；须与 upper 同文件系统）
-#    容器内看到的仍是原路径，读写无感知；所有新增 / 修改 / 删除
-#    （含 overlay whiteout）都落在 /data/<dir> 里。
-#    对比「直接 VOLUME ["/etc","/usr","/www"]」的朴素做法：卷为空时 Docker 不会复制
-#    镜像内容（容器起不来），升级后旧卷又会屏蔽新镜像；本方案 upper 为空即等价于
-#    镜像内容，零复制、零膨胀，且 lower 可平滑升级。
+#  🧱 持久化原理（本方案的核心，详见 docs/persistence.md）——「不可变面板」：
+#
+#    ● 系统层 /etc /usr /var /root /opt /home /srv  ← overlay 分层持久化
+#        lowerdir = 镜像内的同名目录（随镜像升级而更新）
+#        upperdir = /data/system/<dir>（可写层直接就叫目录名，与容器路径一一对应）
+#        workdir  = /data/system/.baota/<dir>.work（须与 upper 同文件系统）
+#      容器内看到的仍是原路径，读写无感知；新增 / 修改 / 删除（含 whiteout）
+#      都落在 /data/system/<dir> 里。
+#
+#    ● 业务与面板状态 ← 逐子目录 bind（不套 overlay）
+#        /www/wwwroot              ← data/www/wwwroot          站点
+#        /www/backup               ← data/www/backup           备份
+#        /www/server/data          ← data/www/server/data      MySQL
+#        /www/server/panel/data    ← data/panel/data     面板配置 / SQLite
+#        /www/server/panel/plugin  ← data/panel/plugin   插件
+#
+#    ● 面板代码 /www/server/panel ← 不持久化，直接来自镜像层（只读）
+#      升级面板 = 换镜像；面板内「更新」对代码的写入会被只读拦截（设计如此）。
+#      面板版本只有一个真源，不会与「面板内更新」互相打架 —— 启动器恢复、
+#      版本审计、reset-panel、构建期 py3.13 预升这些补丁因此全部不需要。
 # ==============================================================================
 
-# 基础镜像。默认 debian:12（bookworm，LTS 支持至 2028）。
-# 探路 Debian 13（trixie，宝塔官方镜像所用）：--build-arg BASE_IMAGE=debian:13，
-# 或在触发工作流时填 base_image（留空则用本文件默认值——避免常量抄两份）。
-# ⚠️ 切换后必须同步两处并跑完整回归：
-#   1. .github/workflows/drift-check.yml 的 BASE_IMAGE（漂移检测要同基座）
-#   2. 19 项健康检查 + 实际装一次 PHP 扩展（所有系统包版本都会变）
+# 基础镜像固定为 debian:12（bookworm，LTS 支持至 2028），不切换基座。
 ARG BASE_IMAGE=debian:12
 FROM ${BASE_IMAGE}
 
 # ------------------------------------------------------------------------------
 # OCI 标准元数据。IMAGE_SOURCE / IMAGE_VERSION 由 CI 传入
-# （.github/workflows/stable-build-push.yml），本地手工构建用默认值即可
+# （.github/workflows/12.0.0-build-push.yml），本地手工构建用默认值即可
 # ------------------------------------------------------------------------------
 ARG IMAGE_SOURCE=https://github.com/
 ARG IMAGE_VERSION=dev
@@ -58,7 +63,7 @@ ARG PANEL_USER=baota
 # 因此默认关闭；需要 HTTPS 时在面板里挂正式证书即可
 ARG DISABLE_PANEL_SSL=true
 
-# 官方安装脚本。stable 通道固定为稳定线 12.x，上游发新版时 URL 不变，
+# 官方安装脚本。12.0.0 通道固定为稳定线 12.x，上游发新版时 URL 不变，
 # 所以跟进新版本无需改动本文件
 ARG INSTALL_URL=https://download.bt.cn/install/installStable_12.sh
 
@@ -72,7 +77,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # 运行环境
 #
 # 这里只放语言、时区与面板相关变量。
-# PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_DATA_DIRS / PERSIST_SYSTEM_DIRS /
+# PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_SYSTEM_DIRS /
 # AUTO_BACKUP_KEEP 的
 # 唯一真源是 shared/conf/defaults.env，不在 ENV 里重复一份 ——
 # 两处定义迟早会漂移，而漂移的表现是「静默丢数据」。
@@ -83,7 +88,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 #   etc   系统配置 / systemd unit / sshd / apt 源 / ufw 规则
 #   usr   apt 与源码安装的软件、/usr/local
 #   var   ★ 计划任务 /var/spool/cron、日志、dpkg 数据库、/var/bt_setupPath.conf
-#   www   宝塔全部数据：面板、站点、数据库、备份、证书、插件
+#   www   宝塔运行时：面板代码来自镜像层，业务与面板状态 bind 到 data/
 #   root  root 家目录：.ssh/authorized_keys、.bashrc、pip 配置
 #   opt / home / srv  第三方软件与用户数据
 #
@@ -105,34 +110,24 @@ ENV LANG=en_US.UTF-8 \
 #    文件名只表达「这个脚本是什么」，不重复编码调用顺序。
 #      1/3 base    基础系统 + 救援 shell + SSH
 #      2/3 panel   官方脚本安装宝塔 + 安装后收尾（依赖 base 装好的 apt 与 systemd）
-#      3/3 services 面板补丁 + 开机自启 + 运行期脚本与顶层目录基线
+#      3/3 services 开机自启 + 运行期脚本
 # ==============================================================================
 COPY shared/build/ /opt/baota/build/
 
 RUN bash /opt/baota/build/base.sh
 
-# 🔧 [2/3] panel 安装 + 构建期预升 py3.13（⚠️ 必须同一个 RUN 层）：
-#    官方安装先落 py3.7（590M），若升级放独立层，py3.13 层只是遮蔽旧层——
-#    遮蔽 ≠ 删除，registry 按层累计体积，590M 旧环境永远压在镜像里
-#    （实测独立层写法的 py3.13 版 compressed 反而比 py3.7 版大）。同层内
-#    先装后升再清理，py3.7 从未单独成层，镜像 1.55GB → 约 1.0GB。
-#    官方 bundle 预编译包实测 amd64 约 90 秒，面板未运行不影响——完整包
-#    自带依赖，psutil/flask/gevent 与面板启动/HTTP 均实测通过。
-#    脚本会自动备份旧环境（pyenv_backup_*，约 600M）——镜像不需要回滚能力，
-#    连同锁文件、日志与下载缓存一并清除（实测残留仅此四处）。
-#    如需保留 py3.7：--build-arg UPGRADE_PY313=false
-#    ⚠️ arm64：py3.13 的 aarch64 预编译支持未单独验证（官方 13.0.0 arm64 出厂即
-#       3.13.14，大概率 Route 1/2 可用）；若走 Route 3 源码编译，arm64 构建会显著
-#       变慢，首次构建看日志确认路线。
-ARG UPGRADE_PY313=true
-RUN bash /opt/baota/build/panel.sh \
-    && if [ "$UPGRADE_PY313" = "true" ]; then \
-        bash /www/server/panel/script/upgrade_py313_bundle.sh \
-        && rm -rf /www/server/panel/pyenv_backup_* /tmp/py313* /root/.cache \
-        && rm -f /www/server/panel/.upgrade_py313.lock \
-                /www/server/panel/logs/upgrade_py313.log \
-                /www/server/panel/logs/*.pid /www/server/panel/logs/*.log; \
-    fi
+# 🔧 [2/3] panel 安装：完全交给官方脚本，不干预面板自带的 Python 版本。
+#
+#    这里曾经做「构建期预升 py3.13」：官方 12.x 出厂带 py3.7，项目自己跑
+#    upgrade_py313_bundle.sh 把它升到 3.13，并清理脚本留下的备份、锁文件与
+#    日志（镜像 1.55G → 约 1.0G，收益不小）。
+#    代价是强依赖宝塔内部的升级脚本：上游改脚本名、换升级方式就会构建失败，
+#    升上来的 pyenv 还得逐个处理备份残留 / 锁文件 / 日志等清理细节 ——
+#    典型的「替宝塔做内部决定」，也是最容易随上游变动而失效的一类补丁。
+#
+#    不可变面板把版本决定权交回官方：面板用什么 Python 由官方安装脚本决定，
+#    本项目不介入，也就不需要为它的内部实现变化买单。
+RUN bash /opt/baota/build/panel.sh
 
 # 运行期脚本一律放在 /baota（rootfs 根部，不属于任何持久化目录）：
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖。
@@ -146,7 +141,7 @@ COPY shared/conf/defaults.env      /baota/defaults.env
 # 里的旧数据屏蔽（与启动器、面板补丁同一个坑）
 COPY shared/conf/log/ /baota/conf/log/
 COPY shared/conf/btpanel.service   /etc/systemd/system/btpanel.service
-COPY shared/scripts/init-mounts.sh /baota/init-mounts.sh
+COPY shared/scripts/init.sh /baota/init.sh
 COPY shared/scripts/entrypoint.sh  /baota/entrypoint.sh
 
 RUN bash /opt/baota/build/services.sh
@@ -154,11 +149,13 @@ RUN bash /opt/baota/build/services.sh
 # 面板 8888、phpMyAdmin 888、HTTP 80/443、SSH 22、MySQL 3306、FTP 20/21 及被动端口
 EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 
-# 持久化层：挂载这一个目录即可保住全部数据（数据层 data/www + 系统层 data/system）
+# 持久化层：挂载这一个目录即可保住全部数据
+#   业务 data/www、面板状态 data/panel、系统层 data/system
+#   面板代码不在这里 —— 它属于镜像，换镜像即升级
 VOLUME ["/data"]
 
 # 两段式启动：
-#   阶段 0 /baota/init-mounts.sh 用静态 busybox 建好 overlay 持久化
+#   阶段 0 /baota/init.sh 用静态 busybox 建好 overlay 持久化
 #   阶段 1 /baota/entrypoint.sh  做首次初始化，最后 exec 到 CMD（systemd）
-ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
+ENTRYPOINT ["/busybox", "sh", "/baota/init.sh"]
 CMD ["/usr/sbin/init"]

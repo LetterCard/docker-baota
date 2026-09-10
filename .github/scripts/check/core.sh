@@ -28,18 +28,36 @@ VOLUME="baota-healthcheck-data-$$"
 
 # 配置真源：与镜像共用 shared/conf/defaults.env，不在本脚本里再写一份硬编码。
 # 两边一旦漂移，表现是「CI 测过的和线上跑的不是同一套目录」，必须在这里对齐
+# 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"）。
+# read_default 只做 sed 取值、不会展开，这里用间接展开补一层，
+# 否则 PANEL_STATE_ROOT 会拿到字面量 ${PERSIST_DATA_ROOT}/panel，导致路径全错。
+# 被引用的变量（PERSIST_DATA_ROOT 等）已在前面用 read_default 取过，已存在于环境
+expand_vars() {
+    local s="$1" name
+    while [[ "$s" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        name="${BASH_REMATCH[1]}"
+        s="${s//\${$name\}/${!name}}"
+    done
+    echo "$s"
+}
+
 read_default() {
-    sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env
+    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
 }
 
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
-PASSTHROUGH_DIRS=$(read_default PASSTHROUGH_DIRS)
-# 「根」与面板 upper 也读真源：落盘路径由根派生，避免硬编码漂移
+WWW_DATA_SUBDIRS=$(read_default WWW_DATA_SUBDIRS)
+[ -n "${WWW_DATA_SUBDIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 WWW_DATA_SUBDIRS"; exit 1; }
+PANEL_STATE_SUBDIRS=$(read_default PANEL_STATE_SUBDIRS)
+[ -n "${PANEL_STATE_SUBDIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_SUBDIRS"; exit 1; }
+# 三个「根」也读真源：落盘路径由根派生，避免硬编码漂移
 PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
+PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
 [ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
 [ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
+[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
 
 pass() { echo "  ✅ $*"; }
 step() { echo; echo "🩺 ==== $* ===="; }
@@ -146,6 +164,54 @@ assert_no_readonly_warning() {
     fi
 }
 
+# 面板状态漂移报告（不对抗上游版）：
+# 面板代码来自镜像层、不持久化，运行期对面板目录的写入只会落在容器可写层，
+# docker pull 新镜像时这些写入会被整体丢弃。我们要暴露的是「持久化声明的盲区」——
+# 上游把状态写到了镜像里原本没有、我们也没声明进 PANEL_STATE_SUBDIRS 的全新位置。
+#
+# 怎么判断「镜像里原本有没有」：不靠手写白名单去猜上游的瞬态目录（那是在对抗上游，
+# 且上游一改写入结构就失准），而是直接问镜像本身——起一个临时容器 ls 镜像里
+# /www/server/panel 的顶层目录，作为客观基线。镜像里已有的目录（class/config/logs/…）
+# 上的任何运行期写入都是可再生的、升级会重新铺上，不算盲区；只有镜像里不存在的
+# 全新顶层目录上的写入，才可能是我们漏声明的状态。
+# 只报告不阻断：确认需持久化就加进 PANEL_STATE_SUBDIRS。
+report_panel_state_drift() {
+    local line path rel top
+    local -a found=()
+    # 镜像里 /www/server/panel 的顶层目录，作为「哪些是面板自带代码目录」的客观基线
+    local image_tops
+    image_tops=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+        'cd /www/server/panel 2>/dev/null && for x in */; do echo "${x%/}"; done' 2>/dev/null || true)
+    image_tops=" $(printf '%s' "$image_tops" | tr '\n' ' ' | sed 's/ *$//') "
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # 删除（D）是镜像自带内容被删，升级会重新铺上，不是持久化盲区
+        case "$line" in 'D '*) continue ;; esac
+        path=${line#* }                                  # 去掉 A/C/D 前缀
+        case "$path" in /www/server/panel/*) ;; *) continue ;; esac
+        rel=${path#/www/server/panel/}
+        # 只关心落在子目录里的写入；顶层文件（如 default.pl）是面板代码 / 已知瞬态，
+        # 不在越界盲区之列
+        case "$rel" in */*) ;; *) continue ;; esac
+        top=${rel%%/*}
+        # 已声明持久化的子目录：有意为之，不算盲区
+        case " ${PANEL_STATE_SUBDIRS} " in *" ${top} "*) continue ;; esac
+        # 镜像里本来就有的目录（class/config/logs/…）：写入可再生、升级会丢弃，不算盲区
+        case "$image_tops" in *" ${top} "*) continue ;; esac
+        # 其余：镜像里不存在的全新顶层目录上的写入，才是我们漏声明的状态位置
+        found+=("$line")
+    done < <(docker diff "$CONTAINER" 2>/dev/null || true)
+
+    if [ "${#found[@]}" -gt 0 ]; then
+        echo "::warning::面板在镜像层之外新建了顶层目录并写入（升级会被丢弃），请确认是否需持久化："
+        printf '  %s\n' "${found[@]}"
+        echo "  需保留的话，请加进 shared/conf/defaults.env 的 PANEL_STATE_SUBDIRS"
+    else
+        pass "面板未在镜像层之外新建越界状态（新建写入均落在镜像已有目录或 PANEL_STATE_SUBDIRS 内）"
+    fi
+}
+
 # ==============================================================================
 #  🅰️ A 阶段：全新数据卷
 # ==============================================================================
@@ -161,23 +227,34 @@ step "A2) 校验 overlay 持久化"
 assert_no_readonly_warning
 MOUNTED=$(inside_sh "mount | grep -c 'type overlay'" || true)
 MOUNTED=${MOUNTED:-0}
-# overlay 数 = 1 个 /www（面板 upper data/system/panel）+ 系统层各目录
-EXPECT_MOUNTS=$(( 1 + $(echo "$PERSIST_SYSTEM_DIRS" | wc -w) ))
+# overlay 只用于系统层各目录；面板代码不再 overlay，业务与面板状态走 bind
+EXPECT_MOUNTS=$(echo "$PERSIST_SYSTEM_DIRS" | wc -w)
 [ "$MOUNTED" -ge "$EXPECT_MOUNTS" ] \
     || fail "overlay 挂载数 ${MOUNTED}，期望至少 ${EXPECT_MOUNTS} 个"
 pass "overlay 挂载 ${MOUNTED} 个，无只读告警"
 
-# 系统层 upper 落在「系统层根/<dir>」；面板 upper 落在系统层下的 panel
-inside test -d "${PERSIST_SYSTEM_ROOT}/panel" || fail "面板 upper 缺失：${PERSIST_SYSTEM_ROOT}/panel"
+# 系统层 upper 落在「系统层根/<dir>」
 for d in $PERSIST_SYSTEM_DIRS; do
     inside test -d "${PERSIST_SYSTEM_ROOT}/${d}" || fail "持久化目录缺失：${PERSIST_SYSTEM_ROOT}/${d}"
 done
-# 业务直通源在「数据层根/www」
-for t in $PASSTHROUGH_DIRS; do
-    inside test -d "${PERSIST_DATA_ROOT}/www${t#/www}" \
-        || fail "直通源缺失：${PERSIST_DATA_ROOT}/www${t#/www}"
+# 业务子目录的绑定源在「数据层根/www/<子目录>」
+for t in $WWW_DATA_SUBDIRS; do
+    inside test -d "${PERSIST_DATA_ROOT}/www/${t}" \
+        || fail "业务绑定源缺失：${PERSIST_DATA_ROOT}/www/${t}"
 done
-pass "面板/系统/业务三层 upper 与直通源齐备"
+# 面板状态的绑定源在「面板状态根/<子目录>」
+for t in $PANEL_STATE_SUBDIRS; do
+    inside test -d "${PANEL_STATE_ROOT}/${t}" \
+        || fail "面板状态绑定源缺失：${PANEL_STATE_ROOT}/${t}"
+done
+pass "系统层 upper 与业务/面板状态绑定源齐备"
+
+# 不可变面板的核心性质：面板代码目录不能被任何 bind / overlay 覆盖，
+# 否则换镜像就更新不了面板。纯挂载语义检查，不依赖宝塔任何内部结构
+if inside_sh "mount | grep -q ' on /www/server/panel '"; then
+    fail "面板代码目录被挂载覆盖了：/www/server/panel 应直接来自镜像层"
+fi
+pass "面板代码未被持久化（直接来自镜像层）"
 
 # /tmp 必须留在容器可写层：变成 tmpfs 会让上传、解压备份直接吃内存
 if inside_sh 'grep -q " /tmp " /proc/mounts'; then
@@ -209,8 +286,12 @@ inside /baota/healthcheck.sh \
 pass "healthcheck 三段判据在正常状态下通过"
 
 step "A4) 校验宝塔关键文件（真机上的实际路径）"
-for f in /www/server/panel/BT-Panel \
-         /www/server/panel/BT-Task \
+# 面板主程序单独用 glob 检查：bt7.init 用 ps|grep 匹配命令行里的面板名判断
+# 「是否已在运行」，探活命令里出现该字面量会被误判，所以统一写 BT-P*
+# （与 shared/build/panel.sh 一致）。glob 必须在容器内展开 —— 宿主上没有 /www
+inside_sh 'ls /www/server/panel/BT-P* >/dev/null 2>&1' \
+    || fail "缺少面板主程序：/www/server/panel/BT-P*"
+for f in /www/server/panel/BT-Task \
          /www/server/panel/pyenv/bin/python \
          /etc/init.d/bt \
          /usr/bin/bt \
@@ -255,6 +336,9 @@ BARE=$(inside curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
 pass "安全入口已生效（裸 /login 返回 ${BARE:-000}）"
 
 step "A7) 校验面板版本号"
+# 不可变面板下面板代码来自镜像，所以「面板实际版本」必须等于镜像版本 ——
+# 这是对「换镜像即升级面板」最直接的验证：换镜像后若这里对不上，
+# 说明面板代码又被持久化层屏蔽了，本方案的核心性质已经失效。
 # 首选面板自身的 public.version()，失败则回退读 menu.json 的 version 字段
 ACTUAL=$(docker exec -w /www/server/panel "$CONTAINER" ./pyenv/bin/python -c "
 import sys
@@ -288,6 +372,9 @@ echo "$SAFE" | grep -Eq '^/[0-9a-f]{8}$' \
 DEFAULT_PW=$(inside_cat /www/server/panel/default.pl)
 echo "$DEFAULT_PW" | grep -Eq '^[0-9a-f]{12}$' \
     || fail "面板初始口令不是首启随机生成的（当前长度 ${#DEFAULT_PW}）"
+PORT=$(inside_cat /www/server/panel/data/port.pl)
+echo "$PORT" | grep -Eq '^[0-9]+$' \
+    || fail "面板端口未初始化（当前：${PORT}）"
 # 镜像里 root 是锁定的（shadow 字段以 ! 开头），首启后必须已设置真实口令
 if inside_sh 'grep "^root:" /etc/shadow | cut -d: -f2 | grep -q "^[!*]"'; then
     fail "root 口令仍处于锁定状态，SSH 无法登录"
@@ -296,18 +383,19 @@ pass "安全入口、面板口令、root 口令均为首启随机生成"
 
 step "A9) 校验写入确实落到持久化层"
 inside_sh 'echo persist > /etc/_persist_marker'
-inside_sh 'echo persist > /www/_persist_marker'
+inside_sh 'echo persist > /www/server/panel/data/_persist_marker'
 inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_marker'
 inside_sh 'echo persist > /www/wwwroot/_persist_marker'
 # 落盘路径语义（容易搞混，写清楚再检查）：
-#   /etc /var      系统层 overlay，upper 在 /data/system/<dir>
-#   /www           面板 overlay，upper = /data/system/panel
-#   /www/wwwroot   业务直通 bind，源 = /data/www/wwwroot
+#   /etc /var               系统层 overlay，upper 在 /data/system/<dir>
+#   /www/wwwroot            业务 bind，源 = /data/www/wwwroot
+#   /www/server/panel/data  面板状态 bind，源 = ${PANEL_STATE_ROOT}/data
+#   面板代码（/www/server/panel 本体）刻意不落盘：它属于镜像
 inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f /data/system/panel/_persist_marker          || fail "/www 写入未落盘（面板 upper 应为 data/system/panel）"
-inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到直通源 /data/www/wwwroot"
+inside test -f "${PANEL_STATE_ROOT}/data/_persist_marker"  || fail "面板状态写入未落盘（应为 ${PANEL_STATE_ROOT}/data）"
+inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到绑定源 /data/www/wwwroot"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入落到直通 data/www/wwwroot 与 data/system/panel、data/system/<dir>"
+pass "写入落到 data/www/wwwroot、${PANEL_STATE_ROOT}/data 与 data/system/<dir>"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
@@ -373,10 +461,9 @@ fi
 # 从持久化层取最新备份文件 —— 不再解析 baota-backup 的 stdout。
 # 之前用 tail -1 提取路径的写法，在 verify 失败时会把 verify 的
 # echo 行（"✅ 含 xxx"）误当路径，让错误链条完全错乱。
-# 备份落在容器 /www/backup/manual 下 —— /www/backup 是 PASSTHROUGH_DIRS 的
-# bind 直通目录，源在 data/www/backup/manual（不在 /www 的 overlay upper 里，
-# 那层的 upper 是 data/system/panel）。所以这里在容器内 ls 与在宿主 data 卷里
-# ls 看到的是同一份文件
+# 备份落在容器 /www/backup/manual 下 —— /www/backup 是 WWW_DATA_SUBDIRS 的
+# bind 目录，源在 data/www/backup/manual。所以这里在容器内 ls 与在宿主 data
+# 卷里 ls 看到的是同一份文件
 BACKUP_PATH=$(inside_sh "ls -1t /www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
 [ -n "${BACKUP_PATH}" ] || fail "未找到备份文件（baota-backup 报告成功但持久化层没产物）"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
@@ -387,6 +474,9 @@ if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'www/backup/\(auto\|manual\|datab
 fi
 _bk=$(basename "${BACKUP_PATH}")
 pass "备份工具可用，生成的备份包通过自校验（${_bk}）"
+
+# A 阶段末（容器已完整跑过一轮）做一次面板状态漂移报告
+report_panel_state_drift
 
 # ==============================================================================
 #  🅱️ B 阶段：销毁容器 → 用同一个卷重建
@@ -407,15 +497,16 @@ pass "重建后面板端口已响应"
 
 step "B2) 校验数据未丢失"
 inside test -f /data/system/etc/_persist_marker            || fail "/etc 数据在重建后丢失"
-inside test -f /www/_persist_marker            || fail "/www 数据在重建后丢失"
+inside test -f /www/server/panel/data/_persist_marker      || fail "面板状态数据在重建后丢失"
+inside test -f /www/wwwroot/_persist_marker                || fail "站点数据在重建后丢失"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务在重建后丢失"
-pass "系统配置、业务数据、计划任务均已保留"
+pass "系统配置、面板状态、业务数据、计划任务均已保留"
 
 SAFE_AFTER=$(inside_cat /www/server/panel/data/admin_path.pl)
-PW_AFTER=$(inside_cat /www/server/panel/default.pl)
+PORT_AFTER=$(inside_cat /www/server/panel/data/port.pl)
 [ "$SAFE_AFTER" = "$SAFE" ] || fail "重建后安全入口被改写（${SAFE} -> ${SAFE_AFTER}）"
-[ "$PW_AFTER" = "$DEFAULT_PW" ] || fail "重建后初始口令被改写，说明发生了二次初始化"
-pass "未发生二次初始化，登录地址与账号保持不变"
+[ "$PORT_AFTER" = "$PORT" ] || fail "重建后面板端口被改写，说明发生了二次初始化（${PORT} -> ${PORT_AFTER}）"
+pass "未发生二次初始化，登录地址与端口保持不变"
 
 step "B3) 校验重建后无持久化降级记录"
 # boot-history.log 只在启动降级时才追加，存在即说明持久化不完整

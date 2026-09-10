@@ -23,7 +23,7 @@
 
 ### workdir 为什么用固定名 + 启动时清理
 
-内核要求 workdir 与 upperdir 同文件系统。所有 overlay（面板 `/www` + 系统层 7 个目录）
+内核要求 workdir 与 upperdir 同文件系统。所有 overlay（系统层 7 个目录）
 的 upper 都在系统层，所以 workdir 统一放在 `/data/system/.baota/<目录>.work`；
 `/data/.baota/` 只放数据层的并发锁，不涉及 workdir。
 
@@ -32,27 +32,30 @@
 清理与挂载都在 `flock` 独占锁的保护下，同一时刻不可能有另一个实例在用。
 锁由内核持有、容器死亡自动释放，非正常退出不会留下死锁。
 
-## `/www` = 面板 overlay + 业务直通
+## `/www` = 面板代码（镜像层）+ 业务/状态 bind 直通
 
-`/www` 在容器里仍是 overlay（面板代码跟镜像升级），但 upper 收敛到
-`data/system/panel/`（server/panel、wwwlogs 等增量）。三个纯业务目录在
-overlay 之后 bind 直通（源在 upper 之外）：
+面板代码（`/www/server/panel` 及其 pyenv、启动器）直接来自镜像层，**不持久化**：
+换镜像即换面板，这就是「不可变面板」。持久化的只有两类子目录，都走 bind：
 
-- `/www/wwwroot` ← `data/www/wwwroot`（站点，宿主可直接 SMB 改）
-- `/www/backup` ← `data/www/backup`
-- `/www/server/data` ← `data/www/server/data`（MySQL）
+- 业务数据（源在 `data/www/`，宿主可直接 SMB 改）：
+  - `/www/wwwroot` ← `data/www/wwwroot`（站点）
+  - `/www/backup` ← `data/www/backup`
+  - `/www/server/data` ← `data/www/server/data`（MySQL）
+- 面板状态（源在 `data/panel/`）：
+  - `/www/server/panel/data` ← `data/panel/data`（配置 / SQLite）
+  - `/www/server/panel/plugin` ← `data/panel/plugin`（插件）
 
 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/system/<同名>`。
 镜像里 wwwroot/backup/server/data 为空（纯运行期数据），换镜像动不到它们；
-面板代码 / 默认配置走 overlay lower，换镜像自动更新。
+面板代码 / 默认配置来自镜像层、不持久化，换镜像自动更新。
 
 ## 启动链与阶段划分
 
 ```
-ENTRYPOINT ["/busybox", "sh", "/baota/init-mounts.sh"]
+ENTRYPOINT ["/busybox", "sh", "/baota/init.sh"]
   └─ 0. flock 独占锁
   └─ 1. 暂存 Docker 注入的 /etc/{hosts,resolv.conf,hostname}
-  └─ 2. 逐个 mount overlay（index=off）+ 可写性实测（/www → data/system/panel，系统层 → data/system/<dir>）
+  └─ 2. 系统层逐个 mount overlay（index=off）+ 可写性实测（upper 在 data/system/<dir>）；业务/面板状态随后 bind 到 data/www、data/panel
   └─ 3. 业务直通 bind（/www/wwwroot、/www/backup、/www/server/data → data/www/<同名>）
   └─ 4. 还原 Docker 动态文件
   └─ 4. exec bash /baota/entrypoint.sh
@@ -85,8 +88,8 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 
 快照在 entrypoint 里做是有意的：此刻 systemd 尚未拉起面板与数据库，数据处于静止态。
 
-只快照 `www/server/panel/data` 的理由：站点 / MySQL / 备份虽是 /www 这层 overlay
-的内容，但镜像里它们为空，换镜像（换 lower）动不到；唯一「对不上」的是
+只快照 `data/panel/data` 的理由：站点 / MySQL / 备份走 bind（源在 `data/www/`，
+换镜像动不到）；面板代码来自镜像层、不持久化；唯一「对不上」的是
 新版面板代码 + 旧版面板数据库（SQLite）。
 
 ## 启动器刷新（copy-up 陷阱）
@@ -126,9 +129,9 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 所以 `baota-backup` 必须带 `--xattrs`；用图形界面「压缩 / 复制」备份 `data/` 会丢扩展属性。
 NAS 快照（btrfs / zfs）是文件系统级的，天然保留一切，是最省心的方案。
 
-## 每日巡检：源码漂移检测（drift-check）
+## 每日巡检：源码漂移检测（drift）
 
-与镜像验证并行的另一条每日线：**对上游源码的漂移检测**（`drift-check.yml`，只监测、不发布）。
+与镜像验证并行的另一条每日线：**对上游源码的漂移检测**（`drift.yml`，只监测、不发布）。
 
 ```
 probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号，与 baseline.json 比对
@@ -136,17 +139,17 @@ probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号�
         └─ 目录漂移：装前 / 装后快照，新文件是否落在已知持久化目录集合外
 ```
 
-- 报告 CI 回写 `drift.md`；关键漂移开 BUG issue 并让工作流失败，**处理前每天都会提醒**
+- 报告 CI 回写 `.github/reports/drift.md`，并内嵌进 README「漂移检测报告」章节；关键漂移开 BUG issue 并让工作流失败，**处理前每天都会提醒**
 - 刻意只检测目录漂移：面板版本由使用者决定（详见 docs/development.md「面板版本策略」），
   跟踪上游脚本清单永远跟不完、且不影响数据安全
 
 ## 每日巡检：验证已发布镜像
 
 ```
-prep  ── 读 stable/VERSION + release/VERSION
-  ├─ verify-stable （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
-  └─ verify-release（并行，独立 job）→ 同上
-collect ── 下载片段 → 生成 report.md → 注入 README → 回写仓库
+prep  ── 读 dockerfile/12.0.0/VERSION + dockerfile/13.0.0/VERSION
+  ├─ verify-v12 （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
+  └─ verify-v13（并行，独立 job）→ 同上
+collect ── 下载片段 → 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```
 
 - 验的是**「DockerHub 上已发布的镜像」**，不是构建产物；版本号取自两个 `VERSION` 文件
@@ -155,14 +158,15 @@ collect ── 下载片段 → 生成 report.md → 注入 README → 回写仓
 - 只验 linux/amd64：arm64 在 QEMU 模拟下 overlay 结论不可信，arm64 的真实覆盖由两个
   构建工作流在原生 ARM runner 上负责
 - **回写顺序有讲究**：`git rebase` 必须在「生成 / 修改任何文件」之前完成。
-  `report.md` / `README.md` 一旦处于 modified，rebase 会因 dirty tree 中止，
+  `.github/reports/report.md` / `README.md` 一旦处于 modified，rebase 会因 dirty tree 中止，
   报告就写不进仓库（症状是「日志显示成功但文件没变」）
 
 ### report.md 与 README 内嵌
 
-- `report.md` 每次运行整体覆盖（不追加，体积恒定）
-- `.github/scripts/inject-report.py` 把它注入 README 的
-  `<!-- DAILY-VERIFY-REPORT:START/END -->` 标记之间，并把报告首行 H1 降级为 H3，
+- `.github/reports/report.md` 每次运行整体覆盖（不追加，体积恒定）
+- `.github/scripts/report.py` 把验证报告注入 README 的
+  `<!-- DAILY-VERIFY-REPORT:START/END -->` 标记区；漂移报告同理注入 `<!-- DAILY-DRIFT-REPORT:START/END -->`。
+  报告首行 H1 降级为 H3，避免 README 出现两个一级标题
   避免 README 出现两个一级标题
 - 报告里的面板口令 / root 口令 / 安全入口在写入前已脱敏
 - `collect` 用 `if: always()`：即使验证失败也把现场写进报告，最后一步才判红

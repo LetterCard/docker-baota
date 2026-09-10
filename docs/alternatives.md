@@ -58,7 +58,7 @@ upper = 持久层（只有你改过的文件）
 
 | 目录 | bind mount 方案 | overlay 方案 |
 |---|---|---|
-| `/www`（面板 + 站点 + MySQL + 备份） | ✅ 卷挂载 | ✅ overlay + 业务直通 |
+| `/www`（面板 + 站点 + MySQL + 备份） | ✅ 卷挂载 | ✅ 业务/状态 bind 直通（面板代码来自镜像，不持久化） |
 | `/etc` | ✅ | ✅ |
 | `/usr` | ✅ | ✅ |
 | `/var`（日志、计划任务、dpkg 数据库、systemd 状态） | ❌ 随容器销毁 | ✅ |
@@ -85,7 +85,7 @@ upper = 持久层（只有你改过的文件）
 容器启动时 Docker 会 bind 注入三个文件：`/etc/resolv.conf`、`/etc/hosts`、`/etc/hostname`。
 **任何整目录挂载 `/etc` 的操作都会把它们盖掉**，后果是 DNS 解析失效、容器 IP 映射丢失。
 
-本项目在挂载前先暂存、挂载后写回（`shared/scripts/init-mounts.sh`）：
+本项目在挂载前先暂存、挂载后写回（`shared/scripts/init.sh`）：
 
 ```bash
 DOCKER_META=/run/docker-meta

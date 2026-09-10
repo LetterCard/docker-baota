@@ -5,64 +5,64 @@
 
 | 通道 | 目录 | 安装脚本 | 版本跟进方式 | DockerHub 标签 |
 |---|---|---|---|---|
-| **stable** | `stable/` | `installStable_12.sh`（稳定线 12.x） | 手动触发：下载安装脚本取横幅版本 → 与 `stable/VERSION` 比对 | 仅精确版本（如 `12.0.0`），**无 latest** |
-| **release** | `release/` | `install_panel.sh`（正式版最新） | 手动触发：get_version API 取版本号 → 与 `release/VERSION` 比对 | `13.0.0` + `latest` |
+| **12.0.0** | `dockerfile/12.0.0/` | `installStable_12.sh`（稳定线 12.x） | 手动触发：下载安装脚本取横幅版本 → 与 `dockerfile/12.0.0/VERSION` 比对 | 仅精确版本（如 `12.0.0`），**无 latest** |
+| **13.0.0** | `dockerfile/13.0.0/` | `install_panel.sh`（13.0.0最新） | 手动触发：get_version API 取版本号 → 与 `dockerfile/13.0.0/VERSION` 比对 | `13.0.0` + `latest` |
 
-选哪个：**求稳用 stable**（只跟进稳定线，节奏慢、变更少），
-**求新用 release**（跟进正式版，`latest` 指向最近一次手动发布的版本）。
+选哪个：**求稳用 12.0.0**（只跟进稳定线，节奏慢、变更少），
+**求新用 13.0.0**（跟进13.0.0，`latest` 指向最近一次手动发布的版本）。
 两者用相同的 `data/` 目录结构，数据迁移互相兼容。
 
 > **两个通道均已改为手动发布**（移除了定时触发）。
-> 原因：`release` 会推进 `latest`，若每天自动发布，上游一出问题坏镜像就会立刻
+> 原因：`13.0.0` 会推进 `latest`，若每天自动发布，上游一出问题坏镜像就会立刻
 > 分发给所有 `latest` 用户。现在发布前应先看
 > [漂移检测](development.md#漂移检测) 的报告与 issue，确认无关键漂移再手动触发。
 
 ---
 
-## stable 通道
+## 12.0.0 通道
 
 上游发新版时，`installStable_12.sh` 这个 URL 不变，所以 Dockerfile 不需要改；
-`stable/VERSION` 也不需要手工同步——手动触发**「🚀 stable：构建并发布镜像」**即可，它会：
+`dockerfile/12.0.0/VERSION` 也不需要手工同步——手动触发**「🚀 12.0.0：构建并发布镜像」**即可，它会：
 
 1. 🔍 下载安装脚本，从横幅提取版本号（`| 您正在安装宝塔面板 12.0.0 稳定版`）
-2. ⚖️ 与 `stable/VERSION` 比对：上游更新 → 按新版本发布；一致 → 按原版本重新构建
+2. ⚖️ 与 `dockerfile/12.0.0/VERSION` 比对：上游更新 → 按新版本发布；一致 → 按原版本重新构建
    （横幅低于文件则告警并**绝不自动降级**）
 3. 🏗️ 双架构构建 → 三套发布前检查（19 项功能检查 / 挂载与降级场景 / 升级与降级路径）
 4. 🚀 全部通过才推送 `bugseeker/baota:<版本>`
-5. ✏️ 发布成功后回写 `stable/VERSION`——文件永远对应已推送的版本，
+5. ✏️ 发布成功后回写 `dockerfile/12.0.0/VERSION`——文件永远对应已推送的版本，
    构建失败时文件不动，下次运行自动重试
 
-也就是说：**触发时若无新版本，会按 `stable/VERSION` 现有版本重新构建**；
+也就是说：**触发时若无新版本，会按 `dockerfile/12.0.0/VERSION` 现有版本重新构建**；
 上游有新版本则按新版本发布。
 探测失败（上游接口临时故障）时本次不会发布，可稍后重新手动触发。
 
 > 版本号只从安装横幅提取。脚本其它位置也有版本号（例如内部 API 用的 9.3.9），不限定范围会误判。
 
 需要的仓库权限（Settings → Actions → General → Workflow permissions）：
-勾选 **Read and write permissions**（校准结果自动回写 `stable/VERSION` 时需要）。
+勾选 **Read and write permissions**（校准结果自动回写 `dockerfile/12.0.0/VERSION` 时需要）。
 
-## release 通道（手动发布）
+## 13.0.0 通道（手动发布）
 
-正式版由 **📦 release：检查并发布正式版**（`.github/workflows/release-build-push.yml`）手动触发跟进：
+13.0.0由 **📦 13.0.0：检查并发布13.0.0**（`.github/workflows/13.0.0-build-push.yml`）手动触发跟进：
 
 ```
 手动触发
-  🔍 get_version API 取最新版本号，与 release/VERSION 比对
+  🔍 get_version API 取最新版本号，与 dockerfile/13.0.0/VERSION 比对
   🏗️ 双架构构建（官方脚本安装宝塔）→ 三套发布前检查
   🚀 发布 <版本> 与 latest 两个标签
-  ✏️ 把推送成功的版本号回写 release/VERSION，供下一次比对
+  ✏️ 把推送成功的版本号回写 dockerfile/13.0.0/VERSION，供下一次比对
 ```
 
-与 stable 的关键差异：`install_panel.sh` 是**引导脚本，自身不含版本号**
-（stable 脚本有版本横幅可提取），所以版本号直接取自官方 `get_version` API，
-与 `release/VERSION` 比对后决定按哪个版本构建。
+与 12.0.0 通道的关键差异：`install_panel.sh` 是**引导脚本，自身不含版本号**
+（12.0.0 脚本有版本横幅可提取），所以版本号直接取自官方 `get_version` API，
+与 `dockerfile/13.0.0/VERSION` 比对后决定按哪个版本构建。
 `latest` 指向最近一次手动发布的版本——**发布节奏由维护者掌握**，这是刻意的设计：
 `latest` 一旦自动推进，上游出问题时坏镜像会立刻扩散给所有使用者。
 
 任何一步失败都会中断（例如上游临时改坏了安装脚本，构建阶段会直接失败），
 latest 不会指向坏镜像；API 版本低于仓库版本时（官方回滚）会告警并跳过，绝不自动降级。
 
-`release/VERSION` 在**发布成功之后**才回写，永远对应已推送的版本：
+`dockerfile/13.0.0/VERSION` 在**发布成功之后**才回写，永远对应已推送的版本：
 构建失败时文件不动，可重新手动触发重试同一版本；回写推送失败仅告警，下次比对仍会发现不一致并自愈。
 
 ---
@@ -113,7 +113,7 @@ publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不�
 ## 🔬 每日巡检：验证已发布镜像
 
 前面两个工作流验的是**「本地构建出来的候选镜像」**，作用是把坏镜像拦在推送之前。
-每日巡检（`.github/workflows/published-check.yml`）验的是**「DockerHub 上已经发布的镜像」**，
+每日巡检（`.github/workflows/check.yml`）验的是**「DockerHub 上已经发布的镜像」**，
 作用是每天确认线上那套东西仍然健康 —— 上游脚本变更、镜像被重新推送、依赖漂移，
 都能在日常回归里第一时间发现，而不是等用户踩到。
 
@@ -121,14 +121,14 @@ publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不�
 
 ```
 prep（读两个通道 VERSION）
-  ├─ verify-stable （并行）→ 拉 bugseeker/baota:<stable>  → 19 项回归 → 上传片段
-  └─ verify-release（并行）→ 拉 bugseeker/baota:<release> → 19 项回归 → 上传片段
+  ├─ verify-v12 （并行）→ 拉 bugseeker/baota:<12.0.0>  → 19 项回归 → 上传片段
+  └─ verify-v13（并行）→ 拉 bugseeker/baota:<13.0.0> → 19 项回归 → 上传片段
 collect（汇总）→ 生成 report.md → 注入 README → 回写仓库
 ```
 
-- **版本号取自 `stable/VERSION` 与 `release/VERSION`**（这两个文件由发布流水线在推送
+- **版本号取自 `dockerfile/12.0.0/VERSION` 与 `dockerfile/13.0.0/VERSION`**（这两个文件由发布流水线在推送
   成功后回写，永远对应已发布的标签），不是重新探测上游 —— 本工作流不做版本判断
-- 19 项回归复用 `.github/scripts/health-check/published-check.sh`，覆盖持久化全生命周期
+- 19 项回归复用 `.github/scripts/check/published.sh`，覆盖持久化全生命周期
   （四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / 补丁生效）
 - 两个通道**并行**跑，各自独立 job，在 Actions 里并排显示进度，墙钟时间约等于单通道
 - **只验 linux/amd64**：arm64 镜像要跑 QEMU 模拟，而本方案的核心是 overlay 持久化，
@@ -136,11 +136,12 @@ collect（汇总）→ 生成 report.md → 注入 README → 回写仓库
 
 ### 产出
 
-- 仓库根目录 **`report.md`**：每次运行整体覆盖（不追加，体积恒定）
-- README 的「🩺 每日镜像验证报告」章节：由 `.github/scripts/inject-report.py` 注入，
+- **`.github/reports/report.md`**：每次运行整体覆盖（不追加，体积恒定）
+- README 的「🩺 镜像验证报告」章节：由 `.github/scripts/report.py` 注入，
   折叠在 `<details>` 里，点开即看
 - ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前**已脱敏**
-- ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START -->` 与 `<!-- DAILY-VERIFY-REPORT:END -->`
+- ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START -->` 与 `<!-- DAILY-VERIFY-REPORT:END -->`、
+  `<!-- DAILY-DRIFT-REPORT:START -->` 与 `<!-- DAILY-DRIFT-REPORT:END -->`
   **之间由 CI 维护，不要手动修改**，下次运行会被覆盖
 
 ### 触发时机

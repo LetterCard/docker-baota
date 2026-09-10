@@ -1,9 +1,10 @@
 # 💾 备份与恢复
 
 所有状态都在持久化层里：一个 `data/` 目录（compose 默认 `./data:/data`）——
-业务数据（站点/备份/MySQL）在 `data/www/`（直通，宿主可直改），面板增量在
-`data/system/panel/`，系统层在 `data/system/`。备份工具 `baota-backup` 直接打整份
+业务数据（站点/备份/MySQL）在 `data/www/`（bind，宿主可直改），面板状态在
+`data/panel/`，系统层在 `data/system/`。备份工具 `baota-backup` 直接打整份
 `data/`，包内不含宿主机绝对路径，所以恢复到任何机器、任何目录都不受影响。
+（面板代码不在 `data/` 里 —— 它属于镜像，换镜像即升级，无需备份。）
 
 ---
 
@@ -131,7 +132,7 @@ docker exec baota baota-backup --rsync /backup
 ```
 /backup/
 ├── data/            ← 整份 data 卷：业务 www/（wwwroot / backup / server/data）
-│                      + 面板 upper system/panel/ + 系统层 system/<dir>/
+│                      + 面板状态 panel/ + 系统层 system/<dir>/
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
 
@@ -164,7 +165,7 @@ docker compose up -d && docker compose logs -f baota
 ```bash
 docker exec baota baota-backup --verify /www/backup/manual/baota-backup-*.tgz
 # 或者宿主机侧：
-tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|system/panel/server/panel/data/' | head
+tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|panel/data/' | head
 ```
 
 能看到站点、数据库、面板配置这三类路径才算完整。**只有恢复过一次的备份才算备份**，

@@ -1,7 +1,7 @@
 #!/busybox sh
 # shellcheck shell=sh  # 本文件必须保持 POSIX（busybox 解释），shebang 不被 shellcheck 识别，需显式声明方言
 # ==============================================================================
-#  [阶段 0] 早期初始化 —— 并发锁 → overlay 持久化 → 业务直通 → 移交阶段 1
+#  [阶段 0] 早期初始化 —— 并发锁 → 系统层 overlay → 业务/面板子目录 bind → 移交阶段 1
 #
 #  解释器用 busybox 而非 bash：本脚本要给 /usr 挂 overlay，万一持久化层里的
 #  /usr 被写坏，Debian 的 usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失，
@@ -12,8 +12,9 @@
 #    下划线前缀（_dir / _upper / _work）标示，避免与调用方的循环变量重名。
 #
 #  可用环境变量（真源见 /baota/defaults.env）：
-#    PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PANEL_UPPER_DIR /
-#    PERSIST_SYSTEM_DIRS / PASSTHROUGH_DIRS / CRITICAL_DIRS / STAGE2
+#    PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_SYSTEM_DIRS /
+#    WWW_DATA_SUBDIRS / PANEL_STATE_ROOT / PANEL_STATE_SUBDIRS /
+#    CRITICAL_DIRS / STAGE2
 #
 #  日志约定：[init] 普通信息，[init][WARN] 告警
 # ==============================================================================
@@ -29,15 +30,19 @@ fi
 
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PANEL_UPPER_DIR="${PANEL_UPPER_DIR:-${PERSIST_SYSTEM_ROOT}/panel}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
-PASSTHROUGH_DIRS="${PASSTHROUGH_DIRS:-/www/wwwroot /www/backup /www/server/data}"
 STAGE2="${STAGE2:-/baota/entrypoint.sh}"
 
-# 这几个目录一旦持久化失败，数据会静默丢失 —— 必须让 healthcheck 可见。
-# 名字必须是循环里传进 mount_persist 的顶层目录名（www / PERSIST_SYSTEM_DIRS 之一），
-# 不是 upper 目录名：面板这层循环里叫 www，upper 才叫 data/system/panel
-CRITICAL_DIRS="${CRITICAL_DIRS:-etc var www}"
+# 业务数据与面板状态：逐个 bind 到 data 下。
+# 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层，
+# 因此只有下面列出的子目录才需要绑定。
+WWW_DATA_SUBDIRS="${WWW_DATA_SUBDIRS:-wwwroot backup server/data}"
+PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
+PANEL_STATE_SUBDIRS="${PANEL_STATE_SUBDIRS:-data plugin}"
+
+# 这些挂载点一旦持久化失败就是静默丢数据，必须让 healthcheck 可见。
+# 写的是「容器内路径」，与传给 is_critical 的判断值一致
+CRITICAL_DIRS="${CRITICAL_DIRS:-/etc /var /www/wwwroot /www/server/data /www/server/panel/data}"
 
 # Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
 # 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回
@@ -49,7 +54,6 @@ PROBE=.persist-writable-probe
 
 # overlay 要求 workdir 与 upperdir 位于同一文件系统（内核硬性要求），
 # 所以 work 放在对应持久化层内、且必须与 upper 同盘。
-# 面板（/www overlay）upper 在系统层下（data/system/panel），work 用系统层的工作目录
 #
 # 各 overlay 的 workdir 形如 <STATE_DIR>/<目录>.work。内核挂载后会**在它里面再建一层
 # work**（即 <目录>.work/work）—— 那层是内核行为，省不掉；能省的只有外面那层容器目录，
@@ -80,6 +84,15 @@ mark_degraded() {
 mark_critical() {
     mkdir -p "${RUNTIME_DIR}" 2> /dev/null || return 0
     printf '%s\n' "$1" >> "${DEGRADED_CRITICAL}" 2> /dev/null || true
+}
+
+# 挂载点是否属于「失败即静默丢数据」的关键目录。
+# 传入容器内路径（/etc、/www/wwwroot…），与 CRITICAL_DIRS 列表中的写法一致
+is_critical() {
+    case " ${CRITICAL_DIRS} " in
+        *" $1 "*) return 0 ;;
+        *)        return 1 ;;
+    esac
 }
 
 # ==============================================================================
@@ -129,7 +142,7 @@ _lock_layer() {
         warn "  持有者：${_owner}"
         warn '  同一份持久化层不可被两个容器同时挂载（内核 EBUSY / 行为未定义），'
         warn '  为避免数据损坏，本次启动已中止。'
-        warn '  常见原因：stable 与 release 两个 compose 用了同一个 data 目录。'
+        warn '  常见原因：12.0.0 与 13.0.0 两个 compose 用了同一个 data 目录。'
         warn "  确认没有其它实例在跑之后，删除 ${_lock} 再启动。"
         warn '=============================================================='
         return 1
@@ -150,25 +163,20 @@ acquire_lock() {
 }
 
 # ==============================================================================
-#  1. overlay 分层持久化
+#  1. overlay 分层持久化（仅系统层）
 #
-#    /www（面板，含 server/panel、wwwlogs…）←overlay→  upper = data/system/panel
-#    /etc /usr /var …                            ←overlay→  upper = data/system/<同名>
+#    /etc /usr /var … ←overlay→  upper = data/system/<同名>
 #    lowerdir = 镜像内的同名目录（随镜像升级而更新）
 #
+#  ★ 面板（/www）不再走 overlay：代码由镜像层直接提供、不持久化，
+#    只有业务与状态子目录走 bind（见 mount_www_layer）。
 #  ★ index=off 是必须的，不是优化（同 upper 换 lower 的升级语义需要它）
 # ==============================================================================
 mount_persist() {
     _dir="$1"
     _lower="/${_dir}"
-    # 面板那一层：/www → upper = data/system/panel（放系统层下，便于宿主感知）
-    if [ "${_dir}" = 'www' ]; then
-        _upper="${PANEL_UPPER_DIR}"
-        _work="${SYS_WORK_ROOT}/www.work"
-    else
-        _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
-        _work="${SYS_WORK_ROOT}/${_dir}.work"
-    fi
+    _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
+    _work="${SYS_WORK_ROOT}/${_dir}.work"
 
     if ! mkdir -p "${_lower}" "${_upper}" 2> /dev/null; then
         warn "无法创建 ${_upper}：持久化根不可写，/${_dir} 本次不会持久化"
@@ -206,33 +214,82 @@ mount_persist() {
 }
 
 # ==============================================================================
-#  2. 业务直通（bind 绕过 overlay）
+#  2. 业务数据与面板状态（逐子目录 bind）
 #
-#  站点 / 备份 / MySQL 是纯运行期数据，镜像里为空。走 bind 直通：
-#    - 宿主机 data/www/<同名> 直接用 SMB / 文件管理读写，有内核保证
-#    - 源在 /www overlay upper（data/system/panel）之外，无 overlay 语义冲突
-#  顺序要求：先挂完 /www 的 overlay，再 bind 子目录
+#  面板代码不进持久化层，所以绝不能 bind 整个 /www —— 那会把镜像里的面板
+#  代码一起遮住，换镜像就再也更新不了面板。改为只 bind 需要的子目录：
+#    /www/wwwroot              <- data/www/wwwroot          （站点）
+#    /www/backup               <- data/www/backup           （备份）
+#    /www/server/data          <- data/www/server/data      （MySQL）
+#    /www/server/panel/data    <- data/panel/data     （面板配置 / SQLite）
+#    /www/server/panel/plugin  <- data/panel/plugin   （插件）
+#  其余部分（/www/server/panel 的代码、pyenv、启动器）保持镜像层原样：
+#  不持久化、换镜像即整体更新 —— 这就是「不可变面板」。
+#
+#  面板状态首次使用时从镜像 seed 一次，之后由 data 接管，镜像不再覆盖。
 # ==============================================================================
-mount_passthrough() {
-    _target="$1"
-    # /www/wwwroot -> data/www/wwwroot
-    _source="${PERSIST_DATA_ROOT}/www${_target#/www}"
+bind_subdir() {
+    _source="$1"
+    _target="$2"
 
     [ -d "${_target}" ] || mkdir -p "${_target}" 2> /dev/null || true
     if [ ! -d "${_target}" ]; then
-        warn "直通目标不存在且无法创建：${_target}"
+        warn "绑定目标不存在且无法创建：${_target}"
         return 1
     fi
     if ! mkdir -p "${_source}" 2> /dev/null; then
-        warn "无法创建直通源 ${_source}：数据层根不可写，${_target} 回落到 overlay"
+        warn "无法创建持久化源 ${_source}：数据层根不可写"
         return 1
     fi
     if mount -o bind "${_source}" "${_target}" 2> /dev/null; then
-        log "直通挂载 ${_target} <- ${_source}"
+        log "持久化挂载 ${_target} <- ${_source}"
         return 0
     fi
-    warn "直通挂载失败：${_target}（回落到 overlay，功能不受影响）"
+    warn "绑定失败：${_target}（本次启动不会保存该目录）"
     return 1
+}
+
+# 面板状态子目录：首次把镜像里的初始内容复制到 data，再 bind 上去。
+# 之后 data 里的内容就是唯一真身（面板配置属于用户，镜像不覆盖它）
+seed_panel_state() {
+    _sub="$1"
+    _source="${PANEL_STATE_ROOT}/${_sub}"
+    _target="/www/server/panel/${_sub}"
+
+    if [ ! -e "${_source}" ] && [ -d "${_target}" ]; then
+        if mkdir -p "${_source}" 2> /dev/null \
+           && cp -a "${_target}/." "${_source}/" 2> /dev/null; then
+            log "面板状态首次初始化：${_sub} <- 镜像"
+        else
+            warn "面板状态 ${_sub} 初始化失败，将以空目录启动"
+        fi
+    fi
+
+    bind_subdir "${_source}" "${_target}"
+}
+
+# 业务与面板状态的统一入口。失败记 degraded，关键目录额外记 critical
+mount_www_layer() {
+    _sub=''
+    for _sub in ${WWW_DATA_SUBDIRS}; do
+        [ -n "${_sub}" ] || continue
+        if ! bind_subdir "${PERSIST_DATA_ROOT}/www/${_sub}" "/www/${_sub}"; then
+            mark_degraded "/www/${_sub}: 业务目录绑定失败"
+            if is_critical "/www/${_sub}"; then
+                mark_critical "/www/${_sub}: 业务目录未持久化"
+            fi
+        fi
+    done
+
+    for _sub in ${PANEL_STATE_SUBDIRS}; do
+        [ -n "${_sub}" ] || continue
+        if ! seed_panel_state "${_sub}"; then
+            mark_degraded "/www/server/panel/${_sub}: 面板状态绑定失败"
+            if is_critical "/www/server/panel/${_sub}"; then
+                mark_critical "/www/server/panel/${_sub}: 面板状态未持久化"
+            fi
+        fi
+    done
 }
 
 # ==============================================================================
@@ -256,25 +313,24 @@ main() {
         fi
     done
 
-    # ---- 2. overlay 持久化：/www（面板层）+ 系统层各目录 ----
+    # ---- 2. 系统层 overlay 持久化 ----
+    #     面板（/www）不走 overlay：代码由镜像层提供，下一步只 bind 子目录
     _failed=0
-    for _dir in www ${PERSIST_SYSTEM_DIRS}; do
+    for _dir in ${PERSIST_SYSTEM_DIRS}; do
         if ! mount_persist "${_dir}"; then
             _failed=1
-            case " ${CRITICAL_DIRS} " in
-                *" ${_dir} "*) mark_critical "${_dir}: 关键目录未持久化" ;;
-            esac
+            if is_critical "/${_dir}"; then
+                mark_critical "/${_dir}: 关键目录未持久化"
+            fi
         fi
     done
+
+    # ---- 3. 业务数据与面板状态（逐子目录 bind）----
+    mount_www_layer
+
     if [ "${_failed}" -ne 0 ]; then
         warn '存在未持久化的目录，容器仍会启动，但销毁后这些目录的数据会丢失'
     fi
-
-    # ---- 3. 业务直通（在 /www overlay 之上 bind 三个业务目录）----
-    for _t in ${PASSTHROUGH_DIRS}; do
-        [ -n "${_t}" ] || continue
-        mount_passthrough "${_t}" || true
-    done
 
     # ---- 4. 还原 Docker 动态文件 ----
     for _f in ${DOCKER_FILES}; do

@@ -1,9 +1,7 @@
 # ⚙️ 编排配置详解
 
-以 `stable/docker-compose.yml` 为准，逐项说明每个配置项的用途、默认值与改法。
-`release/docker-compose.yml` 的**功能配置项**与它只有 `image` 一行不同
-（release 通道同时发布 `<版本>` 与 `latest` 两个标签）。
-本文件注释更详细；release 那份为了便于直接粘贴，省略了大部分说明文字。
+以 `dockerfile/docker-compose.yml` 为准，逐项说明每个配置项的用途、默认值与改法。
+该编排文件为两通道通用（沿用原 12.0.0 通道内容，仅 `image` 标签按通道不同）。
 
 ---
 
@@ -13,7 +11,7 @@
 |---|---|---|---|
 | `name`（顶层） | `baota` | compose 项目名，决定命令作用范围与默认资源前缀 | 随意改，只要 `docker compose` 命令在本目录执行即可 |
 | 服务名（`services.baota`） | `baota` | `docker compose logs / exec` 后面跟的名字 | 改名后这些命令里的服务名同步改；与 `container_name` 互不影响 |
-| `image` | `bugseeker/baota:12.0.0` | 镜像与宝塔版本。**标签即版本号，stable 通道没有 latest** | 升级见[升级与迁移](upgrade.md)；换成自己的镜像仓库同理 |
+| `image` | `bugseeker/baota:12.0.0` | 镜像与宝塔版本。**标签即版本号，12.0.0 通道没有 latest** | 升级见[升级与迁移](upgrade.md)；换成自己的镜像仓库同理 |
 | `container_name` | `baota` | 容器名，`docker exec baota ...` 用的是它 | 改名后全文所有 `docker exec baota` 都要跟着改 |
 | `hostname` | `baota` | 容器内主机名，面板「终端」与日志里会显示 | 随意，无功能影响 |
 | `restart` | `unless-stopped` | 异常退出或 Docker 重启时自动拉起；手工 `docker stop` 后保持停止 | 想完全手动控制改成 `no`；想连手工停止也拉起改成 `always` |
@@ -67,8 +65,10 @@
 |---|---|---|
 | `PERSIST_DATA_ROOT` | `/data` | 数据层根目录（面板 / 站点 / 数据库 / 备份） |
 | `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc usr var root opt home srv 的 overlay 上层） |
-| `PERSIST_DATA_DIRS` | `www` | 数据层需要 overlay 持久化的顶层目录 |
-| `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（`www` 属于数据层，不在这里） |
+| `WWW_DATA_SUBDIRS` | `wwwroot backup server/data` | 业务子目录（相对 `/www`），逐个 bind 到 `data/www/<子目录>` |
+| `PANEL_STATE_ROOT` | `/data/panel` | 面板状态根目录 |
+| `PANEL_STATE_SUBDIRS` | `data plugin` | 面板状态子目录（相对 `/www/server/panel`），逐个 bind 到 `data/panel/<子目录>` |
+| `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（面板代码不在这里，它属于镜像） |
 | `CRITICAL_DIRS` | `etc var www` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录 |
 | `DISK_MIN_AVAIL_MB` | `1024` | 健康检查的磁盘告警线：数据层或系统层可用空间低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 同上：已用百分比达到此值即 unhealthy |
@@ -98,12 +98,14 @@ compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在
 
 ```
 data/                         （./data:/data，host 侧一目录）
-├── www/                      ← 业务数据：三个直通目录（宿主机可直接 SMB 读写）
+├── www/                      ← 业务数据：逐子目录 bind（宿主机可直接 SMB 读写）
 │   ├── wwwroot/                  ← 站点 data/www/wwwroot ↔ /www/wwwroot
 │   ├── backup/                   ← 备份 data/www/backup ↔ /www/backup
 │   └── server/data/              ← MySQL data/www/server/data ↔ /www/server/data
-├── system/                   ← 系统层
-│   ├── panel/                    ← /www 面板 overlay upper（server/panel、wwwlogs 增量）
+├── panel/                    ← 面板状态：逐子目录 bind
+│   ├── data/                     ← 面板配置 / SQLite ↔ /www/server/panel/data
+│   └── plugin/                   ← 插件            ↔ /www/server/panel/plugin
+├── system/                   ← 系统层（overlay upper）
 │   ├── etc usr var root opt home srv   ← 各目录 overlay upper
 │   └── .baota/                   ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
 └── .baota/                   ← 数据层状态（并发锁）

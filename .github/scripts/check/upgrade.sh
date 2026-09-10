@@ -20,8 +20,7 @@
 #
 #  覆盖点：
 #    version_guard 的版本比较与记录回写 / take_snapshot（cp -a 目录快照，
-#    含内容完整性）/ refresh_panel_launcher / prune_snapshots /
-#    降级「只告警不阻断」的语义
+#    含内容完整性）/ prune_snapshots / 降级「只告警不阻断」的语义
 #
 #  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 排除
 # ==============================================================================

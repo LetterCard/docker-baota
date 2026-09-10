@@ -1,22 +1,22 @@
 # 📊 已发布镜像每日验证报告
 
-> 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。
+> 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
 - 生成时间（UTC）：2026-09-08 07:02:48
 - 触发方式：workflow_dispatch
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）
-- 验证脚本：`.github/scripts/health-check/published-check.sh`
+- 验证脚本：`.github/scripts/check/published.sh`
 
 ## 概要
 
 | 通道 | 镜像 | 结果 |
 |---|---|---|
-| 🐂 稳定版 stable | `bugseeker/baota:12.0.0` | ✅ |
-| 📦 正式版 release | `bugseeker/baota:13.0.0` | ✅ |
+| 🐂 12.0.0 | `bugseeker/baota:12.0.0` | ✅ |
+| 📦 13.0.0 | `bugseeker/baota:13.0.0` | ✅ |
 
 ---
 
-## 🐂 稳定版 stable
+## 🐂 12.0.0
 
 ### ✅ bugseeker/baota:12.0.0
 
@@ -82,7 +82,7 @@
 
 ---
 
-## 📦 正式版 release
+## 📦 13.0.0
 
 ### ✅ bugseeker/baota:13.0.0
 

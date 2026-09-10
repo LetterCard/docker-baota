@@ -39,7 +39,7 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# 配置真源：与 init-mounts.sh / entrypoint.sh 共用同一份
+# 配置真源：与 init.sh / entrypoint.sh 共用同一份
 # ------------------------------------------------------------------------------
 if [ -f /baota/defaults.env ]; then
     . /baota/defaults.env
@@ -53,10 +53,9 @@ PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 # /www/backup/manual —— 开启直通时两者经 bind 指向同一份数据，但只有前者能
 #   1) 跟随用户覆盖的 PERSIST_DATA_ROOT；
 #   2) 在下面打印宿主机路径时正确剥出「data/www/backup/manual」；
-#   3) 用户把 PASSTHROUGH_DIRS 置空（关闭直通）时依然成立 —— 那时 /www/backup
-#      会落进 /www 的 overlay upper（data/system/panel/backup），
-#      而下面的 --exclude 写的是 www/backup/manual，匹配不到它，
-#      备份就会把自己装进自己。用数据层根则始终在 www/ 下，排除项恒定生效。
+#   3) 用户改了 WWW_DATA_SUBDIRS 时依然成立 —— 路径始终从数据层根派生，
+#      而下面的 --exclude 写的是 www/backup/manual，匹配恒定生效，
+#      不会出现「备份把自己装进自己」的问题。
 # 业务直通目录，宿主机从 data/www/backup/manual 直接取走即可
 OUTPUT_DIR="${PERSIST_DATA_ROOT}/www/backup/manual"
 NAME_PREFIX='baota-backup'
@@ -190,7 +189,7 @@ show_usage() {
     # shellcheck disable=SC2086,SC2046
     du -sh \
         "${PERSIST_DATA_ROOT}/www" \
-        "${PERSIST_DATA_ROOT}/system/panel" \
+        "${PERSIST_DATA_ROOT}/panel" \
         $(for d in ${PERSIST_SYSTEM_DIRS}; do echo "${PERSIST_SYSTEM_ROOT}/${d}"; done) \
         2> /dev/null | sort -rh || true
     echo
@@ -213,9 +212,9 @@ show_usage() {
 # ==============================================================================
 #  数据库热转储
 #
-#  MySQL 数据在 /www/server/data —— 它是 PASSTHROUGH_DIRS 里的 bind 直通目录，
-#  源在 data/www/server/data，不在任何 overlay upper 里（/www 的 upper 只是
-#  data/system/panel）。容器运行时它被直接复制，InnoDB 文件可能处于半写状态，
+#  MySQL 数据在 /www/server/data —— 它是 WWW_DATA_SUBDIRS 里的 bind 目录，
+#  源在 data/www/server/data，不在任何 overlay upper 里。
+#  容器运行时它被直接复制，InnoDB 文件可能处于半写状态，
 #  恢复后表损坏。这里在打包前先做一次单事务转储，作为包内的「一致副本」：
 #  恢复时若发现 InnoDB 起不来，导入这份 SQL 即可。
 #
@@ -274,8 +273,9 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包是整份 data 卷的镜像（业务 data/www、面板 upper data/system/panel、
-系统层 data/system/... 都在里面），直接整包解回 data 即可：
+本包是整份 data 卷的镜像（业务 data/www、面板状态 data/panel、
+系统层 data/system/... 都在里面），直接整包解回 data 即可。
+面板代码不在包里 —— 它属于镜像，换镜像即升级：
 
 【./data:/data（compose 默认）】
 1. 停止容器：docker compose down
@@ -312,11 +312,13 @@ EOF
 # 结果写进全局数组（build_archive 与 --rsync 分支都要读）
 # shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 归档 data 卷内的两层顶层目录：业务（www/）+ 系统（system/，内含面板 upper）。
+    # 归档 data 卷内的三层顶层目录：
+    #   业务（www/）+ 面板状态（panel/）+ 系统（system/）。
+    # 面板代码不在 data 卷里 —— 它属于镜像，换镜像即升级，无需备份。
     # 用显式成员而不是 '.'：'.' 会让成员名带 ./ 前缀，EXCLUDES 里
     # 'www/backup/manual' 匹配不上 → 边写边读自己的输出包 → tar 报错。
     # 顶层 .baota 不进成员、内部 .baota 由 basename 排除，天然不打包。
-    data_members=('www' 'system')
+    data_members=('www' 'panel' 'system')
     return 0
 }
 
@@ -376,13 +378,13 @@ verify_archive() {
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
     # 关键成员检查（整份 data 卷归档，结构与宿主机一致）：
-    #   www/wwwroot/                   站点（业务直通）
-    #   system/panel/server/panel/data 面板配置 + 数据库（/www overlay upper）
+    #   www/wwwroot/      站点（业务 bind）
+    #   panel/data  面板配置 + 数据库（面板状态 bind）
     #   MANIFEST.txt                   备份清单（由 backup.sh 自动生成）
     # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，
     # 大清单的 printf 写不完被 SIGPIPE 终止（141），会把「含」误判成「缺少」。
     # listing 已在变量里，case 子串匹配既无管道也无该隐患
-    for pattern in 'www/wwwroot/' 'system/panel/server/panel/data' 'MANIFEST.txt'; do
+    for pattern in 'www/wwwroot/' 'panel/data' 'MANIFEST.txt'; do
         case "${listing}" in
             *"${pattern}"*) echo "  ✅ 含 ${pattern}" ;;
             *)              echo "  ❌ 缺少 ${pattern}"; missing=$((missing + 1)) ;;
@@ -495,7 +497,7 @@ rsync_sync() {
         rargs+=( "--exclude=${_e}" )
     done
 
-    # --rsync 整层同步 data 卷（业务 data/www + 面板 upper data/system/panel
+    # --rsync 整层同步 data 卷（业务 data/www + 面板状态 data/panel
     # + 系统层 data/system/<dir> 都在里面），一条命令覆盖全部
     log "增量同步 ${PERSIST_DATA_ROOT} -> ${dest}/data"
     rsync "${rargs[@]}" "${PERSIST_DATA_ROOT}/" "${dest}/data/" \

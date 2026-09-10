@@ -16,7 +16,7 @@
 #
 #  入参（环境变量）：
 #    INSTALL_URL    官方安装脚本地址（必填）
-#    BASE_IMAGE     基础镜像（默认 debian:12，与 stable/Dockerfile 的默认值一致）
+#    BASE_IMAGE     基础镜像（默认 debian:12，与 dockerfile/12.0.0/Dockerfile 的默认值一致）
 #    OUT_MD         markdown 报告输出路径（默认 drift.md）
 #    CRIT_FILE      关键标记输出路径，内容 1 表示存在关键漂移
 #

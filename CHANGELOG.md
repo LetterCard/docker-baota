@@ -7,6 +7,37 @@
 
 ## [未发布]
 
+### ♻️ 架构变更：不可变面板（immutable panel）
+
+持久化模型改为「面板代码不可变」：`/www/server/panel` 不再进持久化层，直接来自镜像层，
+换镜像即整体更新。业务数据与面板状态改为逐子目录 bind：
+
+- 业务：`/www/wwwroot`、`/www/backup`、`/www/server/data` → `data/www/<子目录>`
+- 面板状态：`/www/server/panel/data`、`plugin` → `data/panel/<子目录>`
+- 系统层 `/etc /usr /var /root /opt /home /srv` 仍是 overlay upper（不变）
+
+**升级面板 = 换镜像标签**；面板内「更新」对代码的写入会被拦截、不再生效。
+面板版本只有一个真源（镜像），不会与「面板内更新」互相打架。
+
+### 🧹 随之移除的补丁（不再需要）
+
+- `save_panel_launcher` / `refresh_panel_launcher`：启动器不再被 copy-up 锁进持久化层
+- `audit_panel_version`：面板版本恒等于镜像版本，无需每次启动读宝塔内部版本
+- `audit_persist_coverage`（含 `baseline-dirs.txt`）：持久化边界改为显式声明，
+  运行期不再巡检上游的数据落点
+- `make reset-panel`：代码不持久化，没有 upper 可重置
+- stable 通道构建期 py3.13 预升（`UPGRADE_PY313`）：面板用什么 Python 由官方安装
+  脚本决定，不再依赖宝塔内部的升级脚本
+
+### ⚠️ 行为变更
+
+- **面板内「更新」按钮不再生效**（写入被拦截），升级面板请换镜像标签
+- **备份包结构变化**：面板配置从 `system/panel/server/panel/data` 变为
+  `panel/data`。旧备份解开后需把 `system/panel/server/panel/data`
+  手动搬到 `panel/data` 才能被新版识别（详见 docs/upgrade.md）
+- 新增环境变量 `WWW_DATA_SUBDIRS` / `PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS`；
+  移除 `PASSTHROUGH_DIRS` / `PERSIST_DATA_DIRS` / `PANEL_UPPER_DIR`
+
 ### 🐛 修复
 
 - **PHP 扩展安装失败（Cannot find autoconf）**：面板里给 PHP 7.2 / 8.0 装扩展
@@ -35,7 +66,7 @@
   保持为唯一真源；构建发布工作流新增可选输入 `base_image`（留空则不传该
   build-arg，避免常量抄两份）。探路 Debian 13（trixie，宝塔官方镜像所用）时
   填 `debian:13` 即可，无需改代码。文档新增「自定义基础镜像」章节说明切换代价
-  （须同步 drift-check.yml 的 BASE_IMAGE + 完整回归）
+  （须同步 drift.yml 的 BASE_IMAGE + 完整回归）
 
 - **stable 12.0.0 构建期预升 Python 3.13**：Dockerfile 新增 `UPGRADE_PY313`
   （默认 true，可 `--build-arg UPGRADE_PY313=false` 回退 py3.7）。官方 bundle
@@ -71,7 +102,7 @@
   属于误屏蔽（经解包分析：三个脚本零面板版本标记，与已豁免的 gevent/flask 同类）
 - **漂移检测收敛为单一职责**：只检测「目录漂移」（数据落点），移除升级入口漂移、
   隐藏入口扫描与代码级更新旁路（`KNOWN_BYPASS`）检测；
-  `install-diff.sh` 重写、工作流与 `baseline.json` 同步移除 targets 字段。
+  `install.sh` 重写、工作流与 `baseline.json` 同步移除 targets 字段。
   跟踪上游脚本清单与代码内执行路径永远跟不完，且并不影响数据安全
 
 ### 🐛 修复
@@ -112,7 +143,7 @@ data/                        （./data:/data）
 
 ### ✨ 新增
 
-- **代码级更新旁路检测**（`install-diff.sh` 新增第 3 节，`analyze-versions.sh` 同步）。
+- **代码级更新旁路检测**（`install.sh` 新增第 3 节，`versions.sh` 同步）。
   宝塔面板代码里存在绕过 `script/` stub、现拉 `/install/update*.sh` 直接执行的更新路径
   （12.0.0 / 13.0.0 真装实测各 3 处，经 `task.py` / `class/system.py` / `class/jobs.py`）。
   漂移检测现按 `KNOWN_BYPASS` 基线全量扫描：新增签名即关键漂移（CRIT=1），
@@ -142,7 +173,7 @@ data/                        （./data:/data）
 - **`make reset-system CONFIRM=yes`**：重置系统层（`etc usr var root opt home srv`）
   回到当前镜像的状态，数据层（面板 / 站点 / 数据库 / 备份）完全不受影响。
   这是分层设计最大的红利，也是应对「系统层被搞坏 / upper 膨胀」的终极手段
-- **挂载与降级场景的 CI 门禁**（`.github/scripts/health-check/mounts.sh`，
+- **挂载与降级场景的 CI 门禁**（`.github/scripts/check/mounts.sh`，
   `make health-mounts`）：补上原 19 项没覆盖的两类场景 ——
   混合挂载（两层分开 bind）能否正常工作，以及持久化根被挂成只读时
   是否真的写了 `degraded-critical` 并判 unhealthy
@@ -157,7 +188,7 @@ data/                        （./data:/data）
 - **静态检查入 CI**：新增独立的 `lint` job，强制安装 shellcheck 后跑 `make lint`，
   两个通道的构建都以它为前置。此前本地没装 shellcheck 时会静默跳过，
   这道检查实际上长期没人真正跑过
-- **升级 / 降级路径的 CI 门禁**（`.github/scripts/health-check/upgrade.sh`，
+- **升级 / 降级路径的 CI 门禁**（`.github/scripts/check/upgrade.sh`，
   `make health-upgrade`，三套检查合并为 `make health-all`）：版本护栏、升级前快照、
   面板启动器刷新**只在镜像版本变化时执行**，原有检查全走不到那个分支 ——
   等于长期零覆盖。通过改写持久化层里的版本记录触发两条分支，
@@ -165,7 +196,7 @@ data/                        （./data:/data）
   版本记录回写、降级不阻断启动
 - `docs/` 专题文档（9 篇）、`skills/` AI 助手技能包（CodeBuddy + Trae 预留）、
   `Makefile`、`.editorconfig`、`.shellcheckrc`、`LICENSE`、本文件
-- **每日上游漂移检测**（`.github/workflows/drift-check.yml` + `.github/scripts/drift-check/`）：
+- **每日上游漂移检测**（`.github/workflows/drift.yml` + `.github/scripts/drift/`）：
   在一次性容器里原样执行官方安装脚本，比对「装前 / 装后」的顶层目录新增量，
   拦两类会破坏本项目的上游变更 —— 目录漂移（写入落到已知持久化目录集合之外 =
   静默丢数据）与升级入口漂移（`patch-panel.sh` 的目标被上游改名 / 删除 / 新增，
@@ -226,7 +257,7 @@ data/                        （./data:/data）
   `verify_update_disabled` 与漂移检测都增加对 script/ 全量文件的升级触发特征扫描
   （`HIDDEN_SIGNALS`：`update6.sh` / 将面板升级 / 升级至最新 / upgrade_panel），
   专门抓名字不带 upgrade/update 前缀的隐藏入口，避免再被文件名模式漏掉
-- **新增两通道面板源码包分析脚本** `.github/scripts/drift-check/analyze-versions.sh`
+- **新增两通道面板源码包分析脚本** `.github/scripts/drift/versions.sh`
   （`[stable|release]` 可选参数），用项目自己的安装法在一次性容器里真装，抓取
   `panel/script/` 全量清单、升级脚本内容与自更新机制引用，用于核对升级入口清单是否完整
 
@@ -255,8 +286,8 @@ data/                        （./data:/data）
 - **发布改为手动**：stable / release 两个工作流移除定时触发。release 会推进
   `latest`，每天自动发布意味着上游一出问题坏镜像会立刻扩散给所有 `latest` 用户；
   改为手动后，发布前必然先看漂移检测的报告与 issue。
-  巡检工作流与脚本随之更名 `verify-published` → `published-check`，
-  与 `health-check` / `drift-check` 命名家族对齐
+  巡检工作流与脚本随之更名 `verify-published` → `published.sh`，
+  与 `check` / `drift` 命名家族对齐
 - **文档重命名与锚点修复**：`getting-started` → `quickstart`、`backup-restore` → `backup`、
   `persistence-alternatives` → `alternatives`（与全仓单词式文件名一致）；
   README 重写为「原理 / 用法 / 对比」的完整版并加目录；

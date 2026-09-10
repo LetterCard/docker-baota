@@ -2,9 +2,12 @@
 # ==============================================================================
 #  [阶段 1] 收尾初始化，然后交给 systemd
 #
-#  进入本脚本时各顶层目录的 overlay 持久化已完成，此后对 /etc、/usr、/var、/www
-#  等目录的写入都会落入 data/ 对应层（www 在 /data/www，系统层在 /data/system/<dir>），
-#  容器销毁、重建、升级都不丢。
+#  进入本脚本时挂载已就绪：
+#    系统层（/etc /usr /var …）      overlay upper 在 data/system/<dir>
+#    业务数据（wwwroot/backup/server/data）  bind 到 data/www/<子目录>
+#    面板状态（panel/data、panel/plugin）    bind 到 data/panel/<子目录>
+#    面板代码（/www/server/panel）   来自镜像层，只读、不持久化
+#  于是面板版本随镜像升级，而用户的配置、站点与数据库在容器销毁、重建后都不丢。
 #
 #  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
 #    PANEL_PORT / PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
@@ -17,7 +20,7 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# 配置真源：/baota/defaults.env（与 init-mounts.sh 共用同一份）。
+# 配置真源：/baota/defaults.env（与 init.sh 共用同一份）。
 # 必须最先加载 —— 下面所有路径常量都依赖它，加载晚了会取到 Dockerfile 的
 # 默认值，用户在 compose 里改的 PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 就失效了。
 # ------------------------------------------------------------------------------
@@ -27,9 +30,10 @@ fi
 
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PANEL_UPPER_DIR="${PANEL_UPPER_DIR:-${PERSIST_SYSTEM_ROOT}/panel}"
-PERSIST_DATA_DIRS="${PERSIST_DATA_DIRS:-www}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
+# 与 init.sh 一致：面板状态根由数据根派生。defaults.env 缺失时兜底，
+# 也让 shellcheck 能追踪到赋值（本文件只是读它，真源仍是 defaults.env）
+PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
 AUTO_BACKUP_KEEP="${AUTO_BACKUP_KEEP:-3}"
 
 PANEL_DIR=/www/server/panel
@@ -47,7 +51,7 @@ BOOT_HISTORY_MAX_LINES=200
 # 镜像自有的版本信息（/baota 不在任何持久化目录内，永远跟随当前镜像）
 IMAGE_VERSION_FILE=/baota/VERSION
 
-# 启动期降级标记（由 init-mounts.sh 写入 /run，tmpfs，重启即失效）
+# 启动期降级标记（由 init.sh 写入 /run，tmpfs，重启即失效）
 RUNTIME_DIR=/run/baota
 DEGRADED="${RUNTIME_DIR}/degraded"
 DEGRADED_CRITICAL="${RUNTIME_DIR}/degraded-critical"
@@ -56,9 +60,6 @@ DEGRADED_CRITICAL="${RUNTIME_DIR}/degraded-critical"
 NEW_PANEL_USER=''
 NEW_PANEL_PASSWORD=''
 NEW_ROOT_PASSWORD=''
-
-# 本次启动是否发生了镜像版本变化（供启动器刷新判断）
-IMAGE_CHANGED=0
 
 log()  { echo "🚀 [entrypoint] $(date '+%H:%M:%S') - $*"; }
 warn() { echo "⚠️ [entrypoint][WARN] $(date '+%H:%M:%S') - $*" >&2; }
@@ -78,77 +79,29 @@ version_lt() {
 # ==============================================================================
 #  面板文件自检
 #
-#  持久化层被写坏时（例如误删 /www/server/panel），这里给出明确指引，
-#  而不是让 systemd 反复拉不起面板、用户在日志里毫无头绪
+#  面板代码不持久化、直接来自镜像层，所以这里只可能是镜像本身不完整
+#  （或用户把 pyenv 持久化后误删）。给出明确指引，避免 systemd 反复拉不起
+#  面板、用户在日志里毫无头绪
 # ==============================================================================
 check_panel_files() {
-    [ -f "${PANEL_DIR}/BT-Panel" ] \
-        || die "找不到 ${PANEL_DIR}/BT-Panel，持久化层可能已损坏；清空 ${PERSIST_DATA_ROOT} 后重启可回退到镜像自带的面板"
+    # 用 glob 而非面板名字面量：bt7.init 用 ps|grep 匹配进程命令行里的面板名判断
+    # 「是否已在运行」，本脚本若让该字面量进入命令行会被误判。这里是 test -f 不产生
+    # 进程，但全仓统一用 BT-P*，make lint 的越界检查才能直接生效
+    ls ${PANEL_DIR}/BT-P* > /dev/null 2>&1 \
+        || die "找不到面板主程序 ${PANEL_DIR}/BT-P*，镜像可能不完整；面板代码来自镜像层（不持久化），请重新拉取镜像"
     [ -x "${PANEL_PY}" ] \
-        || die "找不到面板 Python 运行环境 ${PANEL_PY}"
+        || die "找不到面板 Python 运行环境 ${PANEL_PY}；若已把 pyenv 加入 PANEL_STATE_SUBDIRS，请检查 ${PANEL_STATE_ROOT}/pyenv"
 }
 
 # ==============================================================================
-#  持久化覆盖自检（针对上游变更）
+#  关于「持久化覆盖自检」（已移除）
 #
-#  数据安全的前提是「宝塔只往持久化目录（数据层 www / 系统层 etc usr var root opt home srv）里写」（已实测确认）。
-#  上游一旦把数据挪走，数据会静默丢失，所以每次启动做两项只读检查：
-#  只告警、不阻断 —— 把面板停掉反而让用户无从下手
+#  旧模型里 /www 是整体 overlay 持久化，所以需要每次启动巡检「上游是否把数据
+#  放到了持久化边界之外」。新模型（不可变面板）的边界是显式声明的：
+#  WWW_DATA_SUBDIRS（业务）与 PANEL_STATE_SUBDIRS（面板状态）逐个 bind，
+#  没列出的部分就是「随镜像更新、不保留」—— 这是设计，不是疏漏。
+#  上游若把数据放到新目录，把它加进对应列表即可，无需运行期巡检告警。
 # ==============================================================================
-is_persisted() {
-    case " ${PERSIST_DATA_DIRS} ${PERSIST_SYSTEM_DIRS} " in
-        *" $1 "*) return 0 ;;
-        *)        return 1 ;;
-    esac
-}
-
-# 1) 宝塔自己记录的安装路径，必须落在持久化目录内
-audit_setup_path() {
-    local conf=/var/bt_setupPath.conf setup_path top
-    [ -s "${conf}" ] || return 0
-
-    setup_path=$(tr -d '[:space:]' < "${conf}")
-    [ -n "${setup_path}" ] || return 0
-    top="${setup_path#/}"
-    top="${top%%/*}"
-
-    is_persisted "${top}" && return 0
-
-    warn "宝塔安装路径为 ${setup_path}，其顶层目录 /${top} 不在持久化范围内"
-    warn '  该目录下的数据会在容器销毁时丢失'
-    warn "  修复：把 ${top} 加进 PERSIST_DATA_DIRS（www 类）或 PERSIST_SYSTEM_DIRS（etc 类），"
-    warn '        例如在 compose 的 environment 里写'
-    warn "    PERSIST_SYSTEM_DIRS: \"${PERSIST_SYSTEM_DIRS} ${top}\""
-    warn '  然后重建容器（已有数据需要手动从容器里拷出来再放回新位置）'
-}
-
-# 2) 顶层目录巡检：镜像里没有的新目录，可能意味着上游换了数据落点。
-#    构建期在 /baota/baseline-dirs.txt 存了一份快照。这个文件从不在
-#    运行期写入，所以按 overlay 语义它始终跟随当前镜像 —— 换镜像即换基线
-audit_new_top_dirs() {
-    local baseline_file=/baota/baseline-dirs.txt baseline d
-    [ -f "${baseline_file}" ] || return 0
-
-    # 一次读入后做整体匹配，避免每个目录都起一次 grep
-    baseline=" $(tr '\n' ' ' < "${baseline_file}") "
-
-    for d in /*; do
-        [ -d "${d}" ] || continue
-        case "${d}" in /proc|/sys|/dev|/run|/tmp|/baota|/data) continue ;; esac
-        case "${baseline}" in *" ${d#/} "*) continue ;; esac
-        # 挂载点是用户自己挂进来的（如 NAS 共享目录），属于预期行为，跳过
-        awk -v p="${d}" '$2==p{c++} END{exit(c?0:1)}' /proc/mounts && continue
-
-        warn "检测到镜像里没有的顶层目录：${d}"
-        warn '  若上游把数据放到了这里，请把它加入 PERSIST_DATA_DIRS 或 PERSIST_SYSTEM_DIRS，'
-        warn '  否则容器销毁后内容会丢失'
-    done
-}
-
-audit_persist_coverage() {
-    audit_setup_path
-    audit_new_top_dirs
-}
 
 # ==============================================================================
 #  清理 systemd 运行时目录
@@ -156,7 +109,7 @@ audit_persist_coverage() {
 # ==============================================================================
 prepare_runtime_dirs() {
     # 清理镜像层残留的构建期运行时文件。但 /run/baota 必须保留：
-    # 里面的降级标记（degraded / degraded-critical）由 init-mounts.sh 在本脚本
+    # 里面的降级标记（degraded / degraded-critical）由 init.sh 在本脚本
     # 运行之前刚写入（/run 是 tmpfs，每次启动全新，不存在跨启动的残留），
     # 是 healthcheck / boot-history / CI 判断「本次持久化是否完整」的唯一依据。
     # 若连它一起清掉，最危险的「只读降级」就再也无法被观测到 ——
@@ -226,9 +179,9 @@ refresh_consistency() {
 #
 #  为什么只快照 /www/server/panel/data（已实测确证）：
 #    站点（/www/wwwroot）、MySQL 数据（/www/server/data）、备份（/www/backup）
-#    都是运行期写进 /www 这层 overlay 的，而镜像里这些目录基本是空的 ——
-#    换镜像只更新 lower，动不到它们；会随镜像变的是面板代码与默认配置
-#    （面板本体就在 lower 层）。于是升级后唯一「对不上」的地方是：
+#    都是 bind 到 data/ 的持久化目录，换镜像动不到它们；
+#    会随镜像变的是面板代码（/www/server/panel 整体来自镜像层）。
+#    于是升级后唯一「对不上」的地方是：
 #    新版面板代码 + 旧版面板数据库（SQLite，升级时可能做 schema 迁移）。
 #    快照它，升级失败就能回到
 #    「旧代码 + 旧库」的原始组合。站点与数据库另有更好的备份手段
@@ -325,9 +278,6 @@ version_guard() {
         log "检测到镜像升级：${prev} -> ${img_ver}，正在创建升级前快照"
     fi
 
-    # 只有「从旧版本升级过来」才需要刷新启动器（首次启动时 /www 就是镜像内容）
-    IMAGE_CHANGED=1
-
     take_snapshot "${prev}"
 
     mkdir -p "${BAOTA_STATE}" 2> /dev/null || true
@@ -336,35 +286,15 @@ version_guard() {
 }
 
 # ==============================================================================
-#  面板启动器刷新（修复 copy-up 导致的「启动器被永久锁定」）
+#  关于「面板启动器刷新」（已移除）
 #
-#  背景（已实测确证）：宝塔的 /etc/init.d/bt 每次启动都会
-#      sed -i   改写 BT-Panel / BT-Task 的 shebang（python -> python3）
-#      chmod 700 上述两个文件（无条件执行）
-#  overlay 的 chmod 即便值相同也会触发 copy-up —— 首次启动面板后，
-#  这两个启动器就永久落进持久化层，之后无论换什么镜像都不再更新。
-#
-#  修复：镜像构建期把原版启动器存到非持久化的 /baota/launcher，
-#  检测到镜像版本变化时把原版刷回 /www/server/panel。
-#  之后 bt7.init 照常把 shebang 改成 python3，闭环成立。
-#  版本未变时什么都不做，常态零写入
+#  旧模型下面板代码走 overlay，而 /etc/init.d/bt 每次启动都对
+#  BT-Panel / BT-Task 做 sed + chmod —— 触发 copy-up，把启动器永久锁进
+#  持久化层，之后换什么镜像都不再更新。于是不得不在镜像里另存一份原版，
+#  版本变化时刷回去。
+#  现在面板代码直接来自镜像层、不持久化，启动器永远是当前镜像的那一份，
+#  这个补丁连同 /baota/launcher 一起不再需要。
 # ==============================================================================
-refresh_panel_launcher() {
-    [ "${IMAGE_CHANGED}" = '1' ] || return 0
-
-    local src=/baota/launcher f
-    [ -d "${src}" ] || { warn "未找到 ${src}，跳过启动器刷新"; return 0; }
-
-    for f in BT-Panel BT-Task; do
-        [ -f "${src}/${f}" ] || continue
-        if cp -f "${src}/${f}" "${PANEL_DIR}/${f}" 2> /dev/null; then
-            chmod 700 "${PANEL_DIR}/${f}" 2> /dev/null || true
-            log "已刷新面板启动器 ${f} 到当前镜像版本（旧启动器曾被持久化层锁定）"
-        else
-            warn "刷新面板启动器 ${f} 失败：面板将沿用被持久化层锁定的旧启动器"
-        fi
-    done
-}
 
 # ==============================================================================
 #  日志体积防线：journald 上限 + 面板 / 站点日志轮转
@@ -434,21 +364,30 @@ init_first_boot() {
 
     log '首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令'
 
+    # 端口 / 安全入口是纯文本文件，写完即生效，不依赖面板内部 API，先写稳
     echo "${port}" > "${PANEL_DIR}/data/port.pl"
     # 宝塔约定 admin_path.pl 以 / 开头，登录地址即 http://IP:端口<该值>/login
     echo "/${safe_path#/}" > "${PANEL_DIR}/data/admin_path.pl"
 
-    ( cd "${PANEL_DIR}" && "${PANEL_PY}" tools.py panel "${password}" ) > /dev/null \
-        || die "面板口令初始化失败，请检查 ${PANEL_DIR}/data/default.db 是否可写"
-    ( cd "${PANEL_DIR}" && "${PANEL_PY}" -c "import tools;tools.set_panel_username('${user}')" ) > /dev/null \
-        || die '面板用户名初始化失败'
+    # 用户名 / 口令走 tools.py —— 这是与宝塔内部实现强耦合的一处（上游改 API 就失败）。
+    # 不再 die：即便失败面板仍能起来，用户用容器内 `bt` 命令即可重置，
+    # 不至于「升级即整个容器起不来」
+    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY}" tools.py panel "${password}" ) > /dev/null 2>&1; then
+        warn "面板口令初始化失败（tools.py 接口可能已变动），请启动后用 \`bt\` 命令重置"
+    fi
+    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY}" -c "import tools;tools.set_panel_username('${user}')" ) > /dev/null 2>&1; then
+        warn "面板用户名初始化失败（tools.py 接口可能已变动），默认用户名仍为镜像内置值"
+    fi
 
-    # 与真机安装一致：初始口令落在 default.pl，供 bt default 命令读取
+    # 与真机安装一致：初始口令落在 default.pl，供 bt default 命令读取。
+    # 即便上面 tools.py 失败，这里也把生成的口令写盘，至少 bt default 能读到。
     printf '%s\n' "${password}" > "${PANEL_DIR}/default.pl"
     chmod 600 "${PANEL_DIR}/default.pl"
 
-    # 镜像里的 root 是锁定状态，这里才给它一个口令（/etc/shadow 在持久化层，会保留）
-    echo "root:${root_password}" | chpasswd || die 'root 口令初始化失败'
+    # 镜像里的 root 是锁定状态，这里才给它一个口令（/etc/shadow 在持久化层，会保留）。
+    # chpasswd 极稳定，失败也只告警，不阻断启动
+    echo "root:${root_password}" | chpasswd \
+        || warn 'root 口令初始化失败（chpasswd 异常），请手动设置'
 
     date '+%Y-%m-%d %H:%M:%S' > "${FIRST_BOOT_MARKER}"
 
@@ -458,50 +397,14 @@ init_first_boot() {
 }
 
 # ==============================================================================
-#  面板版本信息提示
+#  关于「面板版本一致性提示」（已移除）
 #
-#  本项目不禁止面板内更新 —— 版本由使用者自己决定，项目只保证「销毁容器
-#  重建后数据不丢」。这里只做一次对比并在不一致时给出提示：不一致通常意味着
-#  使用者在面板里点过更新（新版代码已写进持久化层并会一直保留），属预期行为
-#  而非故障，所以只提示、不告警、不阻断
+#  旧模型下面板代码可被面板内更新写进持久化层，于是「面板实际版本」可能
+#  与「镜像自带版本」不一致，需要每次启动读一次面板内部版本做对比提示。
+#  现在面板代码不可变、恒等于镜像版本，不存在两者不一致的情况，
+#  也就不必再去读宝塔内部的 public.version() / menu.json。
+#  升级面板 = 换镜像标签。
 # ==============================================================================
-audit_panel_version() {
-    local expect actual
-
-    expect=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null || true)
-    [ -n "${expect}" ] || return 0
-
-    # 取版本的方式与 CI 健康检查（core.sh A7）保持同一套：
-    # public.py 在 ${PANEL_DIR}/class/ 下，必须把它加进 sys.path 才能 import ——
-    # 只 cd 面板根目录会 ModuleNotFoundError，导致本检测此前每次启动都
-    # 静默跳过、从未真正生效（CI 里能过是因为 A7 的写法本来就正确）。
-    # 在面板进程尚未启动的原始状态下该方法即可用，无需等 systemd 拉起面板。
-    actual=$(cd "${PANEL_DIR}" && "${PANEL_PY}" -c "
-import sys
-sys.path.insert(0, '${PANEL_DIR}')
-sys.path.insert(0, '${PANEL_DIR}/class')
-import public
-print(public.version())
-" 2> /dev/null | tail -n1 | tr -d '[:space:]' || true)
-
-    # 回退：config/menu.json 的 version 字段（与 CI 的回退一致）
-    if [ -z "${actual}" ]; then
-        actual=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            "${PANEL_DIR}/config/menu.json" 2> /dev/null \
-            | head -n1 | cut -d'"' -f4 | tr -d '[:space:]' || true)
-    fi
-
-    [ -n "${actual}" ] || { log '无法读取面板版本，跳过一致性检测'; return 0; }
-
-    if [ "${actual}" != "${expect}" ]; then
-        log '--------------------------------------------------------------'
-        log "面板当前版本 ${actual}（镜像自带 ${expect}）"
-        log '  通常是使用者在面板里更新过：新版代码已写入持久化层并会保留。'
-        log '  想回到镜像自带版本：make reset-panel CONFIRM=yes'
-        log '  （只重置面板代码，面板配置、账号、站点与数据库全部保留）'
-        log '--------------------------------------------------------------'
-    fi
-}
 
 # ==============================================================================
 #  启动报告归档
@@ -573,11 +476,8 @@ main() {
     prepare_runtime_dirs
     refresh_consistency
     version_guard
-    refresh_panel_launcher
     setup_log_limits
     init_first_boot
-    audit_persist_coverage
-    audit_panel_version
     archive_boot_report
     print_summary
 

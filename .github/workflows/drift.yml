@@ -14,7 +14,7 @@ name: 🔭 官方源：变更与漂移检测
 #    · probe  每天跑：只取版本号与安装脚本 sha256，与基线比对，几十秒完成
 #    · drift   仅在上游有变更（或手动强制）时跑：真的装一遍并做文件系统比对
 #
-#  发布已改为手动（stable / release 均移除了 schedule），
+#  发布已改为手动（12.0.0 / 13.0.0 均移除了 schedule），
 #  维护流程：看本工作流的报告与 issue → 确认无关键漂移 → 手动触发对应发布工作流。
 #
 #  🔑 所需权限：仓库 Settings → Actions → Workflow permissions 需勾
@@ -33,16 +33,16 @@ on:
         default: false
 
 permissions:
-  contents: write   # 回写 drift-check/baseline.json / drift.md
+  contents: write   # 回写 drift/baseline.json / .github/reports/drift.md
   issues: write     # 检测到关键漂移时开 issue 提醒
 
 concurrency:
-  group: drift-check
+  group: drift
   cancel-in-progress: false
 
 env:
-  BASELINE: .github/scripts/drift-check/baseline.json
-  REPORT: drift.md
+  BASELINE: .github/scripts/drift/baseline.json
+  REPORT: .github/reports/drift.md
   # 与构建所用的基础镜像保持一致（Dockerfile 的 ARG BASE_IMAGE 默认值）。
   # 若改用 debian:13 构建，此处必须同步 —— 漂移检测要以同一个基座为基准
   BASE_IMAGE: debian:12
@@ -60,12 +60,12 @@ jobs:
     outputs:
       changed: ${{ steps.cmp.outputs.changed }}
       reason: ${{ steps.cmp.outputs.reason }}
-      stable_version: ${{ steps.fetch.outputs.stable_version }}
-      release_version: ${{ steps.fetch.outputs.release_version }}
-      stable_url: ${{ steps.fetch.outputs.stable_url }}
-      release_url: ${{ steps.fetch.outputs.release_url }}
-      stable_sha: ${{ steps.fetch.outputs.stable_sha }}
-      release_sha: ${{ steps.fetch.outputs.release_sha }}
+      v12_version: ${{ steps.fetch.outputs.v12_version }}
+      v13_version: ${{ steps.fetch.outputs.v13_version }}
+      v12_url: ${{ steps.fetch.outputs.v12_url }}
+      v13_url: ${{ steps.fetch.outputs.v13_url }}
+      v12_sha: ${{ steps.fetch.outputs.v12_sha }}
+      v13_sha: ${{ steps.fetch.outputs.v13_sha }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
@@ -75,34 +75,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          S_URL=$(sed -n 's/^ARG INSTALL_URL=//p' stable/Dockerfile  | head -1 | tr -d '\r')
-          R_URL=$(sed -n 's/^ARG INSTALL_URL=//p' release/Dockerfile | head -1 | tr -d '\r')
-          [ -n "$S_URL" ] || { echo "::error::未能从 stable/Dockerfile 解析 INSTALL_URL";  exit 1; }
-          [ -n "$R_URL" ] || { echo "::error::未能从 release/Dockerfile 解析 INSTALL_URL"; exit 1; }
+          S_URL=$(sed -n 's/^ARG INSTALL_URL=//p' dockerfile/12.0.0/Dockerfile  | head -1 | tr -d '\r')
+          R_URL=$(sed -n 's/^ARG INSTALL_URL=//p' dockerfile/13.0.0/Dockerfile | head -1 | tr -d '\r')
+          [ -n "$S_URL" ] || { echo "::error::未能从 dockerfile/12.0.0/Dockerfile 解析 INSTALL_URL";  exit 1; }
+          [ -n "$R_URL" ] || { echo "::error::未能从 dockerfile/13.0.0/Dockerfile 解析 INSTALL_URL"; exit 1; }
 
-          # 从安装脚本横幅提取版本（与 stable-build-push 的探测逻辑一致）
-          curl -fsSL --connect-timeout 10 --max-time 60 "$S_URL" -o /tmp/install_stable.sh
-          S_SHA=$(sha256sum /tmp/install_stable.sh | awk '{print $1}')
-          S_VER=$(grep -m1 '您正在安装宝塔面板' /tmp/install_stable.sh \
+          # 从安装脚本横幅提取版本（与 12.0.0-build-push 的探测逻辑一致）
+          curl -fsSL --connect-timeout 10 --max-time 60 "$S_URL" -o /tmp/install_v12.sh
+          S_SHA=$(sha256sum /tmp/install_v12.sh | awk '{print $1}')
+          S_VER=$(grep -m1 '您正在安装宝塔面板' /tmp/install_v12.sh \
                   | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
 
-          curl -fsSL --connect-timeout 10 --max-time 60 "$R_URL" -o /tmp/install_release.sh
-          R_SHA=$(sha256sum /tmp/install_release.sh | awk '{print $1}')
+          curl -fsSL --connect-timeout 10 --max-time 60 "$R_URL" -o /tmp/install_v13.sh
+          R_SHA=$(sha256sum /tmp/install_v13.sh | awk '{print $1}')
 
-          # release 通道版本来自官方接口（与 release-build-push 一致）
+          # 13.0.0 通道版本来自官方接口（与 13.0.0-build-push 一致）
           R_VER=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" | tr -d '[:space:]' || true)
 
           {
-            echo "stable_url=$S_URL"
-            echo "release_url=$R_URL"
-            echo "stable_sha=$S_SHA"
-            echo "release_sha=$R_SHA"
-            echo "stable_version=${S_VER:-unknown}"
-            echo "release_version=${R_VER:-unknown}"
+            echo "v12_url=$S_URL"
+            echo "v13_url=$R_URL"
+            echo "v12_sha=$S_SHA"
+            echo "v13_sha=$R_SHA"
+            echo "v12_version=${S_VER:-unknown}"
+            echo "v13_version=${R_VER:-unknown}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "stable  脚本：$S_URL（版本 ${S_VER:-unknown}，sha ${S_SHA:0:12}…）"
-          echo "release 脚本：$R_URL（版本 ${R_VER:-unknown}，sha ${R_SHA:0:12}…）"
+          echo "v12  脚本：$S_URL（版本 ${S_VER:-unknown}，sha ${S_SHA:0:12}…）"
+          echo "v13 脚本：$R_URL（版本 ${R_VER:-unknown}，sha ${R_SHA:0:12}…）"
 
       - name: 🆚 与基线比对
         id: cmp
@@ -115,24 +115,24 @@ jobs:
           fi
 
           REASONS=''
-          B_S_SHA=$(jq -r '.stable_sha  // ""' "$BASELINE")
-          B_R_SHA=$(jq -r '.release_sha // ""' "$BASELINE")
-          B_S_VER=$(jq -r '.stable_version  // ""' "$BASELINE")
-          B_R_VER=$(jq -r '.release_version // ""' "$BASELINE")
+          B_S_SHA=$(jq -r '.v12_sha  // ""' "$BASELINE")
+          B_R_SHA=$(jq -r '.v13_sha // ""' "$BASELINE")
+          B_S_VER=$(jq -r '.v12_version  // ""' "$BASELINE")
+          B_R_VER=$(jq -r '.v13_version // ""' "$BASELINE")
 
-          if [ "${{ steps.fetch.outputs.stable_sha }}" != "$B_S_SHA" ]; then
-            REASONS="${REASONS}stable 安装脚本已变更；"
+          if [ "${{ steps.fetch.outputs.v12_sha }}" != "$B_S_SHA" ]; then
+            REASONS="${REASONS}v12 安装脚本已变更；"
           fi
-          if [ "${{ steps.fetch.outputs.release_sha }}" != "$B_R_SHA" ]; then
-            REASONS="${REASONS}release 安装脚本已变更；"
+          if [ "${{ steps.fetch.outputs.v13_sha }}" != "$B_R_SHA" ]; then
+            REASONS="${REASONS}v13 安装脚本已变更；"
           fi
-          SV='${{ steps.fetch.outputs.stable_version }}'
-          RV='${{ steps.fetch.outputs.release_version }}'
+          SV='${{ steps.fetch.outputs.v12_version }}'
+          RV='${{ steps.fetch.outputs.v13_version }}'
           if [ "$SV" != 'unknown' ] && [ "$SV" != "$B_S_VER" ]; then
-            REASONS="${REASONS}stable 版本 ${B_S_VER} → ${SV}；"
+            REASONS="${REASONS}12.0.0 版本 ${B_S_VER} → ${SV}；"
           fi
           if [ "$RV" != 'unknown' ] && [ "$RV" != "$B_R_VER" ]; then
-            REASONS="${REASONS}release 版本 ${B_R_VER} → ${RV}；"
+            REASONS="${REASONS}13.0.0 版本 ${B_R_VER} → ${RV}；"
           fi
 
           if [ -n "$REASONS" ]; then
@@ -170,10 +170,10 @@ jobs:
           mkdir -p /tmp/uw
           : > /tmp/uw/critical
 
-          for CH in stable release; do
+          for CH in v12 v13; do
             case "$CH" in
-              stable)  URL='${{ needs.probe.outputs.stable_url }}' ;;
-              release) URL='${{ needs.probe.outputs.release_url }}' ;;
+              v12)  URL='${{ needs.probe.outputs.v12_url }}' ;;
+              v13) URL='${{ needs.probe.outputs.v13_url }}' ;;
             esac
             echo "▶️ 开始检测 ${CH} 通道：${URL}"
             CRIT=0
@@ -181,7 +181,7 @@ jobs:
             BASE_IMAGE="$BASE_IMAGE" \
             OUT_MD="/tmp/uw/${CH}.md" \
             CRIT_FILE="/tmp/uw/${CH}.crit" \
-              bash .github/scripts/drift-check/install-diff.sh \
+              bash .github/scripts/drift/install.sh \
               || { echo "::error::${CH} 通道检测失败"; exit 1; }
             echo "$CH $(cat "/tmp/uw/${CH}.crit")" >> /tmp/uw/critical
           done
@@ -189,7 +189,7 @@ jobs:
       - name: 📤 上传中间产物
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: drift-check-detail
+          name: drift-detail
           path: /tmp/uw/
           retention-days: 30
 
@@ -221,11 +221,11 @@ jobs:
         if: needs.drift.result == 'success'
         uses: actions/download-artifact@v8.0.1
         with:
-          name: drift-check-detail
+          name: drift-detail
           path: /tmp/uw
 
       # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
-      # 否则 drift.md / baseline.json 已处于 modified，git rebase 会因 dirty tree 中止
+      # 否则 .github/reports/drift.md / baseline.json / README.md 已处于 modified，git rebase 会因 dirty tree 中止
       - name: 🔄 对齐远端
         run: |
           git config user.name  'github-actions[bot]'
@@ -239,16 +239,16 @@ jobs:
           {
             echo '# 🔭 漂移检测报告'
             echo
-            echo "> 本文件由 \`.github/workflows/drift-check.yml\` 自动生成，每次运行整体覆盖。"
+            echo "> 本文件由 \`.github/workflows/drift.yml\` 自动生成，每次运行整体覆盖。"
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
-            echo "- stable 版本：${{ needs.probe.outputs.stable_version }}"
-            echo "- release 版本：${{ needs.probe.outputs.release_version }}"
+            echo "- 12.0.0 版本：${{ needs.probe.outputs.v12_version }}"
+            echo "- 13.0.0 版本：${{ needs.probe.outputs.v13_version }}"
             echo "- 变更判定：${{ needs.probe.outputs.reason }}"
             echo
             if [ "${{ needs.drift.result }}" = 'success' ]; then
-              for CH in stable release; do
+              for CH in v12 v13; do
                 if [ -f "/tmp/uw/${CH}.md" ]; then
                   echo "---"
                   echo
@@ -269,20 +269,26 @@ jobs:
           # 基线仅在成功跑完分析后更新，避免把失败运行的中间值写进去
           if [ "${{ needs.drift.result }}" = 'success' ]; then
             jq -n \
-              --arg ss '${{ needs.probe.outputs.stable_sha }}' \
-              --arg rs '${{ needs.probe.outputs.release_sha }}' \
-              --arg sv '${{ needs.probe.outputs.stable_version }}' \
-              --arg rv '${{ needs.probe.outputs.release_version }}' \
-              '{stable_sha:$ss, release_sha:$rs, stable_version:$sv, release_version:$rv}' > "$BASELINE"
+              --arg ss '${{ needs.probe.outputs.v12_sha }}' \
+              --arg rs '${{ needs.probe.outputs.v13_sha }}' \
+              --arg sv '${{ needs.probe.outputs.v12_version }}' \
+              --arg rv '${{ needs.probe.outputs.v13_version }}' \
+              '{v12_sha:$ss, v13_sha:$rs, v12_version:$sv, v13_version:$rv}' > "$BASELINE"
             echo '基线已更新。'
           fi
 
-      - name: 💾 回写报告与基线
+      - name: ✏️ 注入 README（漂移检测报告章节）
+        run: |
+          set -euo pipefail
+          # rebase 已在「🔄 对齐远端」步骤完成（working tree 干净时），这里只注入并提交
+          python3 .github/scripts/report.py "${{ env.REPORT }}" DAILY-DRIFT-REPORT
+
+      - name: 💾 回写报告、基线与 README
         run: |
           set -euo pipefail
           # 远端已在「🔄 对齐远端」步骤 rebase 对齐（当时 working tree 还是干净的），
-          # 这里只提交本次生成的报告与基线
-          git add "$REPORT" "$BASELINE"
+          # 这里只提交本次生成的报告、基线与 README 内嵌区块
+          git add "$REPORT" "$BASELINE" README.md
           if git diff --cached --quiet; then
             echo '报告与基线无变化，跳过提交。'
           else
@@ -302,11 +308,11 @@ jobs:
           {
             echo "## 检测时间（UTC）：$(date -u '+%F %T')"
             echo
-            echo "- stable 版本：${{ needs.probe.outputs.stable_version }}"
-            echo "- release 版本：${{ needs.probe.outputs.release_version }}"
+            echo "- 12.0.0 版本：${{ needs.probe.outputs.v12_version }}"
+            echo "- 13.0.0 版本：${{ needs.probe.outputs.v13_version }}"
             echo "- 变更判定：${{ needs.probe.outputs.reason }}"
             echo
-            echo '完整报告见仓库根目录 `drift.md`。'
+            echo '完整报告见 `.github/reports/drift.md`（也已内嵌进 README「漂移检测报告」章节）。'
             echo '处理完毕后请关闭本 issue；未处理前本工作流会持续失败以作提醒。'
           } > /tmp/body.md
 

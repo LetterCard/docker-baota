@@ -23,7 +23,8 @@
 - [常见操作](#常见操作)
 - [与常见方案的差异](#与常见方案的差异)
 - [健康检查与每日验证](#健康检查与每日验证)
-- [每日镜像验证报告](#每日镜像验证报告)
+- [镜像验证报告](#镜像验证报告)
+- [漂移检测报告](#漂移检测报告)
 - [许可](#许可)
 
 ---
@@ -46,9 +47,9 @@
 核心原则只有两条：
 
 1. **镜像不做二次打包**。镜像只提供运行面板所需的基础环境，面板本身由官方安装脚本在首次启动时安装。镜像内容完全来自官方脚本，脚本取自[宝塔官网下载页](https://www.bt.cn/new/download.html)。
-2. **用 overlay 分层做持久化**。容器运行时所有会变化的文件，按「系统层」与「数据层」分别落到宿主机的持久化目录，而非整目录挂载。
+2. **分层持久化 + 面板代码不可变**。系统目录用 overlay 分层落到宿主机，业务数据与面板状态用 bind 落盘；而面板代码本身不持久化，直接来自镜像层。
 
-由此带来的直接结果是：镜像可以随时替换以升级面板，而用户产生的配置与数据始终保存在宿主机上。
+由此带来的直接结果是：镜像可以随时替换以升级系统配置与面板，而用户产生的配置与数据始终保存在宿主机上。
 
 ---
 
@@ -66,13 +67,13 @@
 
 ### 持久化模型
 
-持久化分为两层，分别位于宿主机的 `/data/system` 与 `/data/www`。
+持久化的核心是「**面板代码不可变**」：面板程序本身不进持久化层，直接来自镜像层，
+换镜像即升级面板；用户的配置、站点与数据库则持久化在宿主机上。
 
-**系统层**（`/data/system`）以 overlay 方式承接系统目录的写操作，保存面板与系统产生的配置变更：
+**系统层**（`/data/system`）以 overlay 方式承接系统目录的写操作：
 
 | 容器内路径 | 持久化位置 | 说明 |
 |---|---|---|
-| `/www` | `/data/system/panel` | 面板程序与运行数据 |
 | `/etc` | `/data/system/etc` | 系统与服务配置 |
 | `/usr` | `/data/system/usr` | 程序与库 |
 | `/var` | `/data/system/var` | 变量数据（含计划任务等） |
@@ -81,7 +82,7 @@
 | `/home` | `/data/system/home` | 用户目录 |
 | `/srv` | `/data/system/srv` | 服务数据 |
 
-**数据层**（`/data/www`）以直通方式挂载，保存用户业务数据，避免大文件经过 overlay 层带来的性能与一致性开销：
+**业务层**（`/data/www`）以 bind 方式挂载，保存用户业务数据，避免大文件经过 overlay 层带来的性能与一致性开销：
 
 | 容器内路径 | 持久化位置 | 说明 |
 |---|---|---|
@@ -89,11 +90,29 @@
 | `/www/backup` | `/data/www/backup` | 备份文件 |
 | `/www/server/data` | `/data/www/server/data` | 数据库数据 |
 
+**面板状态**（`/data/panel`）以 bind 方式挂载，保存面板运行中产生、必须保留的部分：
+
+| 容器内路径 | 持久化位置 | 说明 |
+|---|---|---|
+| `/www/server/panel/data` | `/data/panel/data` | 面板配置、SQLite 库、端口与安全入口 |
+| `/www/server/panel/plugin` | `/data/panel/plugin` | 已安装的面板插件 |
+
+**面板代码**（`/www/server/panel`）**不持久化**：它属于镜像，随镜像替换整体更新。
+因此在面板里点「更新」不会生效（写入被拦截）—— 升级面板请换镜像标签。
+这是本方案的关键取舍：面板版本只有一个真源（镜像），
+不会与「面板内更新」互相打架，启动器恢复、版本审计之类的补丁也就都不需要了。
+
 ### 升级语义
 
-升级镜像时，overlay 的 upper 层仅包含用户修改过的文件。未被修改的文件随新镜像（lower 层）更新，只有用户实际改动过的文件保留在持久化层并覆盖于其上。
+升级镜像时：系统层的 overlay upper 仅包含用户修改过的文件，未被修改的随新镜像更新；
+业务与面板状态是 bind 目录，换镜像完全不动它们；**面板代码整体来自新镜像**。
 
-这一机制使「升级镜像」在语义上等价于「升级系统配置」：新镜像带来的配置与程序变更能够生效，而用户的个性化修改不会被覆盖。这与在物理机上执行 `apt upgrade` 后再安装软件的行为一致，也避免了 bind mount 方案中系统目录被整目录钉死的问题。
+于是「换镜像」就等于「升级系统配置 + 升级面板」，语义上等价于在物理机上执行
+`apt upgrade` 后再换一套面板程序：新镜像带来的系统配置与面板变更都能生效，
+而用户的个性化修改、站点与数据库都不会被覆盖。
+
+这也避免了整目录 bind mount 方案中「系统目录被钉死在首启状态」的问题 ——
+本方案里被钉住的只有面板代码，而它恰恰是应该跟随镜像更新的那一部分。
 
 ### 并发与一致性保护
 
@@ -106,9 +125,9 @@
 - 写入 journald 体积上限配置（总占用不超过 200M，保留 7 天）；
 - 生成日志轮转配置（面板日志保留 7 份，站点日志保留 14 份）。
 
-**面板版本由你自己决定**：本项目不禁止面板内更新。在面板里点了更新，新版代码
-会写进持久化层并一直保留；想让面板回到镜像自带的版本，执行
-`make reset-panel CONFIRM=yes` —— 只重置面板代码，面板配置、账号、站点与数据库全部保留。
+**面板版本由镜像决定**：面板代码是不可变层（来自镜像、不持久化），所以在面板里
+点「更新」不会生效（写入被拦截），面板版本始终等于镜像版本。想升级面板就换镜像
+标签；回退同理，换回上一个标签即可 —— 不会遇到「面板更新到一半坏掉又回不去」的情况。
 
 当持久化根被挂载为只读（例如落在不支持的远程文件系统上）时，系统会将其标记为 `degraded-critical`，并使健康检查判定为 unhealthy，而不是静默写入失败。
 
@@ -126,7 +145,7 @@
 ### 启动
 
 ```bash
-cd stable              # 或 release，见「发布通道」
+cd dockerfile/12.0.0              # 或 13.0.0，见「发布通道」
 docker compose up -d
 docker compose logs -f baota   # 首次登录信息在此输出
 ```
@@ -145,7 +164,7 @@ docker compose logs baota
 
 ## 配置
 
-部署行为主要由 `stable/` 或 `release/` 目录下的 Compose 文件与环境变量决定，常见调整包括：
+部署行为主要由 `dockerfile/12.0.0/` 或 `dockerfile/13.0.0/` 目录下的 Compose 文件与环境变量决定，常见调整包括：
 
 - 选择发布通道（见下文）；
 - 调整持久化根路径（默认 `/data`）；
@@ -159,8 +178,8 @@ docker compose logs baota
 
 项目维护两个发布通道，面向不同的更新节奏需求：
 
-- **`stable`**：跟进宝塔稳定线 12.x，仅发布精确版本标签，不提供 `latest`。适合追求稳定的生产环境。
-- **`release`**：跟进正式版，提供 `latest` 标签。适合希望及时获得新版面的场景。
+- **`12.0.0`**：跟进宝塔稳定线 12.x，仅发布精确版本标签，不提供 `latest`。适合追求稳定的生产环境。
+- **`13.0.0`**：跟进13.0.0，提供 `latest` 标签。适合希望及时获得新版面的场景。
 
 两个通道**均为手动发布**（不定时自动发布）：发布前先看[漂移检测](docs/development.md#漂移检测)报告，
 确认无关键漂移后再手动触发，避免上游一出问题就被自动分发。已发布的镜像仍每天回归验证。
@@ -189,9 +208,11 @@ docker compose logs baota
 | 官方脚本直装物理机 | 官方 | 原生 | 原生 |
 | 社区二次打包镜像 | 社区集成依赖 | 依赖打包者维护 | 取决于打包质量 |
 | 整目录 bind mount | 官方脚本 | 配置被固定为首启状态，升级失效 | 业务数据可保留 |
-| 本项目（overlay 分层） | 官方脚本 | 有效 | 业务与系统配置均保留 |
+| 本项目（不可变面板 + 分层持久化） | 官方脚本 | 系统配置与面板均随镜像更新 | 业务、面板状态与系统配置均保留 |
 
-整目录 bind mount 直接挂载 `/etc`、`/usr` 等系统目录，会使镜像升级在这两个目录上失效；本项目仅将用户修改的文件保留在持久化层，其余随镜像更新，因此升级镜像即更新系统配置。详细取舍与实测数据见 [持久化方案选型](docs/alternatives.md)。
+整目录 bind mount 直接挂载 `/etc`、`/usr` 等系统目录，会使镜像升级在这些目录上失效；
+本项目只把用户修改保留在持久化层，其余随镜像更新，而面板代码整体来自镜像，
+因此升级镜像即同时更新系统配置与面板。详细取舍与实测数据见 [持久化方案选型](docs/alternatives.md)。
 
 ---
 
@@ -203,7 +224,7 @@ docker compose logs baota
 
 ---
 
-## 每日镜像验证报告
+## 镜像验证报告
 
 <details>
 <summary>点击展开最新验证结果（由每日 CI 自动更新）</summary>
@@ -211,23 +232,23 @@ docker compose logs baota
 <!-- DAILY-VERIFY-REPORT:START -->
 ### 📊 已发布镜像每日验证报告
 
-> 本文件由 `.github/workflows/published-check.yml` 自动生成，每次运行整体覆盖（不追加）。
+> 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
 - 生成时间（UTC）：2026-09-08 07:02:48
 - 触发方式：workflow_dispatch
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）
-- 验证脚本：`.github/scripts/health-check/published-check.sh`
+- 验证脚本：`.github/scripts/check/published.sh`
 
 ## 概要
 
 | 通道 | 镜像 | 结果 |
 |---|---|---|
-| 🐂 稳定版 stable | `bugseeker/baota:12.0.0` | ✅ |
-| 📦 正式版 release | `bugseeker/baota:13.0.0` | ✅ |
+| 🐂 12.0.0 | `bugseeker/baota:12.0.0` | ✅ |
+| 📦 13.0.0 | `bugseeker/baota:13.0.0` | ✅ |
 
 ---
 
-## 🐂 稳定版 stable
+## 🐂 12.0.0
 
 ### ✅ bugseeker/baota:12.0.0
 
@@ -244,7 +265,7 @@ docker compose logs baota
 - [x] 首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）
 - [x] 首启初始化标记存在
 - [x] 镜像版本记录一致（12.0.0）
-- [x] 四层写入分别落盘（etc / var 计划任务 / 面板 upper / 直通 wwwroot）
+- [x] 四层写入分别落盘（etc / var 计划任务 / 面板状态 bind / 直通 wwwroot）
 - [x] 首启凭据已随机生成（非构建期占位）
 - [x] 并发锁拦截第二实例
 - [x] 备份包结构正确（关键成员齐 / 无自包含 / journal 已排除）
@@ -265,7 +286,6 @@ docker compose logs baota
 ⚙️ [init] 15:01:00 - 已获得系统层持久化层独占锁
 ⚙️ [init] 15:01:03 - 已获得数据层持久化层独占锁
 ⚙️ [init] 15:01:03 - 持久化层并发保护已就位
-⚙️ [init] 15:01:03 - 持久化已挂载 /www <- /data/system/panel
 ⚙️ [init] 15:01:03 - 持久化已挂载 /etc <- /data/system/etc
 ⚙️ [init] 15:01:03 - 持久化已挂载 /usr <- /data/system/usr
 ⚙️ [init] 15:01:03 - 持久化已挂载 /var <- /data/system/var
@@ -273,9 +293,11 @@ docker compose logs baota
 ⚙️ [init] 15:01:03 - 持久化已挂载 /opt <- /data/system/opt
 ⚙️ [init] 15:01:03 - 持久化已挂载 /home <- /data/system/home
 ⚙️ [init] 15:01:03 - 持久化已挂载 /srv <- /data/system/srv
-⚙️ [init] 15:01:03 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 15:01:03 - 直通挂载 /www/backup <- /data/www/backup
-⚙️ [init] 15:01:03 - 直通挂载 /www/server/data <- /data/www/server/data
+⚙️ [init] 15:01:03 - 持久化挂载 /www/wwwroot <- /data/www/wwwroot
+⚙️ [init] 15:01:03 - 持久化挂载 /www/backup <- /data/www/backup
+⚙️ [init] 15:01:03 - 持久化挂载 /www/server/data <- /data/www/server/data
+⚙️ [init] 15:01:03 - 持久化挂载 /www/server/panel/data <- /data/panel/data
+⚙️ [init] 15:01:03 - 持久化挂载 /www/server/panel/plugin <- /data/panel/plugin
 🚀 [entrypoint] 15:01:03 - 首次使用这份持久化数据，记录镜像版本 12.0.0
 🚀 [entrypoint] 15:01:03 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
 🚀 [entrypoint] 15:01:03 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
@@ -293,7 +315,7 @@ docker compose logs baota
 
 ---
 
-## 📦 正式版 release
+## 📦 13.0.0
 
 ### ✅ bugseeker/baota:13.0.0
 
@@ -310,7 +332,7 @@ docker compose logs baota
 - [x] 首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）
 - [x] 首启初始化标记存在
 - [x] 镜像版本记录一致（13.0.0）
-- [x] 四层写入分别落盘（etc / var 计划任务 / 面板 upper / 直通 wwwroot）
+- [x] 四层写入分别落盘（etc / var 计划任务 / 面板状态 bind / 直通 wwwroot）
 - [x] 首启凭据已随机生成（非构建期占位）
 - [x] 并发锁拦截第二实例
 - [x] 备份包结构正确（关键成员齐 / 无自包含 / journal 已排除）
@@ -331,7 +353,6 @@ docker compose logs baota
 ⚙️ [init] 15:01:10 - 已获得系统层持久化层独占锁
 ⚙️ [init] 15:01:13 - 已获得数据层持久化层独占锁
 ⚙️ [init] 15:01:13 - 持久化层并发保护已就位
-⚙️ [init] 15:01:13 - 持久化已挂载 /www <- /data/system/panel
 ⚙️ [init] 15:01:13 - 持久化已挂载 /etc <- /data/system/etc
 ⚙️ [init] 15:01:13 - 持久化已挂载 /usr <- /data/system/usr
 ⚙️ [init] 15:01:13 - 持久化已挂载 /var <- /data/system/var
@@ -339,9 +360,11 @@ docker compose logs baota
 ⚙️ [init] 15:01:13 - 持久化已挂载 /opt <- /data/system/opt
 ⚙️ [init] 15:01:13 - 持久化已挂载 /home <- /data/system/home
 ⚙️ [init] 15:01:13 - 持久化已挂载 /srv <- /data/system/srv
-⚙️ [init] 15:01:13 - 直通挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 15:01:13 - 直通挂载 /www/backup <- /data/www/backup
-⚙️ [init] 15:01:13 - 直通挂载 /www/server/data <- /data/www/server/data
+⚙️ [init] 15:01:13 - 持久化挂载 /www/wwwroot <- /data/www/wwwroot
+⚙️ [init] 15:01:13 - 持久化挂载 /www/backup <- /data/www/backup
+⚙️ [init] 15:01:13 - 持久化挂载 /www/server/data <- /data/www/server/data
+⚙️ [init] 15:01:13 - 持久化挂载 /www/server/panel/data <- /data/panel/data
+⚙️ [init] 15:01:13 - 持久化挂载 /www/server/panel/plugin <- /data/panel/plugin
 🚀 [entrypoint] 15:01:13 - 首次使用这份持久化数据，记录镜像版本 13.0.0
 🚀 [entrypoint] 15:01:13 - 已写入 journald 体积上限：/etc/systemd/journald.conf.d/baota-size.conf（总占用 ≤200M / 保留 7 天）
 🚀 [entrypoint] 15:01:13 - 已生成日志轮转配置：/etc/logrotate.d/baota-panel（面板 7 份 / 站点 14 份）
@@ -357,6 +380,69 @@ docker compose logs baota
 🚀 [entrypoint] 15:01:13 - 移交 systemd：/usr/sbin/init
 ```
 <!-- DAILY-VERIFY-REPORT:END -->
+
+</details>
+
+---
+
+## 漂移检测报告
+
+维护流程先看本报告的结论，确认无关键漂移后再手动触发发布。
+
+<details>
+<summary>点击展开最新检测结果（由每日 CI 自动更新）</summary>
+
+<!-- DAILY-DRIFT-REPORT:START -->
+### 🔭 漂移检测报告
+
+> 本文件由 `.github/workflows/drift.yml` 自动生成，每次运行整体覆盖。
+
+- 生成时间（UTC）：2026-09-08 07:04:55
+- 触发方式：workflow_dispatch
+- 12.0.0 版本：12.0.0
+- 13.0.0 版本：13.0.0
+- 变更判定：与基线一致，本次不跑安装对比
+
+---
+
+## 12.0.0 通道
+
+### 目录漂移检测
+
+> 安装脚本：`https://download.bt.cn/install/installStable_12.sh`
+
+| 顶层目录 | 安装前 | 安装后 | 新增 | 状态 |
+|---|---:|---:|---:|---|
+| `/etc` | 188 | 327 | 139 | ✅ 已被持久化覆盖 |
+| `/root` | 2 | 59 | 57 | ✅ 已被持久化覆盖 |
+| `/usr` | 8013 | 22628 | 14615 | ✅ 已被持久化覆盖 |
+| `/var` | 1007 | 1883 | 876 | ✅ 已被持久化覆盖 |
+| `/www` | 0 | 21790 | 21790 | ✅ 已被持久化覆盖 |
+
+### 结论
+
+✅ 未检测到会破坏持久化的上游变更（数据仍全部落在持久化目录内）。
+
+---
+
+## 13.0.0 通道
+
+### 目录漂移检测
+
+> 安装脚本：`https://download.bt.cn/install/install_panel.sh`
+
+| 顶层目录 | 安装前 | 安装后 | 新增 | 状态 |
+|---|---:|---:|---:|---|
+| `/etc` | 188 | 327 | 139 | ✅ 已被持久化覆盖 |
+| `/root` | 2 | 106 | 104 | ✅ 已被持久化覆盖 |
+| `/usr` | 8013 | 22628 | 14615 | ✅ 已被持久化覆盖 |
+| `/var` | 1007 | 1883 | 876 | ✅ 已被持久化覆盖 |
+| `/www` | 0 | 13216 | 13216 | ✅ 已被持久化覆盖 |
+
+### 结论
+
+✅ 未检测到会破坏持久化的上游变更（数据仍全部落在持久化目录内）。
+<!-- DAILY-DRIFT-REPORT:END -->
 
 </details>
 
