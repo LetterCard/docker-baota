@@ -33,8 +33,7 @@ baota-docker/
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
-│   │   ├── services.sh        运行期脚本权限 + 开机自启 + 目录基线
-│   │   └── slim.sh            构建期瘦身（strip_elf，由 base.sh / panel.sh 各自在本层调用）
+│   │   └── services.sh        运行期脚本权限 + 开机自启 + 目录基线
 │   ├── conf/
 │   │   ├── btpanel.service    systemd unit
 │   │   ├── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）

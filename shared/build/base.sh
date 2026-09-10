@@ -28,10 +28,6 @@ TZ="${TZ:-Asia/Shanghai}"
 log()  { echo "🔨 [build] $*"; }
 warn() { echo "⚠️ [build][WARN] $*" >&2; }
 
-# 构建期瘦身辅助（strip_elf）：与 panel.sh 共用，在各自层清理时调用
-# shellcheck disable=SC1091
-. /opt/baota/build/slim.sh
-
 # ==============================================================================
 #  1. apt 与基础软件包
 # ==============================================================================
@@ -129,10 +125,6 @@ install_packages() {
     # 清理必须写在本层内：Docker 分层特性下，后续层删除本层文件不会减小体积
     apt-get clean
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-    # 本层瘦身：剥离 apt 装好的 ELF 调试符号（动态符号保留；.a 静态库由
-    # strip_elf 用 --strip-debug 缩小，不删除）
-    strip_elf
 
     # locale-gen 已在上面把 en_US.UTF-8 编译进 /usr/lib/locale/locale-archive，
     # 运行期 glibc 读的是那个归档，不再需要 /usr/share/i18n 的 charmaps/locales

@@ -81,8 +81,13 @@
 
 - **`base.sh` 剔除诊断类冗余包**：`traceroute` / `dos2unix` / `p7zip-full` / `cpio`
   不再预装（`net-tools` / `dnsutils` 因宝塔网络模块可能调用予以保留）
-- **`slim.sh` 的 `strip_elf` 现在也处理 `*.a`**：静态库用 `strip --strip-debug`
-  只去调试符号、保留可链接性（PHP 扩展走动态链接，不依赖 `.a`）
+- **移除镜像瘦身（`slim.sh` / `strip_elf`）**：实测镜像反而从 400~500 MB 涨到
+  700 MB 以上 —— 被 strip 的文件绝大多数来自 `debian:12` 基础层，overlay 的
+  copy-up 会在本层再存一份副本、下层原文件不会消失（实测：仅修改一个
+  200 KB 的基础层文件，该层就多出 200 kB），净效果是变大。`slim.sh` 已删除，
+  `base.sh` / `panel.sh` 里的调用一并移除。
+  `base.sh` 中 dpkg 的 `path-exclude`（排除文档 / 手册 / 非 en 翻译）是安装时
+  就不写入、不产生副本，属于有效瘦身，予以保留
 
 ## [3.0.0] — 2026-09-07 · 不对抗上游：移除更新禁用补丁，持久化成为唯一核心保证
 

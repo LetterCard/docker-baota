@@ -389,7 +389,7 @@ _bk=$(basename "${BACKUP_PATH}")
 pass "备份工具可用，生成的备份包通过自校验（${_bk}）"
 
 step "A14) PHP 扩展编译工具链护栏（零网络，不装 PHP）"
-# 瘦身（locale 排除 / strip）最该守住的底线：镜像必须自带扩展编译工具链
+# 瘦身（dpkg path-exclude / locale 排除）最该守住的底线：镜像必须自带扩展编译工具链
 # （autoconf / gcc / make / libtool），否则用户在面板里给 PHP 装扩展时会
 # 复现「Cannot find autoconf」类回归。这里只做零网络的存在性断言，不临时
 # 安装任何 PHP 环境——真正的「装 PHP + 编译扩展」端到端测试留在日巡检
