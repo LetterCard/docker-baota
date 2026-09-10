@@ -6,7 +6,9 @@
 #  目标：
 #    help            显示本帮助
 #    build           构建镜像（默认 CHANNEL=12.0.0，标签 baota:dev）
-#    up / down       用对应通道的 compose 启停
+#    up / down       用 dockerfile/docker-compose.yml 启停（两通道共用一份）；
+#                    镜像标签默认 12.0.0，可用环境变量覆盖：
+#                    BAOTA_IMAGE=bugseeker/baota:13.0.0 make up
 #    restart / logs / ps / exec
 #  health 系列（三套，覆盖不同的失效面）：
 #    health          20 项功能检查（面板 / 凭据 / 备份 / 重建不丢数据）
@@ -114,7 +116,7 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	    exit 1; \
 	}
 	@set -eu; \
-	cd "$(CHANNEL_DIR)"; \
+	cd "$(COMPOSE_DIR)"; \
 	if [ -d system ]; then SYS=system; else SYS=data/system; fi; \
 	if [ ! -d "$$SYS" ]; then \
 	    echo "未找到系统层目录（$$SYS）。容器还没启动过，或挂载方式不是这两种。"; \

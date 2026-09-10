@@ -15,7 +15,9 @@ name: baota
 
 services:
   baota:
-    image: bugseeker/baota:12.0.0
+    # 默认稳定线 12.0.0；要用 13.0.0（最新正式版）带环境变量启动：
+    #   BAOTA_IMAGE=bugseeker/baota:13.0.0 docker compose up -d
+    image: ${BAOTA_IMAGE:-bugseeker/baota:12.0.0}
     container_name: baota
     hostname: baota
     restart: unless-stopped
@@ -96,10 +98,11 @@ services:
     #     ├─ backup/            ↔ 容器 /www/backup
     #     └─ server/data/       ↔ 容器 /www/server/data（MySQL）
     #   data/system/            系统层
-    #     ├─ panel/             /www 面板 overlay upper（server/panel、wwwlogs 增量）
     #     ├─ etc usr var root opt home srv  各目录 overlay upper
     #     └─ .baota/            系统层元数据：并发锁、overlay workdir、
     #                           镜像版本记录、启动历史（boot-history.log）
+    #   注意：面板代码 /www/server/panel 与站点日志 /www/wwwlogs 都不持久化
+    #   （前者随镜像升级；后者如需长期保留请在面板里修改站点日志目录）
     #   data/.baota/            数据层状态（并发锁，隐藏；workdir 只在系统层）
     #
     #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
