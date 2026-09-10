@@ -74,6 +74,90 @@ wait_ready() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+#  PHP 扩展编译链路（真编译 + 真加载，零网络）
+#  复现用户在面板里给 PHP 装扩展的真实链路：phpize → configure → make → 加载。
+#  仅校验 autoconf 存在（core.sh 旧 A14 的做法）抓不到「dev 库缺失 /
+#  php-config 接错 / phpize 损坏」这类更深回归；这里真编一个最小 .so 并
+#  用 php -m 验证，等价于用户装 redis / igbinary 的失败面，但零网络、
+#  不依赖 pecl.php.net 可达（避免 GitHub runner 网络抖动造成假红）。
+#  本函数只产出一条 ok / bad（失败原因并入消息体），便于检查项计数稳定。
+# ---------------------------------------------------------------------------
+check_php_ext_compile() {
+    log "验证 PHP 扩展编译链路（真编译最小扩展）"
+    local _phpize _ver _phpcfg _php _build _out _rc _msg
+    _rc=0
+    _phpize=$(docker exec "$C" sh -c 'ls -d /www/server/php/*/bin/phpize 2>/dev/null | head -1' 2>/dev/null || true)
+    if [ -z "$_phpize" ]; then
+        _rc=1; _msg="容器内未找到任何 PHP 的 phpize（/www/server/php/*/bin/phpize）"
+    else
+        _ver=$(dirname "$(dirname "$_phpize")")      # .../php/X.X
+        _phpcfg="$_ver/bin/php-config"
+        _php="$_ver/bin/php"
+        _build=$(mktemp -d)
+
+        # 最小扩展源码：仅注册一个函数，证明编译 + 加载全链路通
+        cat > "$_build/config.m4" <<'M4'
+PHP_ARG_ENABLE(myext, whether to enable myext,
+[  --enable-myext   Enable myext support], no)
+if test "$PHP_MYEXT" != "no"; then
+  PHP_NEW_EXTENSION(myext, myext.c, $ext_shared)
+fi
+M4
+        cat > "$_build/myext.c" <<'C'
+#include "php.h"
+
+PHP_FUNCTION(myext_hello) { php_printf("hello from myext\n"); }
+
+const zend_function_entry myext_functions[] = {
+    PHP_FE(myext_hello, NULL)
+    PHP_FE_END
+};
+
+PHP_MINIT_FUNCTION(myext) { return SUCCESS; }
+
+zend_module_entry myext_module_entry = {
+    STANDARD_MODULE_HEADER,
+    "myext",
+    myext_functions,
+    PHP_MINIT(myext),
+    NULL, NULL, NULL, NULL,
+    NO_VERSION_YET,
+    STANDARD_MODULE_PROPERTIES
+};
+
+#ifdef COMPILE_DL_MYEXT
+ZEND_GET_MODULE(myext)
+#endif
+C
+
+        if ! docker cp "$_build" "$C:/tmp/myext_check" >/dev/null 2>&1; then
+            _rc=1; _msg="无法拷贝扩展源码进容器"
+        else
+            # 链路上任一步（phpize 调 autoconf / configure / make / 加载）失败都判红
+            _out=$(docker exec "$C" sh -c "
+                cd /tmp/myext_check && \
+                '$_phpize' >/dev/null 2>&1 && \
+                ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && \
+                make -j\"\$(nproc)\" >/dev/null 2>&1 && \
+                test -f modules/myext.so && \
+                '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext
+            " 2>&1)
+            _rc=$?
+            [ "$_rc" -ne 0 ] && _msg="phpize→编译→加载最小扩展未通过（疑似工具链 / php-config 回归）"
+        fi
+        docker exec "$C" rm -rf /tmp/myext_check >/dev/null 2>&1 || true
+        rm -rf "$_build"
+    fi
+
+    if [ "$_rc" -eq 0 ]; then
+        ok "PHP 扩展编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
+    else
+        bad "PHP 扩展编译链路失败：${_msg}"
+        [ -n "$_out" ] && warn "编译输出：${_out}"
+    fi
+}
+
 start_container() {
     docker run -d --name "$C" --privileged \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
@@ -157,6 +241,9 @@ case "$CRED" in
     ''|bt-build-*) bad "凭据仍是构建期占位值（${CRED:-空}）" ;;
     *)             ok "首启凭据已随机生成（非构建期占位）" ;;
 esac
+
+# --- PHP 扩展编译链路（真编译 + 真加载，零网络） ---
+check_php_ext_compile
 
 # --- 并发锁：第二实例必须被拦截 ---
 log "验证并发锁（起第二实例）"
