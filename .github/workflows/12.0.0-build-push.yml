@@ -46,9 +46,6 @@ name: 📦 12.0.0：构建并发布镜像
 #    健康检查失败会终止该 job；publish 依赖两个 job 都成功，
 #    所以坏镜像不可能出现在 :版本 这个标签里。
 #
-#  🧩 与通道无关的四步（lint / build / publish / writeback）已抽到
-#     .github/workflows/reusable-build-push.yml，由本文件末尾的 release job 调用
-#
 #  🔑 所需 Secrets
 #    DOCKERHUB_USERNAME  DockerHub 用户名
 #    DOCKERHUB_TOKEN     DockerHub Access Token（不要用登录密码）
@@ -237,24 +234,300 @@ jobs:
   # 与版本探测无关，所以**无条件运行**：即使本次不发布镜像，
   # 代码问题也能在当天被发现，而不是等到下次发布才暴露
   # ---------------------------------------------------------------------------
+  lint:
+    name: 🧹 静态检查（shellcheck + 语法 + YAML）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔧 安装检查工具
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y shellcheck python3-yaml
+          shellcheck --version
+          python3 -c "import yaml; print('PyYAML ok')"
+
+      - name: 🧹 运行静态检查
+        run: make lint
+
+  build:
+    name: 🏗️ 构建 linux/${{ matrix.arch }}
+    needs: [version, lint]
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      # 不要 fail-fast：让两个架构都跑完，一次就能看到各自的问题
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            # 原生 ARM runner，避免 QEMU 模拟下编译 Python 的漫长等待
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🖥️ 确认 runner 原生架构
+        run: |
+          echo "runner: $(uname -m)  target: ${{ matrix.arch }}"
+          case "${{ matrix.arch }}-$(uname -m)" in
+            amd64-x86_64|arm64-aarch64) echo "✅ 原生构建" ;;
+            *) echo "::error::runner 与目标架构不匹配"; exit 1 ;;
+          esac
+
+      - name: 🔧 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      # ---- 第一次构建：只加载到本地，供三套健康检查使用 ----
+      # 同时把构建缓存写进 GHA 缓存（按架构分 scope），第二次按 digest 推送会命中，
+      # 几乎不再重新编译
+      - name: 🏗️ 构建镜像（加载到本地，供健康检查）
+        run: |
+          echo "构建 baota:candidate（linux/${{ matrix.arch }}）"
+          # INSTALL_URL 刻意不传：用 dockerfile/12.0.0/Dockerfile 里 ARG 的默认值，
+          # 与 version job 探测时解析到的是同一份（见 env 处的说明）
+
+          docker buildx build \
+            --file ./dockerfile/12.0.0/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --load \
+            --provenance=false \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
+            --tag "baota:candidate" \
+            --cache-from "type=gha,scope=12.0.0-${{ matrix.arch }}" \
+            --cache-to "type=gha,scope=12.0.0-${{ matrix.arch }},mode=max" \
+            .
+          docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
+
+      # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
+      #
+      # 三套检查测的是三个互不相关的失效面（功能完整性 / 挂载与降级 / 版本演进），
+      # 各自启停独立容器（容器名按 PID 区分：baota-healthcheck-<pid> /
+      # baota-mounts-<pid> / baota-upgrade-<pid>，不会撞车），可以并行跑：
+      #   - 单 runner 启 3 个 baota 容器约 1.5 GB 内存，amd64/arm64 runner 都够
+      #   - 容器名按 PID 区分，不会冲突
+      #   - 任一子任务非零退出 → set -e + wait 让 step 失败，不掩盖问题
+      # 串行改并行一般能省 5~10 分钟（每套检查都要 systemd 起来 + 宝塔初始化）
+      - name: 🩺 三套健康检查并行（功能 / 挂载 / 升级）
+        run: |
+          set -euo pipefail
+          LOG_DIR="${RUNNER_TEMP:-/tmp}/hc-logs"
+          mkdir -p "${LOG_DIR}"
+          VER="${{ needs.version.outputs.value }}"
+
+          # 后台启动三套，每套单独写日志；前台 wait 等齐；任一非零则整步失败
+          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check/run.sh mounts  "baota:candidate"                > "${LOG_DIR}/mounts.log"  2>&1 & PID_MOUNTS=$!
+          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+
+          FAILED=0
+          wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
+          wait "${PID_MOUNTS}"  || { echo "::error::mounts 检查失败，日志见 ${LOG_DIR}/mounts.log";  FAILED=1; }
+          wait "${PID_UPGRADE}" || { echo "::error::upgrade 检查失败，日志见 ${LOG_DIR}/upgrade.log"; FAILED=1; }
+
+          # 任一失败：先把日志吐到 step 输出，再非零退出 —— 不让并行"静默吃掉"问题
+          if [ "${FAILED}" -ne 0 ]; then
+            for f in core mounts upgrade; do
+              echo "===== ${f}.log (tail 80) ====="
+              tail -n 80 "${LOG_DIR}/${f}.log" || true
+            done
+            exit 1
+          fi
+          echo "✅ 三套健康检查全过"
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---- 第二次构建：按 digest 推送，不产生任何 arch 标签 ----
+      #
+      # 为什么构建两次（取舍，不是技术限制）：buildx 一次调用里没法「测完再推」。
+      # 这里先构建并 load 到本机、三套健康检查通过后才第二次推送；第二次命中
+      # 第一次刚写入的 GHA 缓存，几乎不再重新编译。
+      # push-by-digest=true：只把镜像按 digest 存进 registry，不创建任何标签 ——
+      # DockerHub 上永远不会出现 <版本>-amd64 / <版本>-arm64。
+      - name: 📤 按 digest 推送（不产生标签）
+        id: push
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          echo "推送 linux/${{ matrix.arch }}（按 digest，无标签）"
+
+          docker buildx build \
+            --file ./dockerfile/12.0.0/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --provenance=false \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "IMAGE_VERSION=${{ needs.version.outputs.value }}" \
+            --output "type=image,name=${REPO},push=true,push-by-digest=true" \
+            --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
+            --cache-from "type=gha,scope=12.0.0-${{ matrix.arch }}" \
+            .
+          DIGEST=$(jq -r '."containerimage.digest"' "/tmp/meta-${{ matrix.arch }}.json")
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "::error::取 digest 失败：${DIGEST}"; exit 1 ;;
+          esac
+          mkdir -p /tmp/digests
+          printf '%s\n' "${DIGEST}" > "/tmp/digests/${{ matrix.arch }}"
+          {
+            echo "### 🏗️ linux/${{ matrix.arch }}"
+            echo ""
+            echo "- 按 digest 推送：\`${REPO}@${DIGEST}\`（无 arch 标签）"
+            echo "- 字节与健康检查对象同源（复用同一份 GHA 缓存）"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ ${{ matrix.arch }} digest: ${DIGEST}"
+
+      - name: 📦 上传 digest 产物
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: digest-12.0.0-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
   # ---------------------------------------------------------------------------
-  # 🏗️ 以下 lint / build / publish / writeback 四个 job 已抽到
-  # .github/workflows/reusable-build-push.yml —— 它们与「版本从哪来」无关，
-  # 两个通道逐字相同，改构建流程只需改那一处。
-  # 本文件只保留真正的通道差异：版本探测（安装脚本横幅）+ 参数装配。
+  # 合并成唯一的多架构标签 repo:版本
+  # 两个 build job 必须都成功，任一架构的健康检查失败都到不了这一步。
+  # 跳过条件与 build 相同：定时触发且没有新版本时，这里同样不运行
   # ---------------------------------------------------------------------------
-  release:
-    name: 🏗️ 构建并发布（12.0.0 通道）
-    needs: version
-    uses: ./.github/workflows/reusable-build-push.yml
+  publish:
+    name: 🚀 合并多架构并发布（仅 <版本> 标签）
+    needs: [version, build]
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      repo: ${{ steps.manifest.outputs.repo }}
+      tag: ${{ steps.manifest.outputs.tag }}
+    steps:
+      - name: 📥 下载 digest 产物
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: digest-12.0.0-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🚀 合并多架构 manifest
+        id: manifest
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          VER="${{ needs.version.outputs.value }}"
+
+          AMD64=$(tr -d '[:space:]' < /tmp/digests/amd64)
+          ARM64=$(tr -d '[:space:]' < /tmp/digests/arm64)
+          echo "amd64: ${AMD64}"
+          echo "arm64: ${ARM64}"
+          [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::缺少某个架构的 digest"; exit 1; }
+
+          # 约定：12.0.0 是稳定线，只打版本号标签；latest 由 13.0.0 通道独占，
+          # 这里绝对不能加 -t "${REPO}:latest" —— 会把 latest 误指向 12.0.0
+          docker buildx imagetools create -t "${REPO}:${VER}" \
+            "${REPO}@${AMD64}" \
+            "${REPO}@${ARM64}"
+
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: 📋 输出摘要
+        run: |
+          REPO="${{ steps.manifest.outputs.repo }}"
+          TAG="${{ steps.manifest.outputs.tag }}"
+
+          {
+            echo "### 🚀 12.0.0 通道发布完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`${REPO}:${TAG}\` |"
+            echo "| 宝塔版本 | ${{ needs.version.outputs.value }} |"
+            echo "| 架构 | linux/amd64、linux/arm64 |"
+            echo ""
+            echo "本工作流不推送 latest 标签，compose 里请使用精确版本标签。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "已发布 ${REPO}:${TAG}"
+          docker buildx imagetools inspect "${REPO}:${TAG}"
+
+  # ---------------------------------------------------------------------------
+  # ✏️ 发布成功之后才回写 dockerfile/12.0.0/VERSION —— 与 13.0.0 通道对称：
+  # 文件永远对应「已推送」的版本；构建失败时文件不动，下次运行自动重试。
+  #
+  # 关键约束（之前踩过坑）：
+  #   1. 必须先 git fetch + rebase 最新 main，再 commit。
+  #      publish 跑完通常要 30+ 分钟，期间若有人在 main 上提交（手动改回、
+  #      其他 bot、并发 workflow 调度等），bot checkout 时拿到的不是最新 HEAD，
+  #      直接 push 会被 non-fast-forward 拒绝。
+  #   2. git push 失败必须让 step 真正失败（exit 1）。
+  #      之前用 `if git push; then ... else ::warning:: ... fi` 的写法，
+  #      bash 把整体退出码取最后一个 echo 的（成功），于是 step 显示绿色✓
+  #      但 push 其实没生效。下次运行还会再探测一次"不一致"，重新走一遍
+  #      build → publish → writeback，整轮 30 分钟构建浪费。
+  # ---------------------------------------------------------------------------
+  writeback:
+    name: ✏️ 回写 dockerfile/12.0.0/VERSION
+    needs: [version, publish]
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
-    secrets: inherit
-    with:
-      channel: "12.0.0"
-      version: ${{ needs.version.outputs.value }}
-      changed: ${{ needs.version.outputs.changed }}
-      version_file: dockerfile/12.0.0/VERSION
-      dockerfile: ./dockerfile/12.0.0/Dockerfile
-      cache_scope: "12.0.0"
-      publish_latest: false
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          # 完整历史让 rebase 能拿到共同祖先，否则会报 "invalid upstream"
+          fetch-depth: 0
+
+      - name: ✏️ 回写已发布的版本号
+        run: |
+          set -euo pipefail
+
+          VER="${{ needs.publish.outputs.tag }}"
+          # publish.outputs.tag 为空 = 上游 job 链路断了，不再写回（让 step 失败便于排查）
+          [ -n "${VER}" ] || { echo "::error::publish.outputs.tag 为空，上游未产生新版本"; exit 1; }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1) 同步最新 main，避免与并发 push 形成 non-fast-forward。
+          #    rebase 冲突在这里几乎不可能（只有 VERSION 一处文本变更），
+          #    真撞上时直接报错退出，比强行 --force 安全得多。
+          git fetch origin main
+          git rebase origin/main
+
+          # 2) 再次检查：rebase 后若 VERSION 已是目标值，说明并发运行已先一步
+          #    回写完毕（典型场景：两次手动触发重叠），
+          #    无需重复 commit，直接成功退出。
+          CURRENT=$(tr -d '[:space:]' < dockerfile/12.0.0/VERSION || true)
+          if [ "${CURRENT}" = "${VER}" ]; then
+            echo "dockerfile/12.0.0/VERSION 已是 ${VER}，并发回写已生效，跳过"
+            exit 0
+          fi
+
+          printf '%s\n' "${VER}" > dockerfile/12.0.0/VERSION
+          git add dockerfile/12.0.0/VERSION
+          git commit -m "chore: release baota ${VER} (writeback dockerfile/12.0.0/VERSION)"
+
+          # 3) 直接 push，不再用 if-then-else 包裹。
+          #    push 失败（非 fast-forward / 分支保护 / 权限不足）会原样
+          #    冒泡成 step 失败：红❌ + ::error::，下次运行会重新探测并重试。
+          git push origin HEAD:main
+          echo "已回写 dockerfile/12.0.0/VERSION = ${VER}"
+
+      - name: 📋 输出摘要
+        run: |
+          echo "### ✏️ dockerfile/12.0.0/VERSION 已回写为 \`${{ needs.publish.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
