@@ -180,12 +180,8 @@ inside test -f "${SNAP}/port.pl" \
     || fail "快照内容不完整：${SNAP} 里没有 port.pl（cp -a 可能只建了空目录）"
 pass "升级前快照已生成且内容完整：${SNAP}"
 
-# 启动器刷新只在版本变化时执行。漏掉它会让面板启动器被持久化层永久锁定，
-# 之后无论换什么镜像都不再更新
-logs_match '已刷新面板启动器' \
-    || fail "未刷新面板启动器（升级后启动器会被持久化层永久锁定）"
-pass "面板启动器已刷新到当前镜像版本"
-
+# 不可变面板下，启动器随镜像层只读提供，不再被 copy-up 锁进持久化层，
+# 因此不再存在「版本变化时刷回启动器」这一步骤。
 assert_no_degraded
 
 RECORDED=$(inside_cat "${PERSIST_SYSTEM_ROOT}/.baota/image-version")
