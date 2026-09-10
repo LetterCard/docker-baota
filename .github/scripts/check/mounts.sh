@@ -150,9 +150,12 @@ inside_sh 'echo mix > /www/wwwroot/_mix_marker'
 #   /etc                    系统层 overlay，upper 在 system/etc/
 #   /www/wwwroot            业务 bind，源 = data/www/wwwroot
 #   /www/server/panel/data  面板状态 bind，源 = data/panel/data
-[ -f "${WORK_ROOT}/system/etc/_mix_marker" ]            || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}${PANEL_STATE_ROOT}/data/_mix_marker" ] || fail "面板状态写入未落到 ${PANEL_STATE_ROOT}/data/"
-[ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]      || fail "/www/wwwroot 写入未落到绑定源 data/www/wwwroot/"
+# 断言以 runner 用户执行，而持久化目录里是容器 root 的文件（面板状态目录
+# 还是 700）—— runner 穿不透，必须借 sudo 以 root 视角检查，否则会把
+# 「bind 正常落盘但非 root 不可见」误判成「写入未落盘」
+sudo test -f "${WORK_ROOT}/system/etc/_mix_marker"            || fail "/etc 写入未落到系统层 system/etc/"
+sudo test -f "${WORK_ROOT}${PANEL_STATE_ROOT}/data/_mix_marker" || fail "面板状态写入未落到 ${PANEL_STATE_ROOT}/data/"
+sudo test -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker"      || fail "/www/wwwroot 写入未落到绑定源 data/www/wwwroot/"
 pass "写入分别落到 system/etc/、data/panel/data 与 data/www/wwwroot"
 
 step "A4) 销毁容器后重建，数据不丢"

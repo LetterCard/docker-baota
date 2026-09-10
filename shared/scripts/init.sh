@@ -265,6 +265,17 @@ seed_panel_state() {
         fi
     fi
 
+    # 宝塔把面板 data/ 等目录设为 600（无 x 位），cp -a 会把目录自身的模式
+    # 一起带到持久化源目录上。目录没有 x 位时连所有者都无法在其下创建文件：
+    # Linux 上容器 root 靠 CAP_DAC_OVERRIDE 侥幸能写，但 Docker Desktop 的
+    # virtiofs 不豁免 —— 首次启动写 port.pl 直接 Permission denied，容器起不来；
+    # CI 的宿主机侧断言（非 root）也穿不透，会误报「写入未落盘」。
+    # 源目录是本方案的挂载基础设施，归我们管，归位 700；目录内容仍保持镜像原样
+    if [ -d "${_source}" ] && ! [ -x "${_source}" ]; then
+        chmod 700 "${_source}" 2> /dev/null \
+            || warn "无法修正 ${_source} 目录权限（缺少 x 位），面板可能无法写入"
+    fi
+
     bind_subdir "${_source}" "${_target}"
 }
 
