@@ -42,7 +42,7 @@ PANEL_STATE_SUBDIRS="${PANEL_STATE_SUBDIRS:-data plugin}"
 
 # 这些挂载点一旦持久化失败就是静默丢数据，必须让 healthcheck 可见。
 # 写的是「容器内路径」，与传给 is_critical 的判断值一致
-CRITICAL_DIRS="${CRITICAL_DIRS:-/etc /var /www/wwwroot /www/server/data /www/server/panel/data}"
+CRITICAL_DIRS="${CRITICAL_DIRS:-/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data}"
 
 # Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
 # 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回
