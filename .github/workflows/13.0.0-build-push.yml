@@ -46,7 +46,7 @@ on:
   workflow_dispatch:
     inputs:
       force_update:
-        description: '🔧 强制更新：跳过「已一致」判断，直接重建发布'
+        description: '🔧 强制更新：跳过「已是最新」判断，直接重建发布（探测失败则按 VERSION 当前值）'
         type: boolean
         default: false
 
@@ -78,6 +78,7 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       changed: ${{ steps.detect.outputs.changed }}
+      probe: ${{ steps.detect.outputs.probe }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
@@ -85,20 +86,31 @@ jobs:
       - name: 🔍 探测上游版本并与 VERSION 比对
         id: detect
         run: |
-          UPSTREAM=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" | tr -d '[:space:]' || true)
-          if [ -z "$UPSTREAM" ]; then
-            echo "::error::get_version API 无返回：${VERSION_API}"
-            exit 1
-          fi
-          if ! printf '%s' "$UPSTREAM" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::API 返回 '$UPSTREAM' 不是 x.y.z 格式"
-            exit 1
+          # 探测 get_version API。失败（无返回 / 格式异常）不再 exit 1，而是记
+          # probe=failed 并回退到 dockerfile/13.0.0/VERSION 当前值继续 —— 与 12.0.0
+          # 通道一致：探测不到上游状态时，宁可按仓库已知版本继续，也不让整 job 红掉。
+          UPSTREAM=""
+          TMP=$(mktemp)
+          if curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_API" -o "$TMP" 2>/dev/null; then
+            UPSTREAM=$(tr -d '[:space:]' < "$TMP" || true)
+            rm -f "$TMP"
+          else
+            rm -f "$TMP"
           fi
 
           CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" || true)
           if [ -z "$CURRENT" ]; then
             echo "::error::$VERSION_FILE 为空"
             exit 1
+          fi
+
+          # 探测失败（无返回或非 x.y.z）→ 记 probe=failed，回退 VERSION 当前值，不退出
+          if [ -z "$UPSTREAM" ] || ! printf '%s' "$UPSTREAM" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "probe=failed" >> "$GITHUB_OUTPUT"
+            echo "::warning::无法从 get_version API 取得有效版本（${VERSION_API}），按 $VERSION_FILE(${CURRENT}) 继续"
+            UPSTREAM="$CURRENT"
+          else
+            echo "probe=ok" >> "$GITHUB_OUTPUT"
           fi
 
           if [ "$UPSTREAM" = "$CURRENT" ]; then
@@ -113,14 +125,10 @@ jobs:
             fi
           fi
 
-          # 🔧 强制更新：手动勾选后跳过「已一致」判断，无条件进入构建发布。
-          # 版本仍以 API 探测结果为准 —— 强制的是「重建发布」这个动作，
-          # 不是编造版本号。探测失败（API 无返回）时无法确定版本，直接取消
+          # 🔧 强制更新：手动勾选后跳过「已是最新」判断，无条件进入构建发布。
+          # 版本仍以探测结果为准；探测失败已回退到 VERSION 当前值（见上）——
+          # 强制的是「重建发布」这个动作，不是编造版本号
           if [ '${{ inputs.force_update }}' = 'true' ]; then
-            if [ -z "$UPSTREAM" ]; then
-              echo "::error::强制更新模式下探测失败（get_version 无返回），无法确定版本，取消构建"
-              exit 1
-            fi
             echo "🔧 强制更新模式：跳过版本比对，无条件构建发布（版本 ${UPSTREAM}）"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           elif [ "$RESULT" = "new-version" ]; then
@@ -137,14 +145,16 @@ jobs:
         run: |
           CURRENT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo 未知)
           FORCE='${{ inputs.force_update }}'
-          if [ "${{ steps.detect.outputs.changed }}" = "true" ] && [ "${FORCE}" = 'true' ]; then
+          PROBE='${{ steps.detect.outputs.probe }}'
+          if [ "${FORCE}" = 'true' ]; then
+            # 强制更新：探测到什么用什么，探测失败已回退 VERSION 当前值
             TEXT="🔧 强制更新：跳过版本比对，按 ${{ steps.detect.outputs.version }} 重建发布"
           elif [ "${{ steps.detect.outputs.changed }}" = "true" ]; then
             TEXT="🎉 发现新版本：${CURRENT} → ${{ steps.detect.outputs.version }}"
-          elif [ -n "${{ steps.detect.outputs.changed }}" ]; then
-            TEXT="✅ 已一致（${CURRENT}），无需发布"
+          elif [ "${PROBE}" = "failed" ]; then
+            TEXT="⚠️ 探测失败，按 ${CURRENT} 继续，本次不构建（可手动重跑）"
           else
-            TEXT="❌ 探测失败，详见日志"
+            TEXT="✅ 已一致（${CURRENT}），无需发布"
           fi
           {
             echo "### 📦 13.0.0 通道检查"
