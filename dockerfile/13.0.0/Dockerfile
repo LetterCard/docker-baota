@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ==============================================================================
-#  🐳 宝塔 Linux 面板容器化（13.0.0 通道：官方13.0.0最新）
+#  🐳 宝塔 Linux 面板容器化（13.0.0 通道：官方最新正式版）
 #
 #  与 dockerfile/12.0.0/Dockerfile 的差异只有两处：INSTALL_URL 默认值与 LABEL 描述。
 #  构建逻辑抽在 shared/build/ 三阶段脚本里，两个通道共用；
@@ -22,7 +22,7 @@ ARG IMAGE_SOURCE=https://github.com/
 ARG IMAGE_VERSION=dev
 
 LABEL org.opencontainers.image.title="Baota Panel" \
-    org.opencontainers.image.description="宝塔 Linux 面板容器化（13.0.0最新），/etc /usr /var /www 等目录持久化" \
+    org.opencontainers.image.description="宝塔 Linux 面板容器化（最新正式版），/etc /usr /var 等系统目录与业务数据持久化（面板代码不可变、随镜像升级）" \
     org.opencontainers.image.source="${IMAGE_SOURCE}" \
     org.opencontainers.image.version="${IMAGE_VERSION}" \
     org.opencontainers.image.licenses="MIT"

@@ -41,7 +41,7 @@ ARG IMAGE_SOURCE=https://github.com/
 ARG IMAGE_VERSION=dev
 
 LABEL org.opencontainers.image.title="Baota Panel" \
-    org.opencontainers.image.description="宝塔 Linux 面板 12.x 容器化，/etc /usr /var /www 等目录持久化" \
+    org.opencontainers.image.description="宝塔 Linux 面板 12.x 容器化，/etc /usr /var 等系统目录与业务数据持久化（面板代码不可变、随镜像升级）" \
     org.opencontainers.image.source="${IMAGE_SOURCE}" \
     org.opencontainers.image.version="${IMAGE_VERSION}" \
     org.opencontainers.image.licenses="MIT"

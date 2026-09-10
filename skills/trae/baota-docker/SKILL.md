@@ -85,8 +85,8 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/conf/defaults.env` | ★ 运行期配置真源 |
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `shared/conf/log/` | journald 上限 + logrotate 配置源 |
-| `dockerfile/12.0.0/` `dockerfile/13.0.0/` | 两个通道的 Dockerfile / compose / VERSION |
-| `.github/scripts/check/*.sh` | 发布门禁三套：19 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
+| `dockerfile/12.0.0/` `dockerfile/13.0.0/` | 两个通道的 Dockerfile / VERSION（compose 见 `dockerfile/docker-compose.yml`） |
+| `.github/scripts/check/*.sh` | 发布门禁三套：20 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
 | `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
 | `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |

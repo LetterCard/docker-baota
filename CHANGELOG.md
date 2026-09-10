@@ -37,6 +37,8 @@
   手动搬到 `panel/data` 才能被新版识别（详见 docs/upgrade.md）
 - 新增环境变量 `WWW_DATA_SUBDIRS` / `PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS`；
   移除 `PASSTHROUGH_DIRS` / `PERSIST_DATA_DIRS` / `PANEL_UPPER_DIR`
+- **镜像不再预装 PHP**：改为预装完整编译工具链 + LNMP 各类 dev 库
+  （实测代价约 +160MB），PHP 及其扩展由用户在面板里运行期安装，镜像保持「纯净面板」
 
 ### 🐛 修复
 
@@ -60,21 +62,27 @@
   （走容器内的 sh）；实测同一写法对已安装命令返回 0、对缺失命令返回非零，
   判定仍然有效
 
+- **A14 从「真编译 PHP 扩展」退回「零网络工具链护栏」**：发布前检查只断言
+  `autoconf / gcc / make / libtool` 存在（不临时安装 PHP），真正的
+  「装 PHP + 编译扩展」端到端测试移到日巡检 `published.sh`、在已发布的纯净镜像上跑，
+  避免污染推送前的候选镜像
+- **日巡检假红**：`published.sh` 里与实际布局不一致的断言已修正 —— 面板状态路径
+  `/data/panel-state` → `/data/panel`、overlay 期望数（面板 `/www` 已不走 overlay）、
+  备份包成员名 `panel-state/data` → `panel/data`
+
 ### ✨ 新增
 
 - **基础镜像可配置（BASE_IMAGE）**：两个 Dockerfile 的 `ARG BASE_IMAGE=debian:12`
   保持为唯一真源；构建发布工作流新增可选输入 `base_image`（留空则不传该
   build-arg，避免常量抄两份）。探路 Debian 13（trixie，宝塔官方镜像所用）时
-  填 `debian:13` 即可，无需改代码。文档新增「自定义基础镜像」章节说明切换代价
-  （须同步 drift.yml 的 BASE_IMAGE + 完整回归）
+  填 `debian:13` 即可，无需改代码（切换前须同步 drift.yml 的 BASE_IMAGE 并跑完整回归）
 
-- **stable 12.0.0 构建期预升 Python 3.13**：Dockerfile 新增 `UPGRADE_PY313`
-  （默认 true，可 `--build-arg UPGRADE_PY313=false` 回退 py3.7）。官方 bundle
-  预编译包实测约 90 秒完成（Route 1 完整包自带依赖，面板未运行不影响），
-  psutil/flask/gevent 导入、面板启动与 HTTP 全部实测通过。
-  **纯净度**：脚本自动备份的旧环境（`pyenv_backup_*` 约 600M）、锁文件、日志、
-  下载缓存全部在构建期清除，镜像内零残留；镜像体积 1.55GB → 约 1.19GB
-  （与 13.0.0 对齐）。arm64 的 py3.13 aarch64 预编译支持待首次 CI 构建确认路线
+### ⚡ 优化
+
+- **`base.sh` 剔除诊断类冗余包**：`traceroute` / `dos2unix` / `p7zip-full` / `cpio`
+  不再预装（`net-tools` / `dnsutils` 因宝塔网络模块可能调用予以保留）
+- **`slim.sh` 的 `strip_elf` 现在也处理 `*.a`**：静态库用 `strip --strip-debug`
+  只去调试符号、保留可链接性（PHP 扩展走动态链接，不依赖 `.a`）
 
 ## [3.0.0] — 2026-09-07 · 不对抗上游：移除更新禁用补丁，持久化成为唯一核心保证
 

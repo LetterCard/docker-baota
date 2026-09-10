@@ -129,7 +129,7 @@ services:
 
     # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，三段：
     #   1) /run/baota/degraded-critical 不存在 —— etc/var/www 任一持久化失败
-    #      或只读降级时由 init-mounts 写入，让失效在 compose ps 里直接可见；
+    #      或只读降级时由 init.sh 写入，让失效在 compose ps 里直接可见；
     #   2) /data 与 /data/system 磁盘水位 —— 任一可用 < 1GB 或已用 ≥ 95% 即 unhealthy，
     #      满盘前在 docker ps / 飞牛 UI 上就能看到，而不是等 MySQL 崩；
     #   3) 面板端口可访问 —— 端口可能被用户改掉，从 port.pl 现读，http 失败再试 https。
