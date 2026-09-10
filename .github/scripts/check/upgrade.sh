@@ -5,10 +5,10 @@
 #  用法：bash run.sh upgrade <镜像名:标签> <期望的宝塔版本号>
 #
 #  为什么需要它：
-#    core.sh 只覆盖「全新卷」与「同卷重建」两种场景，而版本护栏、
-#    升级前快照、面板启动器刷新这三段逻辑**只在镜像版本发生变化时才执行** ——
-#    全新卷永远走不到那个分支，等于长期零覆盖。一旦版本比较写错，
-#    表现是「静默不快照 / 不刷新」，用户升级后才发现面板不对，且此时已无回滚点。
+#    core.sh 只覆盖「全新卷」与「同卷重建」两种场景，而版本护栏与升级前快照
+#    这两段逻辑**只在镜像版本发生变化时才执行** —— 全新卷永远走不到那个分支，
+#    等于长期零覆盖。一旦版本比较写错，表现是「静默不快照」，用户升级后才发现
+#    面板不对，且此时已无回滚点。
 #
 #  怎么触发版本变化（不拉旧镜像）：
 #    启动一次完成初始化后，直接改写持久化层里的 .baota/image-version：
@@ -20,7 +20,7 @@
 #
 #  覆盖点：
 #    version_guard 的版本比较与记录回写 / take_snapshot（cp -a 目录快照，
-#    含内容完整性）/ prune_snapshots / 降级「只告警不阻断」的语义
+#    含内容完整性）/ 降级「只告警不阻断」的语义
 #
 #  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 排除
 # ==============================================================================
@@ -29,14 +29,15 @@ set -euo pipefail
 IMAGE=${1:?用法: run.sh upgrade <镜像> <期望版本>}
 EXPECT_VERSION=${2:?用法: run.sh upgrade <镜像> <期望版本>}
 
-# 配置真源：与镜像共用 shared/conf/defaults.env
-read_default() {
-    sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env
-}
+# 公共样板（配置解析 / 输出 / 容器操作 / 等待 / 启动 / 清理）见 lib.sh。
+# 注：本脚本原先的 read_default 不做嵌套引用展开，统一成 lib.sh 的展开版后
+# 行为不变（PERSIST_SYSTEM_ROOT 是字面量），且以后取到嵌套引用也不会踩坑
+# shellcheck disable=SC1090,SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
-[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
-
+# ICON 供 lib.sh 的 step() 作日志前缀（本文件内无引用，shellcheck 会误报未使用）
+# shellcheck disable=SC2034
+ICON='🔼'
 CONTAINER="baota-upgrade-$$"
 VOLUME="baota-upgrade-data-$$"
 
@@ -44,67 +45,9 @@ VOLUME="baota-upgrade-data-$$"
 OLD_VERSION='0.0.1'
 FUTURE_VERSION='999.0.0'
 
-pass() { echo "  ✅ $*"; }
-step() { echo; echo "🔼 ==== $* ===="; }
-fail() {
-    echo "::error::$*"
-    echo "----- 容器日志尾部 -----"
-    docker logs "$CONTAINER" --tail 150 2>/dev/null || true
-    echo "----- 日志结束 -----"
-    exit 1
-}
-
-cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-inside()     { docker exec "$CONTAINER" "$@"; }
-inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
-inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
-
-# docker logs | grep -q 在 pipefail 下会误判失败：
-#   grep -q 一命中就退出并关闭管道，docker logs 写不完剩余输出就被
-#   SIGPIPE 终止（141）；pipefail 把 141 当成管道失败，于是「日志里明明
-#   有该文案」却报「未识别」。用 `{ grep -q && cat >/dev/null; }` 把管道
-#   读干净再退出，生产者正常收尾，退出码只由 grep 决定。
-#   若 grep 未命中，它会读完整个输入才退出，同样不会触发 SIGPIPE。
-logs_match() {
-    docker logs "$CONTAINER" 2>&1 | { grep -q -- "$1" && cat > /dev/null; }
-}
-
-wait_systemd() {
-    local state="" tries=0
-    while [ "$tries" -lt 90 ]; do
-        state=$(docker exec "$CONTAINER" systemctl is-system-running 2>/dev/null || true)
-        case "$state" in running|degraded) break ;; esac
-        tries=$((tries + 1))
-        sleep 2
-    done
-    case "$state" in
-        running|degraded) pass "systemd: ${state}" ;;
-        *)                fail "systemd 未就绪：${state:-无响应}" ;;
-    esac
-}
-
-wait_panel_http() {
-    local port code="" tries=0
-    port=$(inside_cat /www/server/panel/data/port.pl)
-    [ -n "$port" ] || fail "无法确定面板端口"
-    while [ "$tries" -lt 60 ]; do
-        # curl 失败时 -w 仍输出 000；`|| echo 000` 会追加第二行 000，
-        # 使 [ != "000" ] 恒真 —— 等待循环形同虚设。改用 || true + case
-        code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
-                "http://127.0.0.1:${port}/" 2>/dev/null || true)
-        case "$code" in ''|000) ;; *) break ;; esac
-        tries=$((tries + 1))
-        sleep 2
-    done
-    case "$code" in
-        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
-    esac
-}
+# 版本记录落在持久化层的 .baota 下，路径取自 shared/conf/defaults.env
+PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
+[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 
 assert_no_degraded() {
     if inside test -e /run/baota/degraded-critical; then
@@ -116,18 +59,10 @@ assert_no_degraded() {
     pass "无持久化降级"
 }
 
-start_container() {
-    docker run -d --name "$CONTAINER" \
-        --privileged \
-        --tmpfs /run --tmpfs /run/lock \
-        --shm-size=512m \
-        --stop-signal=SIGRTMIN+3 \
-        -v "${VOLUME}:/data" \
-        "$IMAGE" >/dev/null || fail "容器无法启动"
-}
+# start_container 见 lib.sh
 
 # 改写持久化层里记录的镜像版本。
-# 用 --entrypoint 覆盖默认的 init-mounts，避免跑一整套 overlay 挂载 ——
+# 用 --entrypoint 覆盖默认的 init.sh，避免跑一整套 overlay 挂载 ——
 # 这里只是往卷里写一个文件而已
 set_recorded_version() {
     local ver="$1" actual
@@ -219,4 +154,4 @@ wait_panel_http
 pass "降级后容器仍能正常启动（符合「只告警、不阻断」的设计）"
 
 echo
-echo "升级 / 降级路径检查全部通过（版本护栏 + 快照 + 启动器刷新 + 降级不阻断）"
+echo "升级 / 降级路径检查全部通过（版本护栏 + 快照 + 降级不阻断）"

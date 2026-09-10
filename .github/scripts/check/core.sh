@@ -25,26 +25,16 @@ EXPECT_VERSION=${2:?用法: run.sh core <镜像> <期望版本>}
 
 CONTAINER="baota-healthcheck-$$"
 VOLUME="baota-healthcheck-data-$$"
+# ICON 供 lib.sh 的 step() 作日志前缀（本文件内无引用，shellcheck 会误报未使用）
+# shellcheck disable=SC2034
+ICON='🩺'
 
-# 配置真源：与镜像共用 shared/conf/defaults.env，不在本脚本里再写一份硬编码。
-# 两边一旦漂移，表现是「CI 测过的和线上跑的不是同一套目录」，必须在这里对齐
-# 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"）。
-# read_default 只做 sed 取值、不会展开，这里用间接展开补一层，
-# 否则 PANEL_STATE_ROOT 会拿到字面量 ${PERSIST_DATA_ROOT}/panel，导致路径全错。
-# 被引用的变量（PERSIST_DATA_ROOT 等）已在前面用 read_default 取过，已存在于环境
-expand_vars() {
-    local s="$1" name
-    while [[ "$s" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
-        name="${BASH_REMATCH[1]}"
-        s="${s//\${$name\}/${!name}}"
-    done
-    echo "$s"
-}
+# 公共样板（配置解析 / 输出 / 容器操作 / 等待 / 启动 / 清理）见 lib.sh
+# shellcheck disable=SC1090,SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-read_default() {
-    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
-}
-
+# 目录与「根」全部取自 shared/conf/defaults.env —— 落盘路径由根派生，
+# 避免硬编码漂移
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
 WWW_DATA_SUBDIRS=$(read_default WWW_DATA_SUBDIRS)
@@ -59,32 +49,6 @@ PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
 [ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 [ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
 
-pass() { echo "  ✅ $*"; }
-step() { echo; echo "🩺 ==== $* ===="; }
-fail() {
-    echo "::error::$*"
-    echo "----- 容器日志尾部 -----"
-    docker logs "$CONTAINER" --tail 150 2>/dev/null || true
-    echo "----- 日志结束 -----"
-    exit 1
-}
-
-cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-# ---------------------------------------------------------------------------
-# 容器内操作的简写
-#   inside      直接执行一条命令
-#   inside_sh   在容器里起 sh 执行（需要管道、重定向、通配时用）
-#   inside_cat  读取文件内容并去掉全部空白
-# ---------------------------------------------------------------------------
-inside()     { docker exec "$CONTAINER" "$@"; }
-inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
-inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
-
 # 面板运行状态（输出带颜色码，去掉后再判断）。
 # 面板与任务两个进程共用这一次调用的结果，不重复执行 bt status
 panel_status() {
@@ -97,63 +61,11 @@ assert_processes_up() {
     echo "$status" | grep -q 'Bt-Task .*already running'  || fail "任务进程未运行"
 }
 
-# ---------------------------------------------------------------------------
-# 启动参数必须与 docker-compose.yml 保持一致，否则测的不是生产配置：
-#   privileged   overlay 挂载 + systemd
-#   tmpfs        仅 /run 与 /run/lock，/tmp 留在容器可写层
-#   不带 --cgroupns=host：让 Docker 按宿主机 cgroup 版本自动选择
-# ---------------------------------------------------------------------------
-start_container() {
-    docker run -d --name "$CONTAINER" \
-        --privileged \
-        --tmpfs /run --tmpfs /run/lock \
-        --shm-size=512m \
-        --stop-signal=SIGRTMIN+3 \
-        -v "${VOLUME}:/data" \
-        "$IMAGE" >/dev/null || fail "容器无法启动"
-}
-
-# degraded 在容器里属常见（个别 unit 被 mask），放行
-wait_systemd() {
-    local state="" tries=0
-    while [ "$tries" -lt 90 ]; do
-        state=$(docker exec "$CONTAINER" systemctl is-system-running 2>/dev/null || true)
-        case "$state" in running|degraded) break ;; esac
-        tries=$((tries + 1))
-        sleep 2
-    done
-    case "$state" in
-        running)  pass "systemd: running" ;;
-        degraded) pass "systemd: degraded（容器内属常见，放行）" ;;
-        *)        fail "systemd 未就绪：${state:-无响应}" ;;
-    esac
-}
-
-# 面板进程由 systemd 拉起，需要等一会儿才会监听端口
-#
-# ⚠️ curl 失败时 -w '%{http_code}' 依然会输出 000，若写成 `|| echo 000`，
-#    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
-#    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
-#    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
-wait_panel_http() {
-    local port code="" tries=0
-    port=$(inside_cat /www/server/panel/data/port.pl)
-    [ -n "$port" ] || fail "无法确定面板端口"
-    while [ "$tries" -lt 60 ]; do
-        code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
-                "http://127.0.0.1:${port}/" 2>/dev/null || true)
-        case "$code" in ''|000) ;; *) break ;; esac
-        tries=$((tries + 1))
-        sleep 2
-    done
-    case "$code" in
-        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
-    esac
-}
+# start_container / wait_systemd / wait_panel_http 见 lib.sh
 
 # 只读降级是本方案最危险的失效模式：挂载会「成功」，但所有写入静默丢失。
 # 判据从「grep 启动日志里的中文文案」改为读容器内的降级标记文件：
-# init-mounts.sh 在任何持久化失败/只读降级时都会写 /run/baota/degraded*，
+# init.sh 在任何持久化失败/只读降级时都会写 /run/baota/degraded*，
 # 这样告警文案怎么改都不影响门禁，也不会漏掉「挂载直接失败」这一类情况
 assert_no_readonly_warning() {
     if inside test -e /run/baota/degraded-critical; then
@@ -431,58 +343,6 @@ inside test -L /usr/local/bin/baota-backup \
 inside baota-backup --list >/dev/null 2>&1 \
     || fail "baota-backup --list 执行失败"
 
-step "A14) PHP 扩展编译链路（真编译 + 真加载，零网络）"
-# 面板里给 PHP 装扩展（igbinary / zstd / redis 等）走 phpize → configure →
-# make → 加载。旧实现只校验 autoconf 存在，抓不到「dev 库缺失 / php-config
-# 接错 / phpize 损坏」这类更深回归。这里真编一个最小扩展 myext 并 php -m
-# 验证加载，等价于用户装扩展的失败面，但零网络、不依赖 pecl.php.net。
-_ext_build=$(mktemp -d) || fail "无法创建临时编译目录"
-cat > "$_ext_build/config.m4" <<'M4'
-PHP_ARG_ENABLE(myext, whether to enable myext,
-[  --enable-myext   Enable myext support], no)
-if test "$PHP_MYEXT" != "no"; then
-  PHP_NEW_EXTENSION(myext, myext.c, $ext_shared)
-fi
-M4
-cat > "$_ext_build/myext.c" <<'C'
-#include "php.h"
-PHP_FUNCTION(myext_hello) { php_printf("hello from myext\n"); }
-const zend_function_entry myext_functions[] = {
-    PHP_FE(myext_hello, NULL)
-    PHP_FE_END
-};
-PHP_MINIT_FUNCTION(myext) { return SUCCESS; }
-zend_module_entry myext_module_entry = {
-    STANDARD_MODULE_HEADER,
-    "myext",
-    myext_functions,
-    PHP_MINIT(myext),
-    NULL, NULL, NULL, NULL,
-    NO_VERSION_YET,
-    STANDARD_MODULE_PROPERTIES
-};
-#ifdef COMPILE_DL_MYEXT
-ZEND_GET_MODULE(myext)
-#endif
-C
-
-_phpize=$(inside_sh 'ls -d /www/server/php/*/bin/phpize 2>/dev/null | head -1') || true
-[ -n "$_phpize" ] || fail "未找到任何 PHP 的 phpize（/www/server/php/*/bin/phpize）"
-_ver=$(dirname "$(dirname "$_phpize")")
-_phpcfg="$_ver/bin/php-config"
-_php="$_ver/bin/php"
-docker cp "$_ext_build" "$CONTAINER:/tmp/myext_check" >/dev/null 2>&1 \
-    || fail "无法拷贝扩展源码进容器"
-# 链路上任一步（phpize 调 autoconf / configure / make / 加载）失败都判红；
-# 包在 if 条件里以规避 set -e 在命令返回非 0 时直接中断脚本
-if inside_sh "cd /tmp/myext_check && '$_phpize' >/dev/null 2>&1 && ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && make -j\"\$(nproc)\" >/dev/null 2>&1 && test -f modules/myext.so && '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext"; then
-    pass "PHP 扩展编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
-else
-    fail "PHP 扩展编译链路失败（phpize→编译→加载最小扩展未通过；疑似工具链 / php-config 回归）"
-fi
-inside_sh 'rm -rf /tmp/myext_check' >/dev/null 2>&1 || true
-rm -rf "$_ext_build"
-
 # 跑一次完整备份，把完整输出（stdout + stderr）保留到本地文件
 # —— verify_archive 缺关键文件时 die 走 stderr，之前的 `2>/dev/null` 写法
 # 把这条关键诊断吞掉，错误只剩"备份包为空"的黑盒。
@@ -499,8 +359,10 @@ fi
 # echo 行（"✅ 含 xxx"）误当路径，让错误链条完全错乱。
 # 备份落在容器 /www/backup/manual 下 —— /www/backup 是 WWW_DATA_SUBDIRS 的
 # bind 目录，源在 data/www/backup/manual。所以这里在容器内 ls 与在宿主 data
-# 卷里 ls 看到的是同一份文件
-BACKUP_PATH=$(inside_sh "ls -1t /www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1")
+# 卷里 ls 看到的是同一份文件。
+# 末尾的 || true 不能省：set -e 下 ls 无匹配会让整条命令替换以非 0 退出、
+# 脚本当场中断，下一行那句可读的报错就成了永远走不到的死代码
+BACKUP_PATH=$(inside_sh "ls -1t /www/backup/manual/baota-backup-*.tgz 2>/dev/null | head -1" || true)
 [ -n "${BACKUP_PATH}" ] || fail "未找到备份文件（baota-backup 报告成功但持久化层没产物）"
 inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
 
@@ -510,6 +372,18 @@ if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'www/backup/\(auto\|manual\|datab
 fi
 _bk=$(basename "${BACKUP_PATH}")
 pass "备份工具可用，生成的备份包通过自校验（${_bk}）"
+
+step "A14) PHP 扩展编译工具链护栏（零网络，不装 PHP）"
+# 瘦身（locale 排除 / strip）最该守住的底线：镜像必须自带扩展编译工具链
+# （autoconf / gcc / make / libtool），否则用户在面板里给 PHP 装扩展时会
+# 复现「Cannot find autoconf」类回归。这里只做零网络的存在性断言，不临时
+# 安装任何 PHP 环境——真正的「装 PHP + 编译扩展」端到端测试留在日巡检
+# （published.sh），在已发布的纯净镜像上跑，避免污染推送前的候选镜像。
+for _b in autoconf gcc make libtool; do
+    inside_sh "command -v $_b >/dev/null 2>&1" \
+        || fail "镜像缺少扩展编译工具链：$_b（PHP 扩展将装不上，疑似瘦身误删）"
+done
+pass "扩展编译工具链齐备（autoconf/gcc/make/libtool），足以支撑 PHP 扩展安装"
 
 # A 阶段末（容器已完整跑过一轮）做一次面板状态漂移报告
 report_panel_state_drift

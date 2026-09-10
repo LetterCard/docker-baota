@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# ==============================================================================
+#  发布前健康检查的公共样板（被 core.sh / mounts.sh / upgrade.sh source）
+#
+#  三套检查脚本各自盯一个互不相关的失效面（功能完整性 / 挂载正确性 / 版本演进），
+#  但下面这些「跟 docker 打交道 + 输出格式」的样板原本是三份逐字重复的实现，
+#  改一处要同步三处，抽在这里：
+#    配置解析  expand_vars / read_default（含嵌套引用展开）
+#    输出      pass / step / fail（失败时 dump 容器日志尾部再退出）
+#    容器操作  inside / inside_sh / inside_cat / is_running / logs_match
+#    等待      wait_systemd / wait_panel_http
+#    启动      start_container（命名卷单挂，参数与 compose 的生产配置一致）
+#    清理      cleanup（EXIT trap，按各脚本实际用到的资源名收尾）
+#
+#  source 之前必须先设置：
+#    CONTAINER   容器名
+#  可选（设了才会被 cleanup 回收）：VOLUME / VOL_RO / WORK_ROOT
+#  ICON 用于 step 的日志前缀 emoji（🩺 / 🧪 / 🔼），只影响输出观感
+#
+#  ★ 这里只放「三套都一样」的样板。各脚本特有的断言（版本护栏、混合挂载、
+#    面板状态漂移……）仍留在各自文件里 —— 那些逻辑本就只在一处，抽出来只会
+#    让「这套检查到底验了什么」变得难读。
+#
+#  日志约定：✅ 通过项；失败走 ::error::（GitHub Actions 会渲染成红色注解）
+# ==============================================================================
+
+# 配置真源：与镜像共用 shared/conf/defaults.env，不在脚本里再写一份硬编码。
+# 两边一旦漂移，表现是「CI 测过的和线上跑的不是同一套目录」，必须在这里对齐。
+# 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PERSIST_DATA_ROOT}/panel"），
+# sed 取值不会展开，expand_vars 用间接展开补一层；否则拿到的是字面量
+# ${PERSIST_DATA_ROOT}/panel，路径全错。被引用的变量（PERSIST_DATA_ROOT 等）
+# 已先用 read_default 取过，间接展开时已存在于环境。
+#
+# 注：upgrade.sh 原先是「不展开」的简化版，只因它当时只取不含嵌套引用的
+# PERSIST_SYSTEM_ROOT；统一成展开版后行为不变，且以后取到嵌套引用也不会踩坑
+expand_vars() {
+    local s="$1" name
+    while [[ "$s" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        name="${BASH_REMATCH[1]}"
+        s="${s//\${$name\}/${!name}}"
+    done
+    echo "$s"
+}
+
+read_default() {
+    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
+}
+
+pass() { echo "  ✅ $*"; }
+step() { echo; echo "${ICON:-🩺} ==== $* ===="; }
+fail() {
+    echo "::error::$*"
+    echo "----- 容器日志尾部 -----"
+    docker logs "${CONTAINER}" --tail 150 2>/dev/null || true
+    echo "----- 日志结束 -----"
+    exit 1
+}
+
+# 收尾：按各脚本实际用到的资源名清理，没设置的直接跳过。
+# 用 ${VAR:-} 而不是 $VAR —— 本文件可能在那些变量赋值之前就被 source，
+# 而三套脚本都开着 set -u，引用未定义变量会直接中断退出
+cleanup() {
+    [ -n "${CONTAINER:-}" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    [ -n "${VOLUME:-}" ]    && docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+    [ -n "${VOL_RO:-}" ]    && docker volume rm "$VOL_RO" >/dev/null 2>&1 || true
+    [ -n "${WORK_ROOT:-}" ] && rm -rf "$WORK_ROOT" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# 容器内操作的简写
+#   inside      直接执行一条命令
+#   inside_sh   在容器里起 sh 执行（需要管道、重定向、通配时用）
+#   inside_cat  读取文件内容并去掉全部空白
+# ---------------------------------------------------------------------------
+inside()     { docker exec "$CONTAINER" "$@"; }
+inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
+inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
+
+is_running() {
+    [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = 'true' ]
+}
+
+# docker logs | grep -q 在 pipefail 下会误判失败：grep -q 一命中就退出并关闭
+# 管道，docker logs 写不完剩余输出被 SIGPIPE 终止（141），pipefail 把命中当成
+# 失败。用 `{ grep -q && cat >/dev/null; }` 读干净管道，生产者正常收尾。
+# grep 未命中时会读完整个输入才退出，同样不会触发 SIGPIPE
+logs_match() {
+    docker logs "$CONTAINER" 2>&1 | { grep -q -- "$1" && cat > /dev/null; }
+}
+
+# ---------------------------------------------------------------------------
+# IMAGE 由调用方脚本（core/mounts/upgrade）在 source 本文件前赋值，
+# 单独检查本文件时 shellcheck 看不到，属跨文件误报
+# shellcheck disable=SC2154
+# 启动参数必须与 docker-compose.yml 保持一致，否则测的不是生产配置：
+#   privileged   overlay 挂载 + systemd
+#   tmpfs        仅 /run 与 /run/lock，/tmp 留在容器可写层
+#   不带 --cgroupns=host：让 Docker 按宿主机 cgroup 版本自动选择
+# ---------------------------------------------------------------------------
+start_container() {
+    docker run -d --name "$CONTAINER" \
+        --privileged \
+        --tmpfs /run --tmpfs /run/lock \
+        --shm-size=512m \
+        --stop-signal=SIGRTMIN+3 \
+        -v "${VOLUME}:/data" \
+        "$IMAGE" >/dev/null || fail "容器无法启动"
+}
+
+# degraded 在容器里属常见（个别 unit 被 mask），放行
+wait_systemd() {
+    local state="" tries=0
+    while [ "$tries" -lt 90 ]; do
+        state=$(docker exec "$CONTAINER" systemctl is-system-running 2>/dev/null || true)
+        case "$state" in running|degraded) break ;; esac
+        tries=$((tries + 1))
+        sleep 2
+    done
+    case "$state" in
+        running)  pass "systemd: running" ;;
+        degraded) pass "systemd: degraded（容器内属常见，放行）" ;;
+        *)        fail "systemd 未就绪：${state:-无响应}" ;;
+    esac
+}
+
+# 面板进程由 systemd 拉起，需要等一会儿才会监听端口
+#
+# ⚠️ curl 失败时 -w '%{http_code}' 依然会输出 000，若写成 `|| echo 000`，
+#    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
+#    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
+#    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
+wait_panel_http() {
+    local port code="" tries=0
+    port=$(inside_cat /www/server/panel/data/port.pl)
+    [ -n "$port" ] || fail "无法确定面板端口"
+    while [ "$tries" -lt 60 ]; do
+        code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+                "http://127.0.0.1:${port}/" 2>/dev/null || true)
+        case "$code" in ''|000) ;; *) break ;; esac
+        tries=$((tries + 1))
+        sleep 2
+    done
+    case "$code" in
+        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
+    esac
+}

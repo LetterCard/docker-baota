@@ -24,77 +24,24 @@ set -euo pipefail
 
 IMAGE=${1:?用法: run.sh mounts <镜像>}
 
-# 配置真源：与镜像共用 shared/conf/defaults.env，不在本脚本里写死目录
-# 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"）。
-# read_default 只做 sed 取值、不会展开，这里用间接展开补一层。
-expand_vars() {
-    local s="$1" name
-    while [[ "$s" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
-        name="${BASH_REMATCH[1]}"
-        s="${s//\${$name\}/${!name}}"
-    done
-    echo "$s"
-}
+# 公共样板（配置解析 / 输出 / 容器操作 / 等待 / 清理）见 lib.sh
+# shellcheck disable=SC1090,SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-read_default() {
-    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
-}
-
-PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
-[ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
-
-# 数据层根 / 面板状态根：宿主机上的混合挂载目录需要与 defaults.env 对齐
-PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
-[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
-PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
-[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
-
+# ICON 供 lib.sh 的 step() 作日志前缀（本文件内无引用，shellcheck 会误报未使用）
+# shellcheck disable=SC2034
+ICON='🧪'
 WORK_ROOT=$(mktemp -d)
 CONTAINER="baota-mounts-$$"
 VOL_RO="baota-mounts-ro-$$"
 
-pass() { echo "  ✅ $*"; }
-step() { echo; echo "🧪 ==== $* ===="; }
-fail() {
-    echo "::error::$*"
-    echo "----- 容器日志尾部 -----"
-    docker logs "$CONTAINER" --tail 150 2>/dev/null || true
-    echo "----- 日志结束 -----"
-    exit 1
-}
-
-cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker volume rm "$VOL_RO" >/dev/null 2>&1 || true
-    rm -rf "$WORK_ROOT" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-inside()    { docker exec "$CONTAINER" "$@"; }
-inside_sh() { docker exec "$CONTAINER" sh -c "$1"; }
-is_running() {
-    [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = 'true' ]
-}
-# docker logs | grep -q 在 pipefail 下会误判失败：grep -q 一命中就退出并关闭
-# 管道，docker logs 写不完剩余输出被 SIGPIPE 终止（141），pipefail 把命中当成
-# 失败。用 `{ grep -q && cat >/dev/null; }` 读干净管道，生产者正常收尾。
-logs_match() {
-    docker logs "$CONTAINER" 2>&1 | { grep -q -- "$1" && cat > /dev/null; }
-}
-
-wait_systemd() {
-    local state="" tries=0
-    while [ "$tries" -lt 90 ]; do
-        state=$(docker exec "$CONTAINER" systemctl is-system-running 2>/dev/null || true)
-        case "$state" in running|degraded) break ;; esac
-        tries=$((tries + 1))
-        sleep 2
-    done
-    case "$state" in
-        running|degraded) pass "systemd: ${state}" ;;
-        *)                fail "systemd 未就绪：${state:-无响应}" ;;
-    esac
-}
+# 目录与「根」取自 shared/conf/defaults.env：宿主机上的混合挂载目录须与之对齐
+PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
+[ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
+PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
+[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
+PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
+[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
 
 # 混合挂载的启动参数：数据层与系统层各一个 bind 目录。
 # 数据层根就是 /data 本身，所以第一处挂 ./data:/data；
