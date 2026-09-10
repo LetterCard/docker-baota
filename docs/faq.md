@@ -25,9 +25,12 @@ docker exec baota rm -f /www/wwwroot/<站点>/.user.ini
 ## 🔑 忘记面板口令
 
 ```bash
-docker exec -it baota bt default   # 查看面板账号信息
 docker exec -it baota bt 5         # 重置面板口令
 ```
+
+> `bt default` 读的是 `/www/server/panel/default.pl`，该文件属于面板代码、
+> 不持久化 —— 它**只在首次启动后有效**，重建容器后显示的是镜像内置占位值。
+> 忘记口令请一律用上面的 `bt 5` 重置。
 
 ## ⚠️ 持久化层变成只读
 

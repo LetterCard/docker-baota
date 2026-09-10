@@ -473,8 +473,9 @@ print_summary() {
         log "root 口令：${NEW_ROOT_PASSWORD}（容器内 SSH 用）"
         log '以上凭据只在首次启动时打印，请登录后立即修改'
     else
-        log '查看面板账号：docker exec <容器名> bt default'
         log '重置面板口令：docker exec -it <容器名> bt 5'
+        log '（bt default 只在首次启动后有效：它读的 default.pl 属于面板代码、'
+        log '  不持久化，重建容器后会退回镜像内置的占位值）'
     fi
     log "数据层：${PERSIST_DATA_ROOT}（站点目录在 ${PERSIST_DATA_ROOT}/www/wwwroot）"
     echo '=================================================================='

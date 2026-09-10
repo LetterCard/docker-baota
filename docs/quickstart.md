@@ -26,12 +26,15 @@ docker compose logs -f baota
 
 ```bash
 docker compose ps             # STATUS 应为 Up (healthy)
-docker exec baota bt default  # 面板地址、用户名、口令
 docker exec baota bt status   # 面板 + 任务进程都应在运行
 ```
 
 `healthy` 的判定包含「持久化是否完整」与「磁盘水位」，
 不是单纯的进程探活，见[编排配置详解](configuration.md#健康检查与日志)。
+
+首次启动生成的面板地址与账号口令打印在启动日志里（`docker compose logs baota`）。
+忘记口令用 `docker exec -it baota bt 5` 重置 —— `bt default` 读的文件属于面板代码、
+不持久化，只在首次启动后有效。
 
 ---
 
