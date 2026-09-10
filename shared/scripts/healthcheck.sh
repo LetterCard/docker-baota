@@ -63,8 +63,12 @@ for _m in "${PERSIST_DATA_ROOT}" "${PERSIST_SYSTEM_ROOT}"; do
     [ -d "${_m}" ] || { disk_ok=0; continue; }
     _avail=$(df -Pm "${_m}" 2> /dev/null | awk 'NR==2{print $4+0}')
     _pct=$(df -P "${_m}" 2> /dev/null | awk 'NR==2{gsub("%", ""); print int($5)}')
-    if [ "${_avail:-0}" -lt "${DISK_MIN_AVAIL_MB}" ] \
-       || [ "${_pct:-0}" -ge "${DISK_MAX_USED_PCT}" ]; then
+    # 任一探测拿不到输出（df 失败 / 挂载点异常）直接按不健康处理 ——
+    # 空值兜底成 0 只对「探测到了且值确实小」成立，区分不出「根本没探测到」，
+    # 而后者按本文件头注释的承诺同样要判 unhealthy
+    if [ -z "${_avail}" ] || [ -z "${_pct}" ] \
+       || [ "${_avail}" -lt "${DISK_MIN_AVAIL_MB}" ] \
+       || [ "${_pct}" -ge "${DISK_MAX_USED_PCT}" ]; then
         disk_ok=0
     fi
 done

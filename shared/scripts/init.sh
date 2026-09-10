@@ -121,8 +121,11 @@ _lock_layer() {
         return 0
     fi
     if [ ! -x /usr/bin/flock ]; then
-        warn "未找到 /usr/bin/flock，跳过${_name}并发保护"
-        return 0
+        # 并发锁是「同一份 data 不被两个容器同时写」的最后防线，这里 fail-open
+        # 等于放行并发损坏。debian:12 自带 util-linux，缺它说明镜像被改动过，
+        # 拒绝启动比静默丢数据好
+        echo "❌ [init][ERROR] 未找到 /usr/bin/flock，无法保证${_name}持久化层互斥，拒绝启动" >&2
+        exit 1
     fi
 
     # 一步完成「非阻塞互斥 + 长期持有」：拿到锁 → flock 驻留后台（持锁直到

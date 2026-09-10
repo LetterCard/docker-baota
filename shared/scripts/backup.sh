@@ -47,6 +47,7 @@ fi
 
 PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
 PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
+PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
 PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
 
 # 备份产物目录。写成「数据层根/www/backup/manual」而不是容器内的
@@ -318,7 +319,21 @@ collect_members() {
     # 用显式成员而不是 '.'：'.' 会让成员名带 ./ 前缀，EXCLUDES 里
     # 'www/backup/manual' 匹配不上 → 边写边读自己的输出包 → tar 报错。
     # 顶层 .baota 不进成员、内部 .baota 由 basename 排除，天然不打包。
-    data_members=('www' 'panel' 'system')
+    #
+    # panel / system 两个成员名从配置真源派生：defaults.env 允许覆盖
+    # PANEL_STATE_ROOT / PERSIST_SYSTEM_ROOT，写死成员名在非默认布局下
+    # tar 找不到成员，报错还指向不存在的路径。系统层若被指到 data 卷之外
+    # （tar 单一来源打不进来），在这里响亮拒绝；--rsync 分支没有这个限制，
+    # 它会对 data 卷之外的系统层补第二条同步
+    local _panel _system
+    _panel=$(basename "${PANEL_STATE_ROOT}")
+    _system=$(basename "${PERSIST_SYSTEM_ROOT}")
+    data_members=('www' "${_panel}")
+    if [ -d "${PERSIST_DATA_ROOT}/${_system}" ]; then
+        data_members+=("${_system}")
+    elif [ "${PERSIST_SYSTEM_ROOT}" != "${PERSIST_DATA_ROOT}/${_system}" ]; then
+        die "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，tar 打包覆盖不到系统层（含面板账号、用户装的环境）；请改用 --rsync，或把系统层指回数据层内"
+    fi
     return 0
 }
 
@@ -461,6 +476,13 @@ rsync_sync() {
                 die "拒绝同步到持久化层的上层目录：${dest}（--delete 会把它下面的持久化层一起删掉）"
                 ;;
         esac
+        # 反向同样要拦：目标在持久化层内部时，rsync 会把「包含目标的源」往
+        # 目标里同步，每跑一次体积近似翻倍，最终撑满 data 卷
+        case "${dest}" in
+            "${_src}"/*)
+                die "拒绝同步到持久化层内部：${dest}（源包含目标，越同步越大）"
+                ;;
+        esac
     done
 
     # 目标非空时，必须是本工具之前的同步产物，否则拒绝用 --delete。
@@ -498,10 +520,24 @@ rsync_sync() {
     done
 
     # --rsync 整层同步 data 卷（业务 data/www + 面板状态 data/panel
-    # + 系统层 data/system/<dir> 都在里面），一条命令覆盖全部
+    # + 系统层 data/system/<dir> 都在里面），一条命令覆盖全部。
+    # 但用户把 PERSIST_SYSTEM_ROOT 指到 data 卷之外时（defaults.env 允许），
+    # 这条 rsync 摸不到它 —— 会静默漏掉整个系统层，恢复后账号、环境全丢。
+    # 对这种布局显式补第二条同步
     log "增量同步 ${PERSIST_DATA_ROOT} -> ${dest}/data"
     rsync "${rargs[@]}" "${PERSIST_DATA_ROOT}/" "${dest}/data/" \
         || die "同步失败：${dest}/data"
+
+    case "${PERSIST_SYSTEM_ROOT}" in
+        "${PERSIST_DATA_ROOT}"/*) ;;   # 系统层在 data 卷内，上面那条已覆盖
+        *)
+            log "增量同步 ${PERSIST_SYSTEM_ROOT} -> ${dest}/system"
+            mkdir -p "${dest}/system" 2> /dev/null \
+                || die "无法创建目标目录：${dest}/system"
+            rsync "${rargs[@]}" "${PERSIST_SYSTEM_ROOT}/" "${dest}/system/" \
+                || die "同步失败：${dest}/system"
+            ;;
+    esac
 
     log "增量同步完成：${dest}"
     log '提示：--rsync 是镜像同步，目标里始终只有最新一份；要留历史请配合 NAS 快照'

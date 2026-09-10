@@ -6,7 +6,7 @@
 #    系统层（/etc /usr /var …）      overlay upper 在 data/system/<dir>
 #    业务数据（wwwroot/backup/server/data）  bind 到 data/www/<子目录>
 #    面板状态（panel/data、panel/plugin）    bind 到 data/panel/<子目录>
-#    面板代码（/www/server/panel）   来自镜像层，只读、不持久化
+#    面板代码（/www/server/panel）   来自镜像层，不持久化（可写层可被面板更新写入，重建即还原）
 #  于是面板版本随镜像升级，而用户的配置、站点与数据库在容器销毁、重建后都不丢。
 #
 #  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
@@ -206,10 +206,18 @@ take_snapshot() {
     local prev="$1" keep="${AUTO_BACKUP_KEEP}"
     local dir=/www/backup/auto stamp out
 
-    if ! [ "${keep}" -gt 0 ] 2> /dev/null; then
-        log "AUTO_BACKUP_KEEP=${keep}，跳过快照"
-        return 0
-    fi
+    case "${keep}" in
+        ''|*[!0-9]*)
+            # 护栏开关填错（如「3份」）不能静默当成 0 禁用快照 —— 那是这类
+            # 开关最危险的失效方式；与 healthcheck 的 DISK_* 阈值一样退回默认
+            warn "AUTO_BACKUP_KEEP=${keep} 不是正整数，按默认 3 继续"
+            keep=3
+            ;;
+        0)
+            log 'AUTO_BACKUP_KEEP=0，显式禁用快照'
+            return 0
+            ;;
+    esac
 
     # 只快照 /www/server/panel/data —— 升级时唯一会「对不上」的地方
     if [ ! -d /www/server/panel/data ]; then
@@ -278,11 +286,15 @@ version_guard() {
         log "检测到镜像升级：${prev} -> ${img_ver}，正在创建升级前快照"
     fi
 
-    take_snapshot "${prev}"
-
-    mkdir -p "${BAOTA_STATE}" 2> /dev/null || true
-    printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
-        || warn "无法写入镜像版本记录：${state_file}"
+    # 快照失败就不推进版本记录：prev 与 img_ver 的差异留到下次启动、
+    # 自动重试快照 —— 否则一次瞬时故障（如磁盘满）就让回滚点永久缺席
+    if take_snapshot "${prev}"; then
+        mkdir -p "${BAOTA_STATE}" 2> /dev/null || true
+        printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
+            || warn "无法写入镜像版本记录：${state_file}"
+    else
+        warn '本次不更新版本记录，下次启动将重试升级前快照'
+    fi
 }
 
 # ==============================================================================
