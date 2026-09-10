@@ -2,7 +2,8 @@
 # ==============================================================================
 #  🐳 宝塔 Linux 面板容器化（13.0.0 通道：官方最新正式版）
 #
-#  与 dockerfile/12.0.0/Dockerfile 的差异只有两处：INSTALL_URL 默认值与 LABEL 描述。
+#  与 dockerfile/12.0.0/Dockerfile 的功能性差异只有两处：INSTALL_URL 默认值与 LABEL 描述
+#  （注释文本两侧各自维护，不在此「两处」范围内）。
 #  构建逻辑抽在 shared/build/ 三阶段脚本里，两个通道共用；
 #  运行期脚本在 shared/scripts/，systemd unit 在 shared/conf/。
 #  两个通道都以「仓库根」为构建上下文：docker build -f dockerfile/13.0.0/Dockerfile .
