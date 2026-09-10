@@ -104,6 +104,7 @@ start_container() {
         --tmpfs /run --tmpfs /run/lock \
         --shm-size=512m \
         --stop-signal=SIGRTMIN+3 \
+        --ulimit nofile=65535:65535 --ulimit nproc=65535 \
         -v "${VOLUME}:/data" \
         "$IMAGE" >/dev/null || fail "容器无法启动"
 }

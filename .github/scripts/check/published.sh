@@ -188,6 +188,7 @@ start_container() {
     docker run -d --name "$C" --privileged \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
         --tmpfs /run --tmpfs /run/lock --shm-size=512m \
+        --stop-signal=SIGRTMIN+3 --stop-timeout=90 \
         -v "${V}:/data" "$IMAGE" >/dev/null
 }
 
@@ -276,6 +277,7 @@ log "验证并发锁（起第二实例）"
 docker run -d --name "$C_DUP" --privileged \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     --tmpfs /run --tmpfs /run/lock --shm-size=512m \
+    --stop-signal=SIGRTMIN+3 --stop-timeout=90 \
     -v "${V}:/data" "$IMAGE" >/dev/null 2>&1
 sleep 10
 if docker logs "$C_DUP" 2>&1 | grep '另一个容器实例正在使用' >/dev/null; then
@@ -367,6 +369,7 @@ docker volume create "$V_RO" >/dev/null
 docker run -d --name "$C_RO" --privileged \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     --tmpfs /run --tmpfs /run/lock --shm-size=512m \
+    --stop-signal=SIGRTMIN+3 --stop-timeout=90 \
     -v "${V_RO}:/data:ro" "$IMAGE" >/dev/null 2>&1
 sleep 15
 if docker exec "$C_RO" test -f /run/baota/degraded-critical 2>/dev/null; then
