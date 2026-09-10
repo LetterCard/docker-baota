@@ -2,7 +2,7 @@
 
 > 本文件由 `.github/workflows/drift-check.yml` 自动生成，每次运行整体覆盖。
 
-- 生成时间（UTC）：2026-09-09 05:40:59
+- 生成时间（UTC）：2026-09-10 05:31:55
 - 触发方式：schedule
 - stable 版本：12.0.0
 - release 版本：13.0.0
