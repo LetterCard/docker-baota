@@ -431,21 +431,57 @@ inside test -L /usr/local/bin/baota-backup \
 inside baota-backup --list >/dev/null 2>&1 \
     || fail "baota-backup --list 执行失败"
 
-step "A14) 校验 PHP 扩展编译工具链"
-# 面板里装 PHP 扩展（phpize 编译）需要 autoconf 生成 configure。
-# 宝塔的扩展脚本会自带库依赖（libzstd-dev 等）但不补工具链——
-# 缺 autoconf 时 igbinary / zstd / redis 等扩展全部失败
-# （报错 Cannot find autoconf），必须由镜像提供
-# 必须用 inside_sh（sh -c）而不是 inside：command 是 shell 内建命令，
-# 磁盘上不存在 /usr/bin/command，docker exec 直接执行会报
-#   exec: "command": executable file not found in $PATH（退出码 127）
-# —— 与 autoconf 是否安装无关，那样写会恒定失败、永远拦住发布
-inside_sh 'command -v autoconf >/dev/null 2>&1' \
-    || fail "缺少 autoconf（PHP 扩展安装会报 Cannot find autoconf）"
-# libtool 包提供的可执行文件叫 libtoolize（没有 libtool 这个命令）
-inside_sh 'command -v libtoolize >/dev/null 2>&1' \
-    || fail "缺少 libtool（部分 PHP 扩展编译需要）"
-pass "编译工具链可用（autoconf / libtoolize）"
+step "A14) PHP 扩展编译链路（真编译 + 真加载，零网络）"
+# 面板里给 PHP 装扩展（igbinary / zstd / redis 等）走 phpize → configure →
+# make → 加载。旧实现只校验 autoconf 存在，抓不到「dev 库缺失 / php-config
+# 接错 / phpize 损坏」这类更深回归。这里真编一个最小扩展 myext 并 php -m
+# 验证加载，等价于用户装扩展的失败面，但零网络、不依赖 pecl.php.net。
+_ext_build=$(mktemp -d) || fail "无法创建临时编译目录"
+cat > "$_ext_build/config.m4" <<'M4'
+PHP_ARG_ENABLE(myext, whether to enable myext,
+[  --enable-myext   Enable myext support], no)
+if test "$PHP_MYEXT" != "no"; then
+  PHP_NEW_EXTENSION(myext, myext.c, $ext_shared)
+fi
+M4
+cat > "$_ext_build/myext.c" <<'C'
+#include "php.h"
+PHP_FUNCTION(myext_hello) { php_printf("hello from myext\n"); }
+const zend_function_entry myext_functions[] = {
+    PHP_FE(myext_hello, NULL)
+    PHP_FE_END
+};
+PHP_MINIT_FUNCTION(myext) { return SUCCESS; }
+zend_module_entry myext_module_entry = {
+    STANDARD_MODULE_HEADER,
+    "myext",
+    myext_functions,
+    PHP_MINIT(myext),
+    NULL, NULL, NULL, NULL,
+    NO_VERSION_YET,
+    STANDARD_MODULE_PROPERTIES
+};
+#ifdef COMPILE_DL_MYEXT
+ZEND_GET_MODULE(myext)
+#endif
+C
+
+_phpize=$(inside_sh 'ls -d /www/server/php/*/bin/phpize 2>/dev/null | head -1') || true
+[ -n "$_phpize" ] || fail "未找到任何 PHP 的 phpize（/www/server/php/*/bin/phpize）"
+_ver=$(dirname "$(dirname "$_phpize")")
+_phpcfg="$_ver/bin/php-config"
+_php="$_ver/bin/php"
+docker cp "$_ext_build" "$CONTAINER:/tmp/myext_check" >/dev/null 2>&1 \
+    || fail "无法拷贝扩展源码进容器"
+# 链路上任一步（phpize 调 autoconf / configure / make / 加载）失败都判红；
+# 包在 if 条件里以规避 set -e 在命令返回非 0 时直接中断脚本
+if inside_sh "cd /tmp/myext_check && '$_phpize' >/dev/null 2>&1 && ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && make -j\"\$(nproc)\" >/dev/null 2>&1 && test -f modules/myext.so && '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext"; then
+    pass "PHP 扩展编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
+else
+    fail "PHP 扩展编译链路失败（phpize→编译→加载最小扩展未通过；疑似工具链 / php-config 回归）"
+fi
+inside_sh 'rm -rf /tmp/myext_check' >/dev/null 2>&1 || true
+rm -rf "$_ext_build"
 
 # 跑一次完整备份，把完整输出（stdout + stderr）保留到本地文件
 # —— verify_archive 缺关键文件时 die 走 stderr，之前的 `2>/dev/null` 写法
