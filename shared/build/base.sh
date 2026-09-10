@@ -98,6 +98,9 @@ install_packages() {
     # 换「以后不再补依赖」。包名已实测在 Debian 12 (bookworm) 下全部有效。
     # 诊断类冗余包（traceroute/dos2unix/p7zip-full/cpio）已剔除瘦身；net-tools
     # 因宝塔网络模块可能调用 ifconfig、dnsutils 可能调用 nslookup/dig 予以保留。
+    # libtool 是 Debian 的拆分包：libtool 只提供 libtoolize（phpize 链路用），
+    # 命令本体 /usr/bin/libtool 在 libtool-bin 里 —— 漏装它，A14 的
+    # 「command -v libtool」护栏会在发布前把整条流水线拦下（已实测踩过）。
     apt-get install -y --no-install-recommends \
         locales tzdata ca-certificates \
         systemd systemd-sysv dbus dbus-user-session \
@@ -110,7 +113,7 @@ install_packages() {
         lsb-release sudo \
         busybox-static \
         vim-tiny less file \
-        autoconf automake libtool bison re2c cmake m4 flex gawk cpp binutils \
+        autoconf automake libtool libtool-bin bison re2c cmake m4 flex gawk cpp binutils \
         diffutils gettext patch git build-essential make gcc g++ libc6-dev \
         libzip-dev libssl-dev libonig-dev libsodium-dev libssh2-1-dev libc-ares-dev \
         libaio-dev libevent-dev libsasl2-dev libltdl-dev zlib1g-dev libglib2.0-0 \
