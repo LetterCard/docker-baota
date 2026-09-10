@@ -28,6 +28,10 @@ TZ="${TZ:-Asia/Shanghai}"
 log()  { echo "🔨 [build] $*"; }
 warn() { echo "⚠️ [build][WARN] $*" >&2; }
 
+# 构建期瘦身辅助（strip_elf）：与 panel.sh 共用，在各自层清理时调用
+# shellcheck disable=SC1091
+. /opt/baota/build/slim.sh
+
 # ==============================================================================
 #  1. apt 与基础软件包
 # ==============================================================================
@@ -42,19 +46,27 @@ setup_apt() {
     echo 'DPkg::Options { "--force-confold"; "--force-confdef"; }' \
         > /etc/apt/apt.conf.d/02dpkg-options
 
-    # 排除本地文档与手册页：容器里没人读，却会实打实占掉 /usr 的体积。
-    # /usr 是系统层持久化目录里条目最多的（实测 26750 条），排除后
-    # 镜像更小，用户后续 apt install 时写进 upper 的增量也更小。
+    # 排除文档/手册页与「非 en/en_US 的多语言翻译」：容器里没人读文档，且不
+    # 需要其它语言的 .mo 翻译，却会实打实占掉 /usr 的体积（locale 翻译常达
+    # 数十~上百 MB）。/usr 是系统层持久化目录里条目最多的（实测 26750 条），
+    # 排除后镜像更小，用户后续 apt install 时写进 upper 的增量也更小。
     #
     # 必须在任何 apt install 之前写入 —— path-exclude 只对之后安装的包生效，
-    # 对已经装好的包没有作用。
-    # 刻意保留 copyright（许可证要求）与 locale（避免影响任何 i18n 行为）
+    # 对已经装好的包没有作用（且对后续层 panel.sh 的 apt 安装同样生效）。
+    # 保留：copyright（许可证要求）；en / en_US 翻译与 locale.alias（镜像默认
+    # LANG=en_US.UTF-8，需保住该 locale 的 i18n 行为，面板与运行环境均为英文）。
+    # 注意仅排除 /usr/share/locale（翻译 .mo），不动 /usr/share/i18n（locale-gen
+    # 编译 en_US.UTF-8 依赖它，已在 base.sh 内 locale-gen 完成后才清理）。
     cat > /etc/dpkg/dpkg.cfg.d/01-exclude-docs <<'EOF'
-# 排除文档与手册页，减少镜像与持久化层体积
+# 排除文档、手册页与非 en/en_US 的多语言翻译，减少镜像与持久化层体积
 path-exclude=/usr/share/doc/*
 path-include=/usr/share/doc/*/copyright
 path-exclude=/usr/share/man/*
 path-exclude=/usr/share/info/*
+path-exclude=/usr/share/locale/*
+path-include=/usr/share/locale/en/*
+path-include=/usr/share/locale/en_US/*
+path-include=/usr/share/locale/locale.alias
 EOF
 
     # 统一为经典 sources.list：宝塔安装脚本对它的解析 / 换源兼容性最好（不认 DEB822）
@@ -83,19 +95,21 @@ install_packages() {
     # btpanel/btpanel 的 Dockerfile（官方替我们把坑踩完了：装 PHP 扩展、编译
     # nginx/php/各类组件所需的工具与 dev 库）。我们自己挑包必然漏——缺
     # autoconf 就会让所有 PHP 扩展报 Cannot find autoconf）。代价约 +160MB，
-    # 换「以后不再补依赖」。包名已实测在 Debian 12 (bookworm) 下全部有效
+    # 换「以后不再补依赖」。包名已实测在 Debian 12 (bookworm) 下全部有效。
+    # 诊断类冗余包（traceroute/dos2unix/p7zip-full/cpio）已剔除瘦身；net-tools
+    # 因宝塔网络模块可能调用 ifconfig、dnsutils 可能调用 nslookup/dig 予以保留。
     apt-get install -y --no-install-recommends \
         locales tzdata ca-certificates \
         systemd systemd-sysv dbus dbus-user-session \
         cron logrotate rsyslog \
         openssh-server \
         procps psmisc lsof htop \
-        net-tools iproute2 iputils-ping dnsutils traceroute \
+        net-tools iproute2 iputils-ping dnsutils \
         curl wget \
-        tar xz-utils zip unzip gzip bzip2 p7zip-full cpio rsync \
+        tar xz-utils zip unzip gzip bzip2 rsync \
         lsb-release sudo \
         busybox-static \
-        vim-tiny less file dos2unix \
+        vim-tiny less file \
         autoconf automake libtool bison re2c cmake m4 flex gawk cpp binutils \
         diffutils gettext patch git build-essential make gcc g++ libc6-dev \
         libzip-dev libssl-dev libonig-dev libsodium-dev libssh2-1-dev libc-ares-dev \
@@ -112,6 +126,15 @@ install_packages() {
     # 清理必须写在本层内：Docker 分层特性下，后续层删除本层文件不会减小体积
     apt-get clean
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+    # 本层瘦身：剥离 apt 装好的 ELF 调试符号（动态符号保留；.a 静态库由
+    # strip_elf 用 --strip-debug 缩小，不删除）
+    strip_elf
+
+    # locale-gen 已在上面把 en_US.UTF-8 编译进 /usr/lib/locale/locale-archive，
+    # 运行期 glibc 读的是那个归档，不再需要 /usr/share/i18n 的 charmaps/locales
+    # 源数据；删掉它进一步瘦身（运行期任何 i18n 行为都不依赖它）
+    rm -rf /usr/share/i18n
 }
 
 setup_timezone() {

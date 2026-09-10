@@ -27,6 +27,10 @@ log()  { echo "🔨 [build] $*"; }
 warn() { echo "⚠️ [build][WARN] $*" >&2; }
 die()  { echo "❌ [build][ERROR] $*" >&2; exit 1; }
 
+# 构建期瘦身辅助（strip_elf）：与 base.sh 共用，在各自层清理时调用
+# shellcheck disable=SC1091
+. /opt/baota/build/slim.sh
+
 # 构建期占位凭据：随机的「bt-build- + 12 位十六进制」。
 # 镜像是公开发布的，任何写进镜像的固定口令等于人人可见，所以这里只放占位值，
 # 真正的口令与安全入口在容器首次启动时由 entrypoint 重新生成。
@@ -167,6 +171,11 @@ warmup_account_chain() {
     rm -rf /root/.cache /tmp/* /var/tmp/*
     rm -f ${PANEL_DIR}/logs/*.pid ${PANEL_DIR}/logs/*.log
     find /var/log -type f -name '*.log' -delete
+
+    # 本层瘦身：剥离宝塔与编译产物（nginx / php 等）的 ELF 调试符号
+    # （动态符号保留；.a 静态库由 strip_elf 用 --strip-debug 缩小，不删除；
+    #  本层产生的二进制须在本层内 strip 才生效）
+    strip_elf
 }
 
 # ==============================================================================
