@@ -30,8 +30,11 @@ BASE_IMAGE="${BASE_IMAGE:-debian:12}"
 OUT_MD="${OUT_MD:-drift.md}"
 CRIT_FILE="${CRIT_FILE:-drift-critical}"
 
-# 已知 overlay 持久化目录集合（须与 shared/scripts/init-mounts.sh 保持一致）
-KNOWNS='www etc usr var root opt home srv'
+# 已知 overlay 持久化目录集合（真源是 shared/conf/defaults.env 的
+# PERSIST_SYSTEM_DIRS）。这里刻意不含 www：面板 /www 已改为按子目录 bind，
+# 不再整层 overlay —— 把 www 算进来，会让写到 /www/server/php、/www/server/mysql
+# 的内容被误判成「已被持久化覆盖」，把真正的静默丢数据判成绿
+KNOWNS='etc usr var root opt home srv'
 
 INSTALL_LOG=/tmp/btpanel-install.log
 
@@ -68,7 +71,10 @@ EOS
 echo 0 > "$CRIT_FILE"
 
 # ------------------------------------------------------------------------------
-#  0. 起容器并装前置包（清单与 shared/build/base.sh install_packages 一致）
+#  0. 起容器并装前置包
+#  清单取 base.sh install_packages 的「基础系统」部分，刻意不含编译工具链与
+#  LNMP dev 库：漂移检测只关心「装完往哪些顶层目录写」，而工具链不新增顶层
+#  目录、只让 /usr 多几万个文件，装上它纯属多花几分钟构建时间
 # ------------------------------------------------------------------------------
 docker run -d --name "$CNAME" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
 log "已启动一次性容器（${BASE_IMAGE}）"
@@ -83,9 +89,9 @@ apt-get install -y --no-install-recommends \
     cron logrotate rsyslog \
     openssh-server \
     procps psmisc lsof htop \
-    net-tools iproute2 iputils-ping dnsutils traceroute \
+    net-tools iproute2 iputils-ping dnsutils \
     curl wget \
-    tar xz-utils zip unzip gzip bzip2 p7zip-full cpio rsync \
+    tar xz-utils zip unzip gzip bzip2 rsync \
     lsb-release sudo \
     busybox-static \
     vim-tiny less file
@@ -99,14 +105,13 @@ log '前置软件包已就绪'
 # ------------------------------------------------------------------------------
 BEFORE=$(snapshot)
 
-SECRET="bt-probe-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"
 log '执行官方安装脚本（参数与 shared/build/panel.sh 保持一致）'
 docker exec "$CNAME" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
     || die "下载安装脚本失败：${INSTALL_URL}"
 
 # 参数故意不加引号：官方脚本要求逐个参数传入（与 panel.sh 一致）
 docker exec "$CNAME" bash -c \
-    "cd /root && bash install.sh -y -P 8888 -u baota -p '${SECRET}' --safe-path '${SECRET}' --ssl-disable" \
+    "cd /root && bash install.sh -y --ssl-disable" \
     || { docker exec "$CNAME" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
          die '官方安装脚本执行失败'; }
 log '安装完成，开始比对'

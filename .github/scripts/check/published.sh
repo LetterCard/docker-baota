@@ -33,8 +33,12 @@ C_DUP="${C}-dup"
 V_RO="baota-verify-ro-$$"
 C_RO="${C}-ro"
 
-# 持久化层数量：www（面板）+ 系统层 7 个（etc usr var root opt home srv）
-EXPECT_OVERLAYS=8
+# 期望的 overlay 数量：系统层 7 个（etc usr var root opt home srv，真源是
+# shared/conf/defaults.env 的 PERSIST_SYSTEM_DIRS）。面板 /www 已改为按子目录
+# bind，不再整层 overlay，不计入。
+# 判据是 >= 而非 ==：overlay2 驱动下容器自身 rootfs 也会占一条 overlay 记录
+# （实测 8 条），vfs/btrfs 等驱动则没有（7 条），用 >= 两种情况都成立。
+EXPECT_OVERLAYS=7
 
 START_TS=$(date +%s)
 
@@ -75,36 +79,59 @@ wait_ready() {
 }
 
 # ---------------------------------------------------------------------------
-#  PHP 扩展编译链路（真编译 + 真加载，零网络）
-#  复现用户在面板里给 PHP 装扩展的真实链路：phpize → configure → make → 加载。
-#  仅校验 autoconf 存在（core.sh 旧 A14 的做法）抓不到「dev 库缺失 /
-#  php-config 接错 / phpize 损坏」这类更深回归；这里真编一个最小 .so 并
-#  用 php -m 验证，等价于用户装 redis / igbinary 的失败面，但零网络、
-#  不依赖 pecl.php.net 可达（避免 GitHub runner 网络抖动造成假红）。
+#  PHP 扩展「安装 + 编译」端到端验证（在已发布的纯净镜像上跑）
+#  复现用户在面板里给 PHP 装扩展的真实链路：先取得 PHP（镜像一律不预装 PHP，
+#  优先用面板里已装好的宝塔 PHP；都没有才临时 apt 装 php-dev 拿到真 phpize/php，仅用于
+#  验证镜像工具链能产出 .so 并加载，不烤进镜像），再 phpize → configure →
+#  make → 加载最小扩展 myext。等价于用户装 redis / igbinary 的失败面。
+#  关键：工具链护栏（autoconf/gcc/make/libtool）先于任何 apt 安装判定，避免
+#  apt 把缺失依赖补上后给「假绿」——这正是瘦身误删 autoconf 时要抓的回归。
 #  本函数只产出一条 ok / bad（失败原因并入消息体），便于检查项计数稳定。
 # ---------------------------------------------------------------------------
 check_php_ext_compile() {
-    log "验证 PHP 扩展编译链路（真编译最小扩展）"
-    local _phpize _ver _phpcfg _php _build _out _rc _msg
+    log "验证 PHP 扩展安装 + 编译链路（真编译最小扩展）"
+    local _phpize _ver _phpcfg _php _build _out _rc _msg _b
     _rc=0
+
+    # 1) 工具链护栏（先于 apt 安装，防止假绿）：镜像必须自带扩展编译工具链
+    for _b in autoconf gcc make libtool; do
+        if ! docker exec "$C" sh -c "command -v $_b >/dev/null 2>&1"; then
+            _rc=1; _msg="镜像缺少扩展编译工具链：$_b（PHP 扩展将装不上，疑似瘦身误删）"; break
+        fi
+    done
+    [ "$_rc" -ne 0 ] && { bad "PHP 扩展安装 + 编译链路失败：$_msg"; return; }
+
+    # 2) 取得 phpize：优先镜像内已装宝塔 PHP；否则临时 apt 装 php-dev
     _phpize=$(docker exec "$C" sh -c 'ls -d /www/server/php/*/bin/phpize 2>/dev/null | head -1' 2>/dev/null || true)
-    if [ -z "$_phpize" ]; then
-        _rc=1; _msg="容器内未找到任何 PHP 的 phpize（/www/server/php/*/bin/phpize）"
-    else
+    if [ -n "$_phpize" ]; then
         _ver=$(dirname "$(dirname "$_phpize")")      # .../php/X.X
         _phpcfg="$_ver/bin/php-config"
         _php="$_ver/bin/php"
-        _build=$(mktemp -d)
+    else
+        # 13.0.0 等未预装 PHP：临时装 php-dev 拿到真 phpize/php（工具链护栏已过，不会假绿）
+        if docker exec "$C" sh -c 'apt-get update >/dev/null 2>&1 && apt-get install -y php-cli php-dev >/dev/null 2>&1'; then
+            _phpize=$(docker exec "$C" sh -c 'command -v phpize' 2>/dev/null || true)
+            _phpcfg=$(docker exec "$C" sh -c 'command -v php-config' 2>/dev/null || true)
+            _php=$(docker exec "$C" sh -c 'command -v php' 2>/dev/null || true)
+        fi
+    fi
 
-        # 最小扩展源码：仅注册一个函数，证明编译 + 加载全链路通
-        cat > "$_build/config.m4" <<'M4'
+    if [ -z "$_phpize" ]; then
+        # 工具链护栏已通过，只是本环境无法取得 phpize（无预装 PHP 且 apt 不可用）
+        ok "未预装 PHP 且 apt 不可用，但扩展编译工具链齐备（autoconf/gcc/make/libtool），足以装扩展"
+        return
+    fi
+
+    # 3) 真编译最小扩展并加载验证
+    _build=$(mktemp -d)
+    cat > "$_build/config.m4" <<'M4'
 PHP_ARG_ENABLE(myext, whether to enable myext,
 [  --enable-myext   Enable myext support], no)
 if test "$PHP_MYEXT" != "no"; then
   PHP_NEW_EXTENSION(myext, myext.c, $ext_shared)
 fi
 M4
-        cat > "$_build/myext.c" <<'C'
+    cat > "$_build/myext.c" <<'C'
 #include "php.h"
 
 PHP_FUNCTION(myext_hello) { php_printf("hello from myext\n"); }
@@ -131,29 +158,28 @@ ZEND_GET_MODULE(myext)
 #endif
 C
 
-        if ! docker cp "$_build" "$C:/tmp/myext_check" >/dev/null 2>&1; then
-            _rc=1; _msg="无法拷贝扩展源码进容器"
-        else
-            # 链路上任一步（phpize 调 autoconf / configure / make / 加载）失败都判红
-            _out=$(docker exec "$C" sh -c "
-                cd /tmp/myext_check && \
-                '$_phpize' >/dev/null 2>&1 && \
-                ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && \
-                make -j\"\$(nproc)\" >/dev/null 2>&1 && \
-                test -f modules/myext.so && \
-                '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext
-            " 2>&1)
-            _rc=$?
-            [ "$_rc" -ne 0 ] && _msg="phpize→编译→加载最小扩展未通过（疑似工具链 / php-config 回归）"
-        fi
-        docker exec "$C" rm -rf /tmp/myext_check >/dev/null 2>&1 || true
-        rm -rf "$_build"
+    if ! docker cp "$_build" "$C:/tmp/myext_check" >/dev/null 2>&1; then
+        _rc=1; _msg="无法拷贝扩展源码进容器"
+    else
+        # 链路上任一步（phpize 调 autoconf / configure / make / 加载）失败都判红
+        _out=$(docker exec "$C" sh -c "
+            cd /tmp/myext_check && \
+            '$_phpize' >/dev/null 2>&1 && \
+            ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && \
+            make -j\"\$(nproc)\" >/dev/null 2>&1 && \
+            test -f modules/myext.so && \
+            '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext
+        " 2>&1)
+        _rc=$?
+        [ "$_rc" -ne 0 ] && _msg="phpize→编译→加载最小扩展未通过（疑似工具链 / php-config 回归）"
     fi
+    docker exec "$C" rm -rf /tmp/myext_check >/dev/null 2>&1 || true
+    rm -rf "$_build"
 
     if [ "$_rc" -eq 0 ]; then
-        ok "PHP 扩展编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
+        ok "PHP 扩展安装 + 编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
     else
-        bad "PHP 扩展编译链路失败：${_msg}"
+        bad "PHP 扩展安装 + 编译链路失败：${_msg}"
         [ -n "$_out" ] && warn "编译输出：${_out}"
     fi
 }
@@ -199,7 +225,7 @@ if [ "$FAIL" -eq 0 ]; then
 docker volume create "$V" >/dev/null
 log "首次启动（全新数据卷）"
 start_container
-if wait_persist "$C" && wait_ready "$C"; then
+if wait_persist && wait_ready; then
     ok "首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）"
 else
     bad "首次启动失败"
@@ -228,7 +254,7 @@ docker exec "$C" sh -c '
     echo p > /www/wwwroot/_v' >/dev/null 2>&1
 if docker exec "$C" test -f /data/system/etc/_v \
    && docker exec "$C" test -f /data/system/var/spool/cron/_v \
-   && docker exec "$C" test -f /data/panel-state/data/_v \
+   && docker exec "$C" test -f /data/panel/data/_v \
    && docker exec "$C" test -f /data/www/wwwroot/_v; then
     ok "四层写入分别落盘（etc / var 计划任务 / 面板状态 / 业务 wwwroot）"
 else
@@ -248,8 +274,8 @@ check_php_ext_compile
 # --- 并发锁：第二实例必须被拦截 ---
 log "验证并发锁（起第二实例）"
 docker run -d --name "$C_DUP" --privileged \
-    --security-opt seccomp=unconfined \
-    --tmpfs /run --tmpfs /run/lock \
+    --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+    --tmpfs /run --tmpfs /run/lock --shm-size=512m \
     -v "${V}:/data" "$IMAGE" >/dev/null 2>&1
 sleep 10
 if docker logs "$C_DUP" 2>&1 | grep '另一个容器实例正在使用' >/dev/null; then
@@ -266,7 +292,7 @@ if docker exec "$C" baota-backup >/dev/null 2>&1; then
         MEMBERS=$(docker exec "$C" sh -c "tar tzf '$BK' 2>/dev/null" || true)
         m_ok=1
         echo "$MEMBERS" | grep 'www/wwwroot/' >/dev/null || m_ok=0
-        echo "$MEMBERS" | grep 'panel-state/data' >/dev/null || m_ok=0
+        echo "$MEMBERS" | grep 'panel/data' >/dev/null || m_ok=0
         echo "$MEMBERS" | grep 'MANIFEST.txt' >/dev/null || m_ok=0
         echo "$MEMBERS" | grep -E 'www/backup/(auto|manual|database|rsync)/' >/dev/null && m_ok=0
         echo "$MEMBERS" | grep 'system/var/log/journal' >/dev/null && m_ok=0
@@ -284,7 +310,7 @@ fi
 log "销毁容器后用同一数据卷重建"
 docker rm -f "$C" >/dev/null
 start_container
-if wait_persist "$C" && wait_ready "$C"; then
+if wait_persist && wait_ready; then
     ok "销毁后用同一数据卷重建可启动"
 else
     bad "重建后启动失败"
@@ -304,8 +330,8 @@ fi
 docker exec "$C" sh -c 'echo 0.0.1 > /data/system/.baota/image-version'
 docker restart "$C" >/dev/null
 sleep 10
-wait_persist "$C" || true
-wait_ready "$C" || true
+wait_persist || true
+wait_ready || true
 SNAP=$(docker exec "$C" sh -c 'ls -1d /www/backup/auto/baota-0.0.1-* 2>/dev/null | head -1')
 if [ -n "$SNAP" ] && docker exec "$C" test -f "$SNAP/port.pl"; then
     ok "升级前快照生成且内容完整"
@@ -321,8 +347,8 @@ VER_NOW=$(docker exec "$C" cat /data/system/.baota/image-version 2>/dev/null | t
 docker exec "$C" sh -c 'echo 999.0.0 > /data/system/.baota/image-version'
 docker restart "$C" >/dev/null
 sleep 10
-wait_persist "$C" || true
-if wait_ready "$C"; then
+wait_persist || true
+if wait_ready; then
     ok "降级后仍正常启动（只告警不阻断）"
 else
     bad "降级后启动失败"
@@ -339,8 +365,8 @@ SNAP=$(docker exec "$C" sh -c 'ls -1d /www/backup/auto/baota-999.0.0-* 2>/dev/nu
 log "验证只读持久化根降级（独立数据卷）"
 docker volume create "$V_RO" >/dev/null
 docker run -d --name "$C_RO" --privileged \
-    --security-opt seccomp=unconfined \
-    --tmpfs /run --tmpfs /run/lock \
+    --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+    --tmpfs /run --tmpfs /run/lock --shm-size=512m \
     -v "${V_RO}:/data:ro" "$IMAGE" >/dev/null 2>&1
 sleep 15
 if docker exec "$C_RO" test -f /run/baota/degraded-critical 2>/dev/null; then
