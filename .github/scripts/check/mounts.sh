@@ -25,12 +25,29 @@ set -euo pipefail
 IMAGE=${1:?用法: run.sh mounts <镜像>}
 
 # 配置真源：与镜像共用 shared/conf/defaults.env，不在本脚本里写死目录
+# 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"）。
+# read_default 只做 sed 取值、不会展开，这里用间接展开补一层。
+expand_vars() {
+    local s="$1" name
+    while [[ "$s" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        name="${BASH_REMATCH[1]}"
+        s="${s//\${$name\}/${!name}}"
+    done
+    echo "$s"
+}
+
 read_default() {
-    sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env
+    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
 }
 
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
 [ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
+
+# 数据层根 / 面板状态根：宿主机上的混合挂载目录需要与 defaults.env 对齐
+PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
+[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
+PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
+[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
 
 WORK_ROOT=$(mktemp -d)
 CONTAINER="baota-mounts-$$"
@@ -116,10 +133,10 @@ if inside test -e /run/baota/degraded; then
 fi
 pass "混合挂载下无降级"
 
-# 业务源在宿主机 data/www/，面板状态在 data/panel-state/，系统层在 system/
+# 业务源在宿主机 data/www/，面板状态在 data/panel/，系统层在 system/
 # shellcheck disable=SC2086   # 目录列表是空格分隔的，需要按词切开
 [ -d "${WORK_ROOT}/data/www" ] || fail "业务源目录缺失（宿主机侧）：${WORK_ROOT}/data/www"
-[ -d "${WORK_ROOT}/data/panel-state" ] || fail "面板状态目录缺失（宿主机侧）：${WORK_ROOT}/data/panel-state"
+[ -d "${WORK_ROOT}${PANEL_STATE_ROOT}" ] || fail "面板状态目录缺失（宿主机侧）：${WORK_ROOT}${PANEL_STATE_ROOT}"
 for d in $PERSIST_SYSTEM_DIRS; do
     [ -d "${WORK_ROOT}/system/${d}" ] || fail "系统层目录缺失（宿主机侧）：${WORK_ROOT}/system/${d}"
 done
@@ -132,11 +149,11 @@ inside_sh 'echo mix > /www/wwwroot/_mix_marker'
 # 落盘路径语义（面板代码 /www/server/panel 本体刻意不落盘，它属于镜像）：
 #   /etc                    系统层 overlay，upper 在 system/etc/
 #   /www/wwwroot            业务 bind，源 = data/www/wwwroot
-#   /www/server/panel/data  面板状态 bind，源 = data/panel-state/data
+#   /www/server/panel/data  面板状态 bind，源 = data/panel/data
 [ -f "${WORK_ROOT}/system/etc/_mix_marker" ]            || fail "/etc 写入未落到系统层 system/etc/"
-[ -f "${WORK_ROOT}/data/panel-state/data/_mix_marker" ] || fail "面板状态写入未落到 data/panel-state/data/"
+[ -f "${WORK_ROOT}${PANEL_STATE_ROOT}/data/_mix_marker" ] || fail "面板状态写入未落到 ${PANEL_STATE_ROOT}/data/"
 [ -f "${WORK_ROOT}/data/www/wwwroot/_mix_marker" ]      || fail "/www/wwwroot 写入未落到绑定源 data/www/wwwroot/"
-pass "写入分别落到 system/etc/、data/panel-state/data 与 data/www/wwwroot"
+pass "写入分别落到 system/etc/、data/panel/data 与 data/www/wwwroot"
 
 step "A4) 销毁容器后重建，数据不丢"
 docker rm -f "$CONTAINER" >/dev/null
