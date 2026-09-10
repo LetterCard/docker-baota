@@ -148,6 +148,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@for f in shared/build/*.sh shared/scripts/entrypoint.sh \
 	          shared/scripts/backup.sh \
 	          .github/scripts/check/*.sh \
+	          .github/scripts/lint/*.sh \
 	          .github/scripts/drift/*.sh; do \
 	    bash -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
@@ -175,6 +176,8 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	   exit 1; \
 	 fi; \
 	 echo '  ok  无非注释的 BT-Panel 字面量'
+	@echo '--- 配置真源一致性（defaults.env vs 各脚本兜底）---'
+	@bash .github/scripts/lint/config.sh
 	@echo '--- YAML 语法 ---'
 	@for f in dockerfile/docker-compose.yml \
 	          .github/workflows/*.yml; do \
