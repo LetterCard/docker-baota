@@ -193,8 +193,23 @@ pass "日志轮转已就位（copytruncate）"
 step "A3) 执行生产健康检查脚本"
 inside test -x /baota/healthcheck.sh \
     || fail "healthcheck 脚本缺失或不可执行（compose 将永远 unhealthy）"
-inside /baota/healthcheck.sh \
-    || fail "healthcheck 在正常状态下未通过（三段判据之一异常）"
+# 三段判据（降级标记 / 磁盘水位 / 面板端口）共用一个非零退出码，光看它无法
+# 区分是「持久化降级」「磁盘快满」还是「面板没起来」，而这三种的修法完全
+# 不同。失败时逐段复跑，把原因钉死在日志里
+if ! inside /baota/healthcheck.sh; then
+    echo "----- healthcheck 三段判据取证 -----"
+    inside test -f /run/baota/degraded-critical \
+        && echo "[① 降级标记] 存在：/run/baota/degraded-critical" \
+        || echo "[① 降级标记] 无"
+    echo "[② 磁盘水位] 判据：可用 <1GB 或已用 ≥95% 即 unhealthy"
+    inside_sh "df -Ph ${PERSIST_DATA_ROOT} ${PERSIST_SYSTEM_ROOT} 2>/dev/null" || true
+    echo "[③ 面板端口]"
+    inside_sh 'p=$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888); \
+               curl -sk --max-time 5 -o /dev/null -w "http_code=%{http_code}\n" \
+               "http://127.0.0.1:${p}/login" 2>/dev/null' || true
+    panel_diag
+    fail "healthcheck 在正常状态下未通过（见上面三段判据取证）"
+fi
 pass "healthcheck 三段判据在正常状态下通过"
 
 step "A4) 校验宝塔关键文件（真机上的实际路径）"

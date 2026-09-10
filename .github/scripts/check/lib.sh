@@ -130,6 +130,24 @@ wait_systemd() {
 #    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
 #    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
 #    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
+# 面板没起来时的取证：只报一句「端口 120 秒没响应」等于什么都没说。
+# 磁盘被打满（判据②：可用 <1GB 或已用 ≥95%）会让面板初始化写不进数据库而
+# 起不来，表象与「面板本身有问题」一模一样，但修法完全不同（清 runner 磁盘
+# vs 查宝塔安装）。所以失败时一次把证据打全，别让人对着一行报错猜
+panel_diag() {
+    echo "----- 面板启动失败取证 -----"
+    echo "[磁盘水位] 判据②：可用 <1GB 或已用 ≥95% 即 unhealthy"
+    inside_sh 'df -Ph /data /data/system 2>/dev/null' || true
+    echo "[监听端口]"
+    inside_sh 'ss -lntp 2>/dev/null | head -10' || true
+    echo "[systemd 失败单元]"
+    inside_sh 'systemctl --failed --no-legend 2>/dev/null | head -10' || true
+    echo "[面板日志尾部]"
+    inside_sh 'tail -n 25 /www/server/panel/logs/error.log 2>/dev/null \
+               || tail -n 25 /www/server/panel/logs/*.log 2>/dev/null' || true
+    echo "----- 取证结束 -----"
+}
+
 wait_panel_http() {
     local port code="" tries=0
     port=$(inside_cat /www/server/panel/data/port.pl)
@@ -142,6 +160,6 @@ wait_panel_http() {
         sleep 2
     done
     case "$code" in
-        ''|000) fail "面板端口 ${port} 在 120 秒内没有响应" ;;
+        ''|000) panel_diag; fail "面板端口 ${port} 在 120 秒内没有响应" ;;
     esac
 }

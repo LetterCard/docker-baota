@@ -314,6 +314,12 @@ jobs:
       #   - 容器名按 PID 区分，不会冲突
       #   - 任一子任务非零退出 → set -e + wait 让 step 失败，不掩盖问题
       # 串行改并行一般能省 5~10 分钟（每套检查都要 systemd 起来 + 宝塔初始化）
+      - name: 💽 runner 磁盘水位（healthcheck 判据②的对照）
+        run: |
+          echo "判据②：持久化根可用 <1GB 或已用 ≥95% 即 unhealthy"
+          df -Ph / /var/lib/docker 2>/dev/null || true
+          docker system df 2>/dev/null || true
+
       - name: 🩺 三套健康检查并行（功能 / 挂载 / 升级）
         run: |
           set -euo pipefail
