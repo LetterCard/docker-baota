@@ -11,7 +11,7 @@
 #  health 系列（三套，覆盖不同的失效面）：
 #    health          19 项功能检查（面板 / 凭据 / 备份 / 重建不丢数据）
 #    health-mounts   挂载方式与降级场景（混合挂载 + 只读降级是否真被识别）
-#    health-upgrade  升级 / 降级路径（版本护栏 + 快照 + 启动器刷新）
+#    health-upgrade  升级 / 降级路径（版本护栏 + 升级前快照）
 #    health-all      一次跑全三套
 #
 #    backup          在运行的容器里生成一份全量备份
@@ -82,7 +82,7 @@ health: ## 19 项功能检查（全新卷 + 同卷重建）
 health-mounts: ## 挂载方式与降级场景（混合挂载 + 只读降级）
 	bash $(HC)/run.sh mounts "$(IMAGE)"
 
-health-upgrade: ## 升级 / 降级路径（版本护栏 + 快照 + 启动器刷新）
+health-upgrade: ## 升级 / 降级路径（版本护栏 + 升级前快照）
 	bash $(HC)/run.sh upgrade "$(IMAGE)" "$(HC_VERSION)"
 
 health-all: ## 三套全部跑一遍，任一失败即终止

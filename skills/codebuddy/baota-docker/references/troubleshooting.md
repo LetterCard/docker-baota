@@ -53,7 +53,7 @@ docker exec baota ls /www/server/panel/BT-Panel /www/server/panel/pyenv/bin/pyth
 
 - `BT-Panel` 不存在 → 镜像面板损坏（面板代码来自镜像、不持久化，清 `data/www` 不会重置它）；重建 / 回退镜像，或清 `data/panel` 重置面板配置（不影响代码）
 - pyenv 缺 `psutil` / `pyinotify`（常见于 arm64 构建）→ 面板无法启动，这是发布门禁会拦的项
-- 启动器被 copy-up 锁死 → 改镜像版本时 `refresh_panel_launcher` 会自动刷回 `/baota/launcher/`
+- 启动器被写坏/异常 → 不可变面板下启动器来自镜像层、不持久化，正常不会被持久化层锁死；遇到异常直接换镜像版本即可，启动器随镜像整体刷新，无需运行期刷新补丁
 
 ### 面板版本与镜像版本不一致
 

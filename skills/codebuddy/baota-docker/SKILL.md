@@ -126,7 +126,7 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
 - 启动被「另一个容器实例正在使用」拦下 → 两份 compose 共用同一 `data/`，
   确认没有别的实例后删 `data/system/.baota/lock`
 - 面板进程起不来 → 检查 `data/panel/data` 是否被写坏（面板代码在镜像里、只读，不会因持久化写坏）；
-  启动器被 copy-up 锁死时改镜像版本会自动刷回 `/baota/launcher/`
+  启动器异常 → 不可变面板下启动器来自镜像层、不持久化，换镜像版本即整体刷新，不会锁死
 - 想看历史上哪次启动开始降级 → `cat data/system/.baota/boot-history.log`
 
 **面板版本与镜像版本不一致** → `audit_panel_version` 只在镜像版本记录与当前镜像不匹配时提示，

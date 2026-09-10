@@ -64,7 +64,6 @@ ENTRYPOINT ["/busybox", "sh", "/baota/init.sh"]
        └─ refresh_consistency     mtab / machine-id / 时区，变了才写
        └─ version_guard           版本护栏 + 升级前快照
        └─ audit_panel_version     版本提示（不阻断）
-       └─ refresh_panel_launcher  版本变了才刷启动器
        └─ setup_log_limits        journald 重放 / logrotate 缺失才生成
        └─ init_first_boot         首启：端口 / 安全入口 / 账号 / root 口令
        └─ audit_persist_coverage  安装路径 + 新顶层目录巡检
@@ -92,11 +91,13 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 换镜像动不到）；面板代码来自镜像层、不持久化；唯一「对不上」的是
 新版面板代码 + 旧版面板数据库（SQLite）。
 
-## 启动器刷新（copy-up 陷阱）
+## 启动器（不可变面板下不再有 copy-up 陷阱）
 
-`/etc/init.d/bt` 每次启动都会 `sed -i` 改 shebang + 无条件 `chmod 700`。
-**overlay 的 chmod 即便值相同也会触发 copy-up** —— 首次启动面板后两个启动器就永久
-落进持久化层。镜像构建期把原版存到 `/baota/launcher/`，版本变化时刷回。
+`/etc/init.d/bt` 每次启动都会 `sed -i` 改 shebang + 无条件 `chmod 700`，在 overlay 下
+**chmod 即便值相同也会触发 copy-up**。但在「不可变面板」模型里，面板代码（含启动器）
+直接来自镜像层、不持久化，启动器永远是当前镜像的那一份，不会被任何容器实例写进持久化层，
+因此旧的「构建期存原版 + 版本变化刷回 `/baota/launcher/`」补丁连同该目录一起被移除了
+（见 CHANGELOG）。换镜像即换启动器，无需运行期刷新。
 
 ## 日志体积防线
 
