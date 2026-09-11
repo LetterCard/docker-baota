@@ -121,14 +121,14 @@ publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不�
 
 ```
 prep（读两个通道 VERSION）
-  ├─ verify-v12 （并行）→ 拉 bugseeker/baota:<12.0.0>  → 19 项回归 → 上传片段
-  └─ verify-v13（并行）→ 拉 bugseeker/baota:<13.0.0> → 19 项回归 → 上传片段
-collect（汇总）→ 生成 report.md → 注入 README → 回写仓库
+  ├─ verify-v12 （并行）→ 拉 bugseeker/baota:<12.0.0>  → 20 项回归 → 上传片段
+  └─ verify-v13（并行）→ 拉 bugseeker/baota:<13.0.0> → 20 项回归 → 上传片段
+collect（汇总）→ 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```
 
 - **版本号取自 `dockerfile/12.0.0/VERSION` 与 `dockerfile/13.0.0/VERSION`**（这两个文件由发布流水线在推送
   成功后回写，永远对应已发布的标签），不是重新探测上游 —— 本工作流不做版本判断
-- 19 项回归复用 `.github/scripts/check/published.sh`，覆盖持久化全生命周期
+- 20 项回归复用 `.github/scripts/check/published.sh`，覆盖持久化全生命周期
   （四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / 补丁生效）
 - 两个通道**并行**跑，各自独立 job，在 Actions 里并排显示进度，墙钟时间约等于单通道
 - **只验 linux/amd64**：arm64 镜像要跑 QEMU 模拟，而本方案的核心是 overlay 持久化，
@@ -155,7 +155,7 @@ collect（汇总）→ 生成 report.md → 注入 README → 回写仓库
 - **即使某通道验证失败也会回写报告**（`collect` 用 `if: always()`），把失败现场留在
   报告里，最后一步才判红 —— 所以看到红的运行，报告里一定有具体是哪一项挂了
 - 回写时先 `git rebase origin/main` 再生成文件：**rebase 必须在修改任何仓库文件之前**，
-  否则 `report.md` / `README.md` 处于已修改状态会让 rebase 中止，导致报告写不进仓库
+  否则 `.github/reports/report.md` / `README.md` 处于已修改状态会让 rebase 中止，导致报告写不进仓库
 - 本工作流只由 `schedule` / `workflow_dispatch` 触发，回写不会触发任何构建
 
 ---

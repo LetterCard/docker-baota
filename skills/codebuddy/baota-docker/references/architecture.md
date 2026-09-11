@@ -154,7 +154,7 @@ collect ── 下载片段 → 生成 .github/reports/report.md → 注入 READ
   `.github/reports/report.md` / `README.md` 一旦处于 modified，rebase 会因 dirty tree 中止，
   报告就写不进仓库（症状是「日志显示成功但文件没变」）
 
-### report.md 与 README 内嵌
+### .github/reports/report.md 与 README 内嵌
 
 - `.github/reports/report.md` 每次运行整体覆盖（不追加，体积恒定）
 - `.github/scripts/report.py` 把验证报告注入 README 的

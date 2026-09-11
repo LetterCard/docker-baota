@@ -1,7 +1,7 @@
 name: 🔬 日巡检：已发布镜像回归
 
 # ==============================================================================
-#  🔬 从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写 report.md
+#  🔬 从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写 .github/reports/report.md
 #
 #  与另两个工作流（12.0.0 / 13.0.0 构建发布）的分工：
 #    那两个  验的是「本地构建出来的候选镜像」，作用是把坏镜像拦在推送之前，
@@ -16,12 +16,12 @@ name: 🔬 日巡检：已发布镜像回归
 #    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
 #
 #  验什么
-#    .github/scripts/check/published.sh：19 项，覆盖持久化
+#    .github/scripts/check/published.sh：20 项，覆盖持久化
 #    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
 #    备份包结构 / 首启凭据 / PHP 扩展编译链路），外加一段脱敏后的首次启动日志
 #
 #  产出
-#    仓库根目录 report.md，每次运行整体覆盖（不追加，体积恒定）
+#    .github/reports/report.md，每次运行整体覆盖（不追加，体积恒定）
 #    ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前已脱敏
 #
 #  架构
@@ -33,14 +33,14 @@ name: 🔬 日巡检：已发布镜像回归
 #  并行与进度
 #    prep 读取两个通道版本后，verify-v12 / verify-v13 两个 job 并行
 #    跑（互不依赖），在 Actions UI 里并排显示、各自可见进度，墙钟时间约为
-#    单通道耗时；collect 在两者都结束后汇总并回写 report.md
+#    单通道耗时；collect 在两者都结束后汇总并回写 .github/reports/report.md
 #
 #  触发时机
 #    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 13.0.0 每日 17:00 之后、
 #       12.0.0 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
 #    🖱️ 手动：随时触发
 #
-#  注意：本工作流只由 schedule / workflow_dispatch 触发，回写 report.md
+#  注意：本工作流只由 schedule / workflow_dispatch 触发，回写 .github/reports/report.md
 #        不会触发任何构建（另两个工作流同样不监听 push）
 # ==============================================================================
 
@@ -56,7 +56,7 @@ concurrency:
 
 env:
   IMAGE_NAME: baota
-  REPORT: report.md
+  REPORT: .github/reports/report.md
   HC: .github/scripts/check
 
 jobs:
@@ -137,10 +137,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # ── 3) 汇总两个通道结果、生成并回写 report.md ───────────────────────────
+  # ── 3) 汇总两个通道结果、生成并回写 .github/reports/report.md ──────────────
   #  if: always() —— 即使某通道验证失败，也要把失败现场写进报告
   collect:
-    name: 📝 汇总并回写 report.md
+    name: 📝 汇总并回写报告
     needs: [prep, verify-v12, verify-v13]
     if: always()
     runs-on: ubuntu-latest
@@ -159,7 +159,7 @@ jobs:
           path: /tmp/reports
 
       # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
-      # 否则 report.md / README.md 已处于 modified，git rebase 会因 dirty tree 中止，
+      # 否则 .github/reports/report.md / README.md 已处于 modified，git rebase 会因 dirty tree 中止，
       # 导致回写步骤整体失败、报告写不进仓库。
       - name: 🔄 同步 main（rebase）
         run: |
@@ -169,7 +169,7 @@ jobs:
           git fetch origin main
           git rebase origin/main
 
-      - name: 📝 生成 report.md
+      - name: 📝 生成报告
         run: |
           set -euo pipefail
 
@@ -215,10 +215,10 @@ jobs:
               || echo '_（13.0.0验证未产出报告，见构建日志）_'
           } > "${{ env.REPORT }}"
 
-          echo '--- report.md 已生成（前 30 行）---'
+          echo '--- 报告已生成（前 30 行）---'
           head -n 30 "${{ env.REPORT }}"
 
-      - name: ✏️ 回写 report.md 与 README
+      - name: ✏️ 回写报告与 README
         run: |
           set -euo pipefail
 
@@ -250,7 +250,7 @@ jobs:
             echo "| 12.0.0 ${{ needs.prep.outputs.v12 }} | ${{ needs.verify-v12.result }} |"
             echo "| 13.0.0 ${{ needs.prep.outputs.v13 }} | ${{ needs.verify-v13.result }} |"
             echo
-            echo '完整报告见仓库根目录 `report.md`'
+            echo '完整报告见 `.github/reports/report.md`'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🚦 判定
