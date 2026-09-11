@@ -28,6 +28,9 @@
 - `make reset-panel`：代码不持久化，没有 upper 可重置
 - stable 通道构建期 py3.13 预升（`UPGRADE_PY313`）：面板用什么 Python 由官方安装
   脚本决定，不再依赖宝塔内部的升级脚本
+- 日志体积防线（`journald` 上限 + `logrotate` 轮转）：应用层日志的轮转与清理由宝塔面板
+  内置机制负责，不再内置 journald 上限或 logrotate（`shared/conf/log/` 配置源与
+  `setup_log_limits` 一并移除，发布门禁 `core.sh` 中对应检查项也已移除）
 
 ### ⚠️ 行为变更
 

@@ -77,17 +77,16 @@ allowed-tools: Read,Bash,Grep,Glob
 |---|---|
 | `shared/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
 | `shared/build/panel.sh` | 官方脚本安装宝塔 + 防火墙复位 + 清 swap + 账号链路预热 |
-| `shared/build/services.sh` | 运行期脚本权限、systemd 复位、启动器副本、目录基线、删构建脚本 |
+| `shared/build/services.sh` | 运行期脚本权限、systemd 复位、删构建脚本 |
 | `shared/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay + 业务/面板 bind → 交棒 |
-| `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏 → 快照 → 首启初始化 → 版本提示 → exec systemd |
+| `shared/scripts/entrypoint.sh` | 阶段 1：版本护栏（含升级前快照）→ 首启初始化 → 启动报告归档 → exec systemd |
 | `shared/scripts/healthcheck.sh` | 三段判据：降级标记 / 磁盘水位 / 面板端口 |
 | `shared/scripts/backup.sh` | `baota-backup`：全量备份、校验、体积分布 |
 | `shared/conf/defaults.env` | ★ 运行期配置真源 |
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
-| `shared/conf/log/` | journald 上限 + logrotate 配置源 |
 | `dockerfile/12.0.0/` `dockerfile/13.0.0/` | 两个通道的 Dockerfile / VERSION（compose 见 `dockerfile/docker-compose.yml`） |
 | `.github/scripts/check/*.sh` | 发布门禁三套：20 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 19 项 |
+| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 20 项 |
 | `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/report.py` | 把报告（report.md / drift.md）注入 README 对应标记区 |

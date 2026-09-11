@@ -63,11 +63,7 @@ ENTRYPOINT ["/busybox", "sh", "/baota/init.sh"]
        └─ prepare_runtime_dirs    /run 复位，/var/run → /run
        └─ refresh_consistency     mtab / machine-id / 时区，变了才写
        └─ version_guard           版本护栏 + 升级前快照
-       └─ audit_panel_version     版本提示（不阻断）
-       └─ setup_log_limits        journald 重放 / logrotate 缺失才生成
        └─ init_first_boot         首启：端口 / 安全入口 / 账号 / root 口令
-       └─ audit_persist_coverage  安装路径 + 新顶层目录巡检
-       └─ audit_panel_version     面板被更新过则告警
        └─ archive_boot_report     降级时追加到 boot-history.log
        └─ print_summary
        └─ exec "$@"  →  /usr/sbin/init (systemd)
@@ -99,17 +95,13 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 因此旧的「构建期存原版 + 版本变化刷回 `/baota/launcher/`」补丁连同该目录一起被移除了
 （见 CHANGELOG）。换镜像即换启动器，无需运行期刷新。
 
-## 日志体积防线
+## 日志
 
-持久化让日志不再随容器销毁而消失，journald 的编译默认值是「所在文件系统的 10%」，
-`data/` 挂在几 TB 存储池上时这个默认值等于没有上限。
+容器持久化了 `/var/log/journal`（journald 运行时日志可跨重启保留），其大小遵循 systemd 默认上限
+（编译默认值「所在文件系统的 10%」）。
 
-- **journald**：每次比对后重放。镜像落盘为 `/etc/systemd/journald.conf.d/baota-size.conf`；想覆盖请另建文件名排在它之后的 drop-in（如 `zz-*.conf`）
-  （systemd 按文件名排序加载，编号大的覆盖小的）
-- **logrotate**：仅在 `/etc/logrotate.d/baota-panel` 不存在时生成。
-  直接改这个文件是用户的正当权利
-- 轮转统一用 `copytruncate`：面板（python）、nginx、php-fpm 都长期持有日志句柄，
-  默认 rename 轮转对它们无效（进程继续往已删除的旧文件写，空间不释放）
+应用层日志（面板 / 站点 / MySQL 错误日志）的**轮转与清理由宝塔面板的内置机制负责**，
+本项目不额外叠加 journald 上限或 logrotate —— 避免与面板内置切割「双转」冲突。
 
 ## 自检护栏
 
@@ -148,7 +140,7 @@ probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号�
 
 ```
 prep  ── 读 dockerfile/12.0.0/VERSION + dockerfile/13.0.0/VERSION
-  ├─ verify-v12 （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
+  ├─ verify-v12 （并行，独立 job）→ pull 已发布镜像 → 20 项回归 → upload-artifact
   └─ verify-v13（并行，独立 job）→ 同上
 collect ── 下载片段 → 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```

@@ -33,11 +33,10 @@ baota-docker/
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
-│   │   └── services.sh        运行期脚本权限 + 开机自启 + 目录基线
+│   │   └── services.sh        运行期脚本权限 + 开机自启 + 删构建脚本
 │   ├── conf/
 │   │   ├── btpanel.service    systemd unit
-│   │   ├── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
-│   │   └── log/               日志体积防线的配置源
+│   │   └── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
 │       ├── init.sh     阶段 0：并发锁 + overlay 持久化
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
@@ -206,7 +205,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 **A 阶段（全新数据卷，A0–A14）**
 systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
-journald 上限 / logrotate 配置 / 生产 healthcheck 脚本 / 关键文件路径 / pyenv 模块 /
+生产 healthcheck 脚本 / 关键文件路径 / pyenv 模块 /
 面板与任务双进程 / 安全入口 / 版本号 / 首启随机凭据 / 写入落盘 / 开机自启 /
 防火墙关闭 / SSH 与 bt 命令 / 备份工具 /
 A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make / libtool，不装 PHP）

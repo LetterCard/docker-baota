@@ -11,8 +11,8 @@
 #  两阶段共 20 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
 #    A 全新数据卷：systemd / overlay 可写 / 关键路径（含 pyenv 模块）/
 #                  面板与任务进程 / 安全入口 / 版本号 / 首启凭据 / 写入落盘 /
-#                  自启 / 防火墙关闭 / SSH 与 bt 命令 / 日志体积防线 /
-#                  健康检查判据 / 备份工具 / PHP 扩展编译工具链
+#                  自启 / 防火墙关闭 / SSH 与 bt 命令 / 健康检查判据 /
+#                  备份工具 / PHP 扩展编译工具链
 #    B 销毁容器后用同一个卷重建：数据不丢、不会二次初始化、面板自动恢复
 #
 #  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 整体排除，
@@ -173,20 +173,6 @@ if inside_sh 'grep -q " /tmp " /proc/mounts'; then
     fail "/tmp 被单独挂载（应留在容器可写层）"
 fi
 pass "/tmp 未被 tmpfs 化"
-
-# 日志体积防线：持久化让日志不再随容器销毁而消失，上限与轮转必须就位，
-# 否则日志会静默吃掉整个磁盘 —— 这类问题往往几个月后才暴露，只能靠门禁拦住
-inside test -f /etc/systemd/journald.conf.d/baota-size.conf \
-    || fail "journald 体积上限未就位：日志将退回 systemd 默认值（所在文件系统的 10%）"
-inside_sh 'grep -q "^SystemMaxUse=" /etc/systemd/journald.conf.d/baota-size.conf' \
-    || fail "journald drop-in 未设置 SystemMaxUse，等于没有上限"
-pass "journald 体积上限已就位"
-
-inside test -f /etc/logrotate.d/baota-panel \
-    || fail "日志轮转配置缺失：面板与站点日志会一直增长"
-inside_sh 'grep -q "copytruncate" /etc/logrotate.d/baota-panel' \
-    || fail "轮转未启用 copytruncate：进程持有句柄时日志会写进已删除的文件，空间不释放"
-pass "日志轮转已就位（copytruncate）"
 
 # compose 的 healthcheck 判据已收口到镜像内 /baota/healthcheck.sh，
 # 这里直接执行它，等于在真实容器里跑一遍生产健康检查（降级标记 / 磁盘水位 / 端口）

@@ -6,7 +6,7 @@
 #    系统层（/etc /usr /var …）      overlay upper 在 data/system/<dir>
 #    业务数据（wwwroot/backup/server/data）  bind 到 data/www/<子目录>
 #    面板状态（panel/data、panel/plugin）    bind 到 data/panel/<子目录>
-#    面板代码（/www/server/panel）   来自镜像层、不持久化，并由 lock_panel_code 锁定为只读（面板自更新被拦截，升级即换镜像）
+#    面板代码（/www/server/panel）   来自镜像层、不持久化，升级即换镜像
 #  于是面板版本随镜像升级，而用户的配置、站点与数据库在容器销毁、重建后都不丢。
 #
 #  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
