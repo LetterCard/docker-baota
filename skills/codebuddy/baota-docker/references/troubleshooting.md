@@ -14,9 +14,9 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
-| `degraded-critical` 存在 | `etc`/`var` 等系统层或 `www`/`panel` 关键目录持久化失败或只读降级 | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
+| `degraded-critical` 存在 | `CRITICAL_DIRS` 里的目录持久化失败或只读降级（默认 `/etc` `/usr` `/var` `/www/wwwroot` `/www/server/data` `/www/server/panel/data`） | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
 | `degraded` 存在 | 非关键目录未持久化 | 同上，功能受损但不丢核心数据 |
-| 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/www/backup`、`data/www/wwwlogs`；`baota-backup --list` 看分布 |
+| 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/www/backup` 里的旧备份；`baota-backup --list` 看分布（站点日志 `/www/wwwlogs` 不持久化、不占 `data/`） |
 | 面板端口无响应 | 面板未启动 / 端口被改 | `docker exec baota bt status`；检查 compose 端口映射与 `port.pl` 是否一致 |
 
 ### 日志里出现「持久化层挂载成功但不可写」
@@ -48,10 +48,10 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 ```bash
 docker exec baota bt status
 docker exec baota systemctl status btpanel
-docker exec baota ls /www/server/panel/BT-Panel /www/server/panel/pyenv/bin/python
+docker exec baota ls /www/server/panel/BT-P* /www/server/panel/pyenv/bin/python
 ```
 
-- `BT-Panel` 不存在 → 镜像面板损坏（面板代码来自镜像、不持久化，清 `data/www` 不会重置它）；重建 / 回退镜像，或清 `data/panel` 重置面板配置（不影响代码）
+- `BT-P*` 不存在 → 镜像面板损坏（面板代码来自镜像、不持久化，清 `data/www` 不会重置它）；重建 / 回退镜像，或清 `data/panel` 重置面板配置（不影响代码）
 - pyenv 缺 `psutil` / `pyinotify`（常见于 arm64 构建）→ 面板无法启动，这是发布门禁会拦的项
 - 启动器被写坏/异常 → 不可变面板下启动器来自镜像层、不持久化，正常不会被持久化层锁死；遇到异常直接换镜像版本即可，启动器随镜像整体刷新，无需运行期刷新补丁
 
@@ -123,7 +123,9 @@ cat data/system/.baota/boot-history.log
 失败时会打印容器日志尾部 150 行，先 `[init]` 的 WARN，再看 `[entrypoint]`。
 
 新增检查项时注意：**不要靠 grep 中文告警文案判断**，读 `/run/baota/degraded*` 标记文件。
-`PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `PERSIST_DATA_ROOT` 等从 `shared/conf/defaults.env` 解析，不要在本脚本里硬编码。
+`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `WWW_DATA_SUBDIRS` /
+`PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS` / `CRITICAL_DIRS` 等一律从 `shared/conf/defaults.env`
+解析，不要在检查脚本里硬编码（`.github/scripts/lint/config.sh` 会核对各脚本的兜底副本）。
 
 ### 每日巡检：.github/reports/report.md 没更新
 

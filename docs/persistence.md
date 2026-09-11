@@ -17,9 +17,11 @@
 | `root` | 1781 | `.pip`、`.cache`、`.config` |
 | `var` | 1092 | 计划任务、日志、dpkg 数据库、systemd 状态 |
 | `etc` | 345 | 系统与服务配置 |
+| `opt` / `home` / `srv` | 0 | 安装时不写，但仍纳入持久化：`opt` 供堡塔 RASP 写日志、`home` 面板会建 `/home/www`、`srv` 是面板危险目录黑名单成员（保留成本为零） |
 
 **安装后唯一新增的顶层目录是 `/www`**，其余都是往已有目录里加内容。
-没有任何写入落到这 5 个目录之外。
+没有任何写入落到这 8 个目录之外 —— 这就是持久化目录集合的实测依据：
+`etc usr var root opt home srv` 七个走 overlay，`/www` 走逐子目录 bind（见下）。
 
 ---
 
@@ -52,7 +54,8 @@ data/                        （./data:/data）
 
 | | 例子 | 处理方式 |
 |---|---|---|
-| 面板代码 / 默认配置 | `/www/server/panel`、`/www/wwwlogs` | **不持久化**：直接来自镜像层，换镜像整套换新 |
+| 面板代码 / 默认配置 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志只随容器活着 |
+| 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **不持久化**：装什么由使用者决定，清单维护不完 —— 见下面 ⚠️ |
 | 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin` | **bind 直通**：必须保留，否则等于重装面板 |
 | 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup` | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
 
@@ -62,6 +65,16 @@ data/                        （./data:/data）
 - 面板状态（`data`、`plugin`）逐个 **bind** 到 `data/panel/` 下
 - 站点 / 备份 / MySQL 逐个 **bind** 到 `data/www/` 下
 - 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/system/<同名>`
+
+> ⚠️ **面板里安装的组件（PHP / nginx / MySQL / redis…）不在持久化范围内。**
+> 它们落在 `/www/server/<组件>`，属于容器可写层：`docker restart` 不消失，
+> 但**销毁重建容器后需要重新安装**（换镜像标签重建同样如此）。
+> 组件的**数据**不受影响 —— 站点文件、MySQL 数据、备份都在 `data/www/` 的 bind 里。
+>
+> 为什么这样定：组件集合取决于使用者装了什么，列不全就不列 —— 与「面板代码
+> 不可变」同一条原则（不在本项目里维护上游的东西）。要把某个组件也持久化，
+> 把它加进 `WWW_DATA_SUBDIRS`（相对 `/www`，例如 `server/php`），代价是这份
+> 清单从此由你维护；`apt install` 装的软件走 `/usr` overlay，本来就保得住。
 
 > ⚠️ 面板代码不持久化：在面板里点「更新」的写入落在容器可写层，restart 不会
 > 消失，但销毁重建后即还原为镜像版本 —— 请勿依赖面板内更新。
@@ -80,7 +93,7 @@ data/                        （./data:/data）
 /www/server/data ←bind→    源 = data/www/server/data
 /www/server/panel/data   ←bind→  源 = data/panel/data
 /www/server/panel/plugin ←bind→  源 = data/panel/plugin
-/www/server/panel        ←不挂载→ 直接来自镜像层（只读、不可变）
+/www/server/panel        ←不挂载→ 直接来自镜像层（不持久化；可写层的改动重建即丢）
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
 ```
 
@@ -117,9 +130,9 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 ## 自检护栏
 
-- 任何持久化失败 / 只读降级写 `/run/baota/degraded`；关键目录
-  （`etc`/`var`/`panel`）出问题额外写 `degraded-critical`，
-  让 healthcheck 把容器判为 unhealthy
+- 任何持久化失败 / 只读降级写 `/run/baota/degraded`；`CRITICAL_DIRS` 里的目录
+  （默认为 `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data`）
+  额外写 `degraded-critical`，让 healthcheck 把容器判为 unhealthy
 - 降级记录追加到 `data/system/.baota/boot-history.log`
 - 磁盘水位实时查持久化根（`data` 卷）
 

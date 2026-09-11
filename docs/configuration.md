@@ -69,7 +69,7 @@
 | `PANEL_STATE_ROOT` | `/data/panel` | 面板状态根目录 |
 | `PANEL_STATE_SUBDIRS` | `data plugin` | 面板状态子目录（相对 `/www/server/panel`），逐个 bind 到 `data/panel/<子目录>` |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（面板代码不在这里，它属于镜像） |
-| `CRITICAL_DIRS` | `etc var www` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录 |
+| `CRITICAL_DIRS` | `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录。写的是**容器内挂载点路径**（`www` 不再整体挂载，写顶层目录名会永远对不上） |
 | `DISK_MIN_AVAIL_MB` | `1024` | 健康检查的磁盘告警线：数据层或系统层可用空间低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 同上：已用百分比达到此值即 unhealthy |
 | `AUTO_BACKUP_KEEP` | `3` | 升级 / 降级前自动快照的保留份数，`0` 关闭 |
@@ -88,7 +88,7 @@
 
 | 配置项 | 默认值 | 用途 | 如何修改 |
 |---|---|---|---|
-| `volumes` | `./data:/data` | 一个 `data/` 保住全部数据：`/www` 的持久化在 `data/www/`（面板/站点/备份都在里面）、系统层在 `data/system/` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
+| `volumes` | `./data:/data` | 一个 `data/` 保住全部数据：业务数据与 MySQL 在 `data/www/`、面板状态在 `data/panel/`、系统层在 `data/system/` | 换盘就改成绝对路径，例如 `/vol2/baota/data:/data` |
 
 冒号**右侧的容器内路径（`/data`）不要改**；左侧可以是相对路径（相对
 compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在 ext4 / btrfs / xfs 上
@@ -125,7 +125,7 @@ data/                         （./data:/data，host 侧一目录）
 ## 自动快照（升级前）
 
 容器发现镜像版本变化时，会在启动阶段（面板与数据库尚未拉起、数据处于静止态）
-自动把面板数据 `/www/server/panel/data` 打包到 `data/www/backup/auto/`，通常几十 MB，秒级完成。
+自动把面板数据 `/www/server/panel/data` 复制一份（`cp -a`，不是压缩包）到 `data/www/backup/auto/`，通常几十 MB，秒级完成。
 
 | 环境变量 | 默认值 | 用途 |
 |---|---|---|
@@ -133,10 +133,9 @@ data/                         （./data:/data，host 侧一目录）
 
 **为什么只快照这一个目录**（实测确证，见[持久化原理](persistence.md#换镜像后会发生什么)）：
 
-站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 都在 `/www`
-这一层 overlay 里，但镜像自带的 `/www/wwwroot`、`/www/server/data`、`/www/backup`
-基本是空的 —— 站点 / MySQL / 备份都是运行期写进 upper 的，换镜像不会动到它们。
-会变的是面板代码与默认配置（在镜像 lower 层），自动换成新版。于是升级后唯一
+站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 都是
+**bind 目录**（源在 `data/www/` 下），换镜像根本不经过它们，动不到。
+会变的是面板代码与默认配置（来自镜像层），换镜像自动换成新版。于是升级后唯一
 「对不上」的地方就是 **新版面板代码 + 旧版面板数据库**（SQLite，升级时可能做
 schema 迁移）。快照它，升级失败就能回到「旧代码 + 旧库」的原始组合。
 

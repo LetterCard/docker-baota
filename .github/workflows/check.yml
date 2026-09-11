@@ -16,7 +16,7 @@ name: 🔬 日巡检：已发布镜像回归
 #    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
 #
 #  验什么
-#    .github/scripts/check/published.sh：20 项，覆盖持久化
+#    .github/scripts/check/published.sh：19 项，覆盖持久化
 #    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
 #    备份包结构 / 首启凭据 / PHP 扩展编译链路），外加一段脱敏后的首次启动日志
 #
@@ -151,6 +151,11 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
         with:
+          # 显式检出 main：下面 rebase 之后是 `git push origin HEAD:main`，
+          # 而 HEAD 落在哪个分支取决于触发时选的分支（workflow_dispatch 可以
+          # 选非 main）。不锁定的情况下，在分支上手动触发会把该分支的提交
+          # 一并重放并推到 main
+          ref: main
           fetch-depth: 0
 
       - name: 📥 下载报告片段

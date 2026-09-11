@@ -8,8 +8,6 @@ baota-docker/
 ├── CHANGELOG.md               变更记录
 ├── LICENSE                    MIT
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
-├── .github/reports/report.md                              每日巡检报告（CI 生成并回写，不要手改）
-├── .github/reports/drift.md                   漂移检测报告（CI 生成并回写，不要手改）
 │
 ├── docs/                      使用文档（本目录）
 │   ├── README.md              文档索引
@@ -47,11 +45,12 @@ baota-docker/
 ├── dockerfile/12.0.0/                         12.0.0 通道：Dockerfile / VERSION
 ├── dockerfile/13.0.0/                        13.0.0 通道：Dockerfile / VERSION
 └── .github/
-    ├── dependabot.yml             每周检查并升级 Actions 版本（只开 PR，不自动合并）
+    ├── reports/                 CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
     ├── scripts/
     │   ├── report.py       把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
     │   ├── check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
-    │   └── drift/           漂移检测脚本（目录漂移）
+    │   ├── drift/           漂移检测脚本（目录漂移）
+    │   └── lint/            配置真源一致性检查（make lint 调用：defaults.env vs 各脚本兜底）
     └── workflows/                 两个通道的构建发布 + 每日巡检 + 漂移检测工作流
 ```
 
@@ -84,7 +83,7 @@ baota-docker/
 
 - **probe**（每天，几十秒）：取两个通道安装脚本的 sha256 与版本号，
   与 `.github/scripts/drift/baseline.json` 比对，判断是否有变更
-- **analyze**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面的比对
+- **drift**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面的比对
 
 产物与提醒：
 
@@ -94,8 +93,10 @@ baota-docker/
 
 维护要点（改上游相关代码时同步）：
 
-- 已知持久化目录集合在 `.github/scripts/drift/install.sh` 的 `KNOWNS`，
-  须与 `shared/scripts/init.sh` 保持一致
+- 目录集合有两份，都在 `.github/scripts/drift/install.sh`：`KNOWNS`（持久化覆盖，
+  与 defaults.env 的 `PERSIST_SYSTEM_DIRS` 对应）与 `BY_DESIGN`（按设计不持久化，
+  目前只有 `www` —— 面板代码与自带组件，换镜像即重建）。新增持久化目录时同步
+  `KNOWNS`；新出现「刻意不持久化」的顶层目录时加进 `BY_DESIGN`，否则门禁会变成常亮的红灯
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
 - 两通道面板源码包可用 `bash .github/scripts/drift/versions.sh [stable|release]` 真装后抓取分析
 
@@ -103,8 +104,10 @@ baota-docker/
 
 **面板版本由镜像决定，不可变。**
 
-项目的核心保证只有一个：**销毁容器重建后，建站数据、面板配置、插件、环境全部还在**
-（已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、面板口令与数据库不变）。
+项目的核心保证只有一个：**销毁容器重建后，建站数据、面板配置、插件与系统环境
+（`/etc` `/usr` `/var`…）全部还在**（已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、
+面板口令与数据库不变）。唯一例外是面板里装的组件（PHP / nginx / MySQL…）——
+它们在容器可写层，重建后要重装，见[持久化原理](persistence.md)。
 
 面板代码来自镜像层、不持久化，所以：
 
@@ -165,8 +168,8 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 
 | 架构 | Python 运行环境 | 说明 |
 |---|---|---|
-| amd64 | 官方预编译包 | 构建快 |
-| arm64 | 源码编译 3.7.16 | 官方无 aarch64 预编译包（实测 404），构建较慢但功能一致 |
+| amd64 | 官方安装脚本自带的那一份 | 构建快 |
+| arm64 | 同上（本项目不做任何干预） | 官方脚本在 arm64 上要多编译一些组件，构建较慢但功能一致 |
 
 因为两个架构都已发布，compose 里的 `platform: linux/amd64` 在 ARM 机型上**应该注释掉**，
 否则会跑在 QEMU 模拟下、性能损耗明显。
@@ -232,7 +235,7 @@ A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make
 ### ③ `check/upgrade.sh` —— 升级 / 降级路径
 
 版本护栏、升级前快照**只在镜像版本变化时执行**，
-①②都走不到那个分支。不可变面板下启动器随镜像层只读提供、无需运行期刷新。这套通过改写持久化层里的版本记录触发两条路径：
+①②都走不到那个分支。不可变面板下启动器随镜像层提供（不持久化）、无需运行期刷新。这套通过改写持久化层里的版本记录触发两条路径：
 
 **升级分支（记录改成更低版本）** 识别为升级 / 快照生成且内容完整 /
 版本记录回写 / 升级后面板可用

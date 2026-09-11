@@ -24,7 +24,7 @@ name: 📦 13.0.0：构建并发布镜像
 #  关键保证：
 #    - dockerfile/13.0.0/VERSION 永远对应「已成功推送」的版本（回写在发布之后）
 #    - 构建失败时 VERSION 不动，下次运行会自动重试同一版本
-#    - 回写推送失败仅告警：下次 detect 仍会发现不一致并自愈
+#    - 回写推送失败会让该 step 变红（不吞错）：下次 detect 仍会发现不一致并自愈
 #    - 官方安装脚本若被改坏，构建阶段（安装宝塔 + 20 项健康检查）会失败中断，
 #      latest 不会指向坏镜像
 #
@@ -431,6 +431,10 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
         with:
+          # 显式检出 main：下面 rebase 后是 `git push origin HEAD:main`，
+          # HEAD 落在哪个分支取决于触发时选的分支。不锁定的话，在分支上手动
+          # 触发会把该分支的提交一并重放到 main 之上再推上去
+          ref: main
           # 完整历史让 rebase 能拿到共同祖先
           fetch-depth: 0
 

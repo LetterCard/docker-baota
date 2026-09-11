@@ -56,10 +56,18 @@ docker compose up -d
 ### ✅ 升级后验证
 
 ```bash
-docker compose exec baota bt default    # 账号信息应与升级前一致
 docker compose exec baota bt status     # 面板 + 任务进程都应在运行
 docker compose ps                       # 容器状态应为 healthy
 ```
+
+⚠️ **别用 `bt default` 核对凭据**：它读的 `/www/server/panel/default.pl` 属于面板代码、
+不持久化，容器重建后会退回镜像构建期的占位值，显示的不是你的真实口令。端口与安全
+入口在持久化层里（`data/panel/data/port.pl`、`admin_path.pl`），不会变；口令用你已知
+的那个登录即可（忘了用 `docker exec -it baota bt 5` 重置）。
+
+⚠️ **面板里装的组件（PHP / nginx / MySQL…）不在持久化范围内**：换镜像会重建容器，
+这些组件要重新安装一遍；组件的数据（MySQL 数据、站点文件、备份）都在 bind 目录里，
+不受影响。详见[持久化原理](persistence.md)。
 
 再登录面板，确认版本号、站点、数据库都正常。
 
@@ -94,11 +102,10 @@ docker compose up -d
 ### 老机器
 
 ```bash
+# 推荐：容器内备份（自动排除 + 自校验，包落在 data/www/backup/manual/）
 docker exec baota baota-backup
-# 或停机打包：
-# docker compose down
-# tar --xattrs --xattrs-include='trusted.overlay.*' -czf baota-data.tgz \
-#     -C data --exclude='.baota' --exclude='www/backup/auto' .
+# 需要停机打包时，用 docs/backup.md「方式二」里那段 tar（显式成员 + 排除项）。
+# 不要图省事写成员 '.'：包内会带 './' 前缀，排除项静默失效，升级快照被打进包里
 ```
 
 把备份包和 `docker-compose.yml` 一起传到新机器。
@@ -118,15 +125,14 @@ docker compose logs -f baota
 ### ✅ 迁移后自动适配的部分
 
 - **面板地址、用户名、口令、安全入口全部不变**——它们都随 `data/` 持久化数据一起保留
-- `data/etc/` 下的 `hosts`、`resolv.conf`、`hostname` 会被新宿主机的 Docker 注入值覆盖
+- `data/system/etc/` 下的 `hosts`、`resolv.conf`、`hostname` 会被新宿主机的 Docker 注入值覆盖
 - SSH 主机密钥跟着走，客户端不会报密钥变更
 
 ### ⚠️ 迁移后需要你确认的部分
 
 1. **面板端口**：新机器的端口映射要和 `data/panel/data/port.pl` 里的值对得上
-2. **架构**：amd64 与 arm64 的镜像不通用。跨架构迁移（例如 x86 换 ARM 飞牛）时，
-   编译好的 nginx / php / MySQL 二进制就躺在 `data/system/usr` 里
-   （面板代码在镜像层，会随架构自动匹配），迁移过去起不来。
+2. **架构**：amd64 与 arm64 的镜像不通用。`apt` 装在 `/usr`（即 `data/system/usr`）里的
+   二进制是编给原架构的，搬到另一种架构上起不来；面板代码在镜像层，会随架构自动匹配。
    **跨架构迁移只搬业务数据**：在新机器上全新启动，
    再用面板导入站点文件与数据库备份
 3. **文件系统**：新位置必须是 ext4 / btrfs / xfs，否则持久化层会降级为只读（见[硬约束](persistence.md#硬约束)）

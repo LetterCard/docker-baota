@@ -55,7 +55,10 @@ bad() { FAIL=$((FAIL + 1)); RESULTS+=("- [ ] ❌ $*"); echo "  ❌ $*"; }
 wait_persist() {
     local _ n
     for _ in $(seq 1 60); do
-        n=$(docker exec "$C" sh -c 'mount 2>/dev/null | grep -c overlay' 2>/dev/null || echo 0)
+        # 末尾用 || true 而不是 || echo 0：grep -c 无匹配时本来就会打印 0 并以
+        # 非零退出，再 echo 一次会得到两行 "0"（$'0\n0'），下面的 -ge 直接报
+        # 「integer expression expected」—— 与 lib.sh 里记的 `|| echo 000` 同一个坑
+        n=$(docker exec "$C" sh -c 'mount 2>/dev/null | grep -c overlay' 2>/dev/null || true)
         [ "${n:-0}" -ge "${EXPECT_OVERLAYS}" ] && return 0
         sleep 1
     done
@@ -67,12 +70,16 @@ wait_ready() {
     local _ code
     for _ in $(seq 1 60); do
         docker exec "$C" bt default >/dev/null 2>&1 || { sleep 2; continue; }
+        # 末尾必须是 || true 而不是 || echo 000：curl 连不上时 -w 已经打印了
+        # 000（同时以非零退出），再 echo 一次得到的是两行 $'000\n000' —— 下面的
+        # case 匹配不到 "000"，会把「面板还没起来」当场判成「已就绪」，
+        # 等待循环形同虚设。与 lib.sh 里记下的坑同源，这里同样不能踩
         code=$(docker exec "$C" sh -c '
             p=$(cat /www/server/panel/data/port.pl 2>/dev/null || echo 8888)
             ap=$(cat /www/server/panel/data/admin_path.pl 2>/dev/null)
             case "$ap" in /*) ;; *) ap="/$ap" ;; esac
             curl -sk -o /dev/null -w "%{http_code}" --max-time 3 \
-                "http://127.0.0.1:${p}${ap}/login" 2>/dev/null' 2>/dev/null || echo 000)
+                "http://127.0.0.1:${p}${ap}/login" 2>/dev/null' 2>/dev/null || true)
         case "$code" in 000|"") sleep 2 ;; *) return 0 ;; esac
     done
     return 1
@@ -269,6 +276,14 @@ case "$CRED" in
     *)             ok "首启凭据已随机生成（非构建期占位）" ;;
 esac
 
+# ---- 记住「持久化层里的首启状态」，重建后据此判断有没有二次初始化 ----
+# 刻意不用 default.pl：它属于面板代码、不持久化，重建后必然退回镜像构建期的
+# 占位值 —— 拿它比对会把正常行为判成失败（日巡检曾因此长期假红）。
+# 安全入口 / 端口 / 首启标记都在 data/panel/data 这个 bind 目录里，才是真凭据。
+SAFE1=$(docker exec "$C" cat /www/server/panel/data/admin_path.pl 2>/dev/null | tr -d '[:space:]')
+PORT1=$(docker exec "$C" cat /www/server/panel/data/port.pl 2>/dev/null | tr -d '[:space:]')
+INIT1=$(docker exec "$C" cat /www/server/panel/data/.docker-initialized 2>/dev/null | tr -d '[:space:]')
+
 # --- PHP 扩展编译链路（真编译 + 真加载，零网络） ---
 check_php_ext_compile
 
@@ -317,10 +332,15 @@ if wait_persist && wait_ready; then
 else
     bad "重建后启动失败"
 fi
-CRED2=$(docker exec "$C" cat /www/server/panel/default.pl 2>/dev/null | tr -d '[:space:]')
-[ -n "$CRED2" ] && [ "$CRED" = "$CRED2" ] \
-    && ok "重建后凭据不变（无二次初始化）" \
-    || bad "重建后凭据变化（疑似二次初始化）"
+# 二次初始化会把安全入口 / 端口重写一遍、首启标记时间戳变化 —— 这三项都在
+# 持久化层里，是判断「有没有二次初始化」的可靠依据（不能用 default.pl，见上）
+SAFE2=$(docker exec "$C" cat /www/server/panel/data/admin_path.pl 2>/dev/null | tr -d '[:space:]')
+PORT2=$(docker exec "$C" cat /www/server/panel/data/port.pl 2>/dev/null | tr -d '[:space:]')
+INIT2=$(docker exec "$C" cat /www/server/panel/data/.docker-initialized 2>/dev/null | tr -d '[:space:]')
+[ -n "$SAFE2" ] && [ -n "$INIT2" ] \
+    && [ "$SAFE1" = "$SAFE2" ] && [ "$PORT1" = "$PORT2" ] && [ "$INIT1" = "$INIT2" ] \
+    && ok "重建后未二次初始化（安全入口 / 端口 / 首启标记均不变）" \
+    || bad "重建后疑似二次初始化（安全入口 / 端口 / 首启标记有变化）"
 if docker exec "$C" test -f /data/system/etc/_v \
    && docker exec "$C" test -f /data/www/wwwroot/_v; then
     ok "重建后原写入数据仍在"

@@ -43,7 +43,9 @@
 - 面板日志量不小，compose 里已把 Docker 日志限制为 3×10MB
 - 应用层日志（面板 / 站点 / MySQL）的轮转与清理由宝塔面板内置机制负责，详见[编排配置详解](configuration.md#日志)
 - MySQL 数据会持续增长，定期清理 `data/www/backup` 里过期的备份
-- 站点多时注意 `data/www/wwwlogs` 的体积，面板里可开启日志切割
+- 站点日志 `/www/wwwlogs` **不持久化**（在容器可写层，容器重建即清空），不占 `data/` 的空间；
+  它的切割与清理由面板内置机制负责。需要长期留存，就在面板里把站点日志目录改到
+  `/www/wwwroot` 之下 —— 那才是宿主机可直接读写的持久化 bind 目录
 - 想看 `data/` 的体积分布：`docker exec baota baota-backup --list`
 
 ## 🩺 日常巡检

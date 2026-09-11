@@ -44,7 +44,7 @@ allowed-tools: Read,Bash,Grep,Glob
 
 ## 🔴 红线（违反会静默丢数据或让坏镜像上线）
 
-1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
+1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
    `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`。
    不要往 Dockerfile `ENV` 或 CI 脚本里再抄一份 —— 漂移的表现是静默丢数据。
 2. **运行期脚本必须放 `/baota`**，不能放 `/opt`、`/etc`、`/var` 等持久化目录。
@@ -86,7 +86,7 @@ allowed-tools: Read,Bash,Grep,Glob
 | `shared/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `dockerfile/12.0.0/` `dockerfile/13.0.0/` | 两个通道的 Dockerfile / VERSION（compose 见 `dockerfile/docker-compose.yml`） |
 | `.github/scripts/check/*.sh` | 发布门禁三套：20 项功能检查 / 挂载与降级场景 / 升级与降级路径 |
-| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 20 项 |
+| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑 19 项回归（含 PHP 扩展编译与二次初始化判定） |
 | `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/report.py` | 把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区 |
@@ -123,5 +123,5 @@ docker exec baota /baota/healthcheck.sh  # 单独执行，看退出码
 cat data/system/.baota/boot-history.log         # 哪次启动开始降级
 ```
 
-完整对照表见 `../../../codebuddy/baota-docker/references/troubleshooting.md`
+完整对照表见 `../../codebuddy/baota-docker/references/troubleshooting.md`
 （与 CodeBuddy 版共用同一份 references，避免两处维护）。

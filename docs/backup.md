@@ -61,8 +61,10 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 它替你绕开手工 tar 的三个坑：
 
 1. **自动排除** `.baota`、`www/backup/auto`、`www/backup/manual`、`www/backup/database`、
-   `www/backup/rsync` —— 漏掉 `auto` 会把上一次的升级快照打进本次备份，体积逐次翻倍
-   （实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）
+   `www/backup/rsync`、`system/var/log/journal` —— 漏掉 `auto` 会把上一次的升级快照
+   打进本次备份，体积逐次翻倍（实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）；
+   journal 目录是打包期间写入最活跃的地方（`file changed as we read it` 几乎都出自它），
+   且由 systemd 自行管理、零恢复价值
 2. **自动加 `--xattrs`**，保住 overlay 的目录替换标记
 3. **生成后自动自校验**，并拒绝自包含的包
 
@@ -78,16 +80,18 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
-# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www 与 system 两个顶层
-#    ★ 必须用显式成员 www system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
-#      下面的 --exclude='www/backup/manual' 就匹配不上了。把输出包放在 data/ 里时
-#      tar 会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
+# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www、panel、system 三个顶层
+#    ★ 必须用显式成员 www panel system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
+#      下面的 --exclude='www/backup/manual' 就匹配不上了（排除静默失效）。把输出包放在
+#      data/ 里时 tar 还会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
 #      与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
+#    ★ panel 不能漏：面板配置与 SQLite 库都在里面，漏了等于恢复后回到出厂设置
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
     -C data --exclude='.baota' --exclude='www/backup/auto' \
              --exclude='www/backup/manual' --exclude='www/backup/database' \
-             --exclude='www/backup/rsync' www system
+             --exclude='www/backup/rsync' --exclude='system/var/log/journal' \
+             www panel system
 
 # 3) 启动
 docker compose up -d
@@ -95,13 +99,15 @@ docker compose up -d
 
 💡 要点：
 
-- `-C data` 加显式成员 `www system`，让包内路径保持相对（`www/...` 与 `system/...`），
-  恢复到任何机器、任何目录都不受绝对路径影响；结构也与 `baota-backup` 的产出一致，
-  两种包共用同一套校验与恢复步骤
+- `-C data` 加显式成员 `www panel system`，让包内路径保持相对（`www/...`、`panel/...`
+  与 `system/...`），恢复到任何机器、任何目录都不受绝对路径影响；结构也与
+  `baota-backup` 的产出一致，两种包共用同一套校验与恢复步骤
 - `--exclude='.baota'`：项目元数据 / 数据层状态（`data/.baota` 与 `data/system/.baota`），
   排除后启动时自动重建
 - `--exclude='www/backup/*'`：升级快照、本工具产物、面板备份、rsync 同步目标，
   都在 `data/www/backup/` 下，**必须排除**，否则自包含、体积逐次翻倍
+- `--exclude='system/var/log/journal'`：journald 运行时日志，打包期间写得最凶
+  （热备份的「file changed as we read it」几乎都出自它），恢复价值为零
 - 站点多、数据库大时，耗时主要花在 `data/www/server/data`（MySQL 数据目录），属正常
 - 想看体积分布：`docker exec baota baota-backup --list`
 
@@ -163,8 +169,10 @@ docker compose up -d && docker compose logs -f baota
 ## 🔎 验证备份（别跳过）
 
 ```bash
-docker exec baota baota-backup --verify /www/backup/manual/baota-backup-*.tgz
-# 或者宿主机侧：
+# 通配符必须交给容器内的 sh 展开 —— 直接写路径的话宿主 shell 展开不了（宿主没有
+# /www/backup/manual），会把 `*` 原样传进去，换来一句「备份包不存在：…*」
+docker exec baota sh -c 'baota-backup --verify /www/backup/manual/baota-backup-*.tgz'
+# 或者宿主机侧（这里通配符由你的 shell 展开、作用于宿主文件，所以能直接用）：
 tar tzf baota-backup-*.tgz | grep -E 'www/wwwroot/|www/server/data/|panel/data/' | head
 ```
 

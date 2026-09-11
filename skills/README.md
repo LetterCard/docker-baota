@@ -12,9 +12,9 @@ skills/
 │       └── references/
 │           ├── architecture.md  持久化方案与启动链的设计理由
 │           └── troubleshooting.md  症状 → 原因 → 处置
-└── trae/                Trae（预留，结构与 codebuddy 保持一致）
+└── trae/                Trae（预留位）
     └── baota-docker/
-        └── SKILL.md
+        └── SKILL.md     与 codebuddy 版同步的内容；references 直接复用上面那一份，不重复维护
 ```
 
 ## 用法

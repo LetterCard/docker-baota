@@ -131,6 +131,12 @@ wait_systemd() {
 #    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
 #    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
 #    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
+#
+# 就绪判据与 healthcheck.sh、core.sh 的 A6 保持同一套语义：'' / 000（连不上）
+# 之外，5xx 同样算「还没起来」。502 的典型含义正是「nginx 已起、面板后端未起」，
+# 属于启动过程中的正常瞬态，应当继续等而不是当成就绪 —— 否则面板真挂住时这里
+# 会提前放行，连取证（panel_diag）也一起跳过，最后在更靠后的断言上抛一句
+# 含糊的失败，把「磁盘满 / 后端崩」的线索丢掉
 # 面板没起来时的取证：只报一句「端口 120 秒没响应」等于什么都没说。
 # 磁盘被打满（判据②：可用 <1GB 或已用 ≥95%）会让面板初始化写不进数据库而
 # 起不来，表象与「面板本身有问题」一模一样，但修法完全不同（清 runner 磁盘
@@ -156,11 +162,11 @@ wait_panel_http() {
     while [ "$tries" -lt 60 ]; do
         code=$(inside curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
                 "http://127.0.0.1:${port}/" 2>/dev/null || true)
-        case "$code" in ''|000) ;; *) break ;; esac
+        case "$code" in ''|000|5*) ;; *) break ;; esac
         tries=$((tries + 1))
         sleep 2
     done
     case "$code" in
-        ''|000) panel_diag; fail "面板端口 ${port} 在 120 秒内没有响应" ;;
+        ''|000|5*) panel_diag; fail "面板端口 ${port} 在 120 秒内没有响应（或返回 ${code}）" ;;
     esac
 }

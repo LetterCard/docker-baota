@@ -4,9 +4,9 @@
 #
 #  为什么要有这道检查
 #    defaults.env 是运行期配置的真源，但 init.sh / healthcheck.sh / backup.sh /
-#    services.sh 各自保留了一份 VAR="${VAR:-默认值}" 兜底（防止拿不到真源时
-#    脚本全裸）。真源改了而某份兜底没跟着改，表现是「构建期按旧值建目录 /
-#    运行期按旧值算路径」—— 这类漂移静默、且现象离原因很远。
+#    services.sh / entrypoint.sh 各自保留了一份 VAR="${VAR:-默认值}" 兜底（防止
+#    拿不到真源时脚本全裸）。真源改了而某份兜底没跟着改，表现是「构建期按旧值
+#    建目录 / 运行期按旧值算路径」—— 这类漂移静默、且现象离原因很远。
 #
 #    历史上真出过一次：services.sh 的目录列表兜底带 www、真源不带，结果镜像里
 #    凭空多出 data/system/www 空目录（用户会以为站点数据在那）。改真源的人
@@ -28,6 +28,7 @@ FILES=(
     shared/scripts/healthcheck.sh
     shared/scripts/backup.sh
     shared/build/services.sh
+    shared/scripts/entrypoint.sh
 )
 VARS=(
     PERSIST_DATA_ROOT
@@ -37,6 +38,11 @@ VARS=(
     CRITICAL_DIRS
     WWW_DATA_SUBDIRS
     PANEL_STATE_SUBDIRS
+    # 下面三个也有兜底副本：磁盘水位在 healthcheck.sh，快照保留份数在
+    # entrypoint.sh。漏掉它们等于这两处抄错了没人管
+    DISK_MIN_AVAIL_MB
+    DISK_MAX_USED_PCT
+    AUTO_BACKUP_KEEP
 )
 
 [ -f "$TRUTH" ] || { echo "  FAIL 真源不存在：$TRUTH"; exit 1; }

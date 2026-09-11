@@ -37,9 +37,9 @@ EOS
   docker exec "$c" bash -c "cd /root && wget -q -O install.sh '${url}'" \
     || { echo "::error::[$ch] 下载安装脚本失败"; docker rm -f "$c" >/dev/null; return 1; }
 
-  echo "===== [$ch] 执行官方安装（参数与 shared/build/panel.sh 一致） =====" >&2
+  echo "===== [$ch] 执行官方安装（参数与 shared/build/panel.sh 一致：只传 -y --ssl-disable） =====" >&2
   if ! docker exec "$c" bash -c \
-      "cd /root && bash install.sh -y -P 8888 -u baota -p 'bt-probe-$$' --safe-path 'bt-probe-$$' --ssl-disable" \
+      "cd /root && bash install.sh -y --ssl-disable" \
       2>&1 | tail -n 5; then
     echo "::error::[$ch] 安装失败"; docker rm -f "$c" >/dev/null; return 1
   fi

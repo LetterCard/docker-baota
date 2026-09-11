@@ -105,12 +105,16 @@ usrmerge 的 `/bin -> usr/bin` 会让 `/bin/bash` 一起消失。`/busybox` 在 
 
 ## 自检护栏
 
-上游一旦改数据落点就会静默丢数据，所以每次启动做两项**只读**检查：
+持久化是否真的生效**不靠巡检上游落点**（那要求逐项跟踪上游写什么，属对抗上游，
+`audit_persist_coverage` / `baseline-dirs.txt` 已整体移除），而是在 `init.sh` 挂载时
+**实测**：挂载后立刻往目标写一个探针文件，再确认它出现在 upper 里 ——
+overlay 在只读文件系统上会「挂载成功但不可写」，这一步能当场抓住。
 
-1. `/var/bt_setupPath.conf` 的顶层目录是否在 `PERSIST_DATA_DIRS` / `PERSIST_SYSTEM_DIRS` 内
-2. 顶层目录与 `/baota/baseline-dirs.txt` 比对，发现新目录就告警
-
-基线文件运行期从不被写入，按 overlay 语义它始终跟随当前镜像 —— 换镜像即换基线，无需维护。
+- 任何持久化失败 / 只读降级 → 写 `/run/baota/degraded`；`CRITICAL_DIRS` 里的目录
+  （默认 `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data`）
+  额外写 `degraded-critical`，healthcheck 据此把容器判为 unhealthy
+- 降级记录追加到 `data/system/.baota/boot-history.log`（最多 200 行，只有降级时才写）
+- 磁盘水位每 30 秒现查两个持久化根；不写标记文件，腾出空间后自动转回 healthy
 
 ## overlay 元数据与备份
 
@@ -140,7 +144,7 @@ probe（每天，几十秒）── 取两通道安装脚本 sha256 + 版本号�
 
 ```
 prep  ── 读 dockerfile/12.0.0/VERSION + dockerfile/13.0.0/VERSION
-  ├─ verify-v12 （并行，独立 job）→ pull 已发布镜像 → 20 项回归 → upload-artifact
+  ├─ verify-v12 （并行，独立 job）→ pull 已发布镜像 → 19 项回归 → upload-artifact
   └─ verify-v13（并行，独立 job）→ 同上
 collect ── 下载片段 → 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```

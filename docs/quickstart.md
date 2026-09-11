@@ -9,9 +9,9 @@
 5. 查看首次登录信息：「容器」→ `baota` →「日志」，或命令行 `docker compose logs -f baota`
 
 数据会存放在 `dockerfile/docker-compose.yml` 同级的 `data/` 目录里，可以直接用飞牛的「文件管理」查看和备份。
-`data/www/` 是面板、站点、数据库、备份（你日常要管理的都在这里），`data/system/` 是系统层
-（etc usr var root opt home srv 的 overlay 上层与项目元数据，一般不用翻）。混合挂载模式下
-系统层会落在独立的 `system/` 卷里、宿主机上看不到。详见[持久化原理](persistence.md)。
+`data/www/` 是站点、数据库与备份，`data/panel/` 是面板自己的配置与插件（你日常要管理的都在这两处）；
+`data/system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，一般不用翻）。
+混合挂载模式下系统层会落在 `data/` 之外的独立 `system/` 目录里。详见[持久化原理](persistence.md)。
 
 ## 🐧 其它 Linux 服务器
 
@@ -55,8 +55,8 @@ fnOS 会占用宿主机的 80 / 443 / 22，所以 compose 里分别避让到 888
 
 格式是 `"宿主机端口:容器内端口"`：**左侧可改，右侧不要改**。
 
-> 默认仅开放 `8888`（面板）、`8880`（站点 HTTP）、`8443`（站点 HTTPS）三个端口；
-> `888` / `2222` / `3306` 以及 FTP 端口在 compose 里已注释，按需取消注释即可。
+> 默认开放 `8888`（面板）、`888`（phpMyAdmin）、`8880`（站点 HTTP）、`8443`（站点 HTTPS）四个端口；
+> `2222`（SSH）、`3306`（MySQL）与 FTP 端口在 compose 里已注释，按需取消注释即可。
 
 fnOS 的 Web 管理端口是 **5666 / 5667**，且「设置 → 安全性」默认开启了**重定向 80 与 443 端口**。
 如果站点确实需要用宿主机的 80/443（例如签发 Let's Encrypt 证书），先到 fnOS 关闭那个重定向，
@@ -87,7 +87,7 @@ fnOS 的 Web 管理端口是 **5666 / 5667**，且「设置 → 安全性」默�
       PANEL_PASSWORD:            # 值留空 → 由同目录 .env 提供
 ```
 
-`.env` 里写 `PANEL_PASSWORD=你的口令`，并记得把它加进 `.gitignore`。
+`.env` 里写 `PANEL_PASSWORD=你的口令`（仓库的 `.gitignore` 已经忽略 `.env`，不用再手工配置）。
 
 **这些只在首次启动（`data/` 为空）时生效。** 之后再改不会有任何效果，那时请用：
 

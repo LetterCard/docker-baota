@@ -189,7 +189,7 @@ show_usage() {
     # shellcheck disable=SC2086,SC2046
     du -sh \
         "${PERSIST_DATA_ROOT}/www" \
-        "${PERSIST_DATA_ROOT}/panel" \
+        "${PANEL_STATE_ROOT}" \
         $(for d in ${PERSIST_SYSTEM_DIRS}; do echo "${PERSIST_SYSTEM_ROOT}/${d}"; done) \
         2> /dev/null | sort -rh || true
     echo
@@ -345,13 +345,17 @@ build_archive() {
 
     # 附加项：清单 + 数据库转储（都放在临时目录，作为 tar 的第二个来源）
     TMP_DIR=$(mktemp -d)
-    write_manifest "${TMP_DIR}/MANIFEST.txt" "${out}"
 
     if dump_databases "${TMP_DIR}/databases.sql"; then
         log '已附加 MySQL 一致性转储（databases.sql）'
     else
         log '未附加 MySQL 转储（MySQL 未运行或未安装）—— InnoDB 文件可能处于半写状态，恢复后如起不来请改用停机备份（docker compose down 后再打）'
     fi
+
+    # ★ 清单必须在转储之后生成：write_manifest 靠「databases.sql 在不在」决定
+    #   清单里的数据库一行，先写会把「已随包转储」误报成「未包含 MySQL 转储」，
+    #   而 MANIFEST.txt 正是恢复时的说明书（已踩过这个顺序坑）
+    write_manifest "${TMP_DIR}/MANIFEST.txt" "${out}"
 
     local -a extra=()
     [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
@@ -384,7 +388,7 @@ build_archive() {
 #  站点 / 数据库数据 / 面板配置
 # ==============================================================================
 verify_archive() {
-    local file="$1" listing missing=0 pattern
+    local file="$1" listing missing=0 pattern panel_state_member
 
     [ -f "${file}" ] || die "备份包不存在：${file}"
 
@@ -392,13 +396,17 @@ verify_archive() {
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
     # 关键成员检查（整份 data 卷归档，结构与宿主机一致）：
-    #   www/wwwroot/      站点（业务 bind）
-    #   panel/data  面板配置 + 数据库（面板状态 bind）
-    #   MANIFEST.txt                   备份清单（由 backup.sh 自动生成）
+    #   www/wwwroot/          站点（业务 bind）
+    #   <面板状态根>/data     面板配置 + 数据库（面板状态 bind）
+    #   MANIFEST.txt          备份清单（由 backup.sh 自动生成）
+    # 面板状态那一项必须从真源派生（basename PANEL_STATE_ROOT），不能写死 panel：
+    # defaults.env 允许覆盖 PANEL_STATE_ROOT，写死会让「备份本身成功、自校验却
+    # 恒失败」。collect_members 也是这么推导成员名的，两处口径必须一致
     # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，
     # 大清单的 printf 写不完被 SIGPIPE 终止（141），会把「含」误判成「缺少」。
     # listing 已在变量里，case 子串匹配既无管道也无该隐患
-    for pattern in 'www/wwwroot/' 'panel/data' 'MANIFEST.txt'; do
+    panel_state_member="$(basename "${PANEL_STATE_ROOT}")/data"
+    for pattern in 'www/wwwroot/' "${panel_state_member}" 'MANIFEST.txt'; do
         case "${listing}" in
             *"${pattern}"*) echo "  ✅ 含 ${pattern}" ;;
             *)              echo "  ❌ 缺少 ${pattern}"; missing=$((missing + 1)) ;;
@@ -578,7 +586,6 @@ main() {
             [ ${#data_members[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
 
             TMP_DIR=$(mktemp -d)
-            write_manifest "${TMP_DIR}/MANIFEST.txt" '<stdout>'
 
             local -a extra=()
             if dump_databases "${TMP_DIR}/databases.sql"; then
@@ -587,6 +594,9 @@ main() {
             else
                 echo '📦 [backup] 未附加 MySQL 转储（MySQL 未运行或未安装）' >&2
             fi
+
+            # 同 create 模式：清单要在转储之后生成，否则「已转储」会被写成「未包含」
+            write_manifest "${TMP_DIR}/MANIFEST.txt" '<stdout>'
 
             # 退出码处理与 create 模式一致（热备份下 tar 返回 1 可接受）。
             # 这里无法清理半成品 —— 流已经吐出去了，读不回来。
