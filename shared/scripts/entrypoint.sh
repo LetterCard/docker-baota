@@ -287,56 +287,6 @@ version_guard() {
     fi
 }
 
-# ==============================================================================
-#  日志体积防线：journald 上限 + 面板 / 站点日志轮转
-#
-#  为什么必须有这道防线：持久化层把 /var/log、/www 都留了下来，日志不再随
-#  容器销毁而消失 —— 这是好事，但意味着日志会一直长下去，而且是静默地长。
-#  journald 的编译默认值是「所在文件系统的 10%」，data/ 挂在几 TB 存储池上
-#  时，这个默认值等于没有上限。
-#
-#  两个配置的源都放在 /baota/conf/log/（镜像内，不在任何持久化目录里），
-#  和启动器、面板补丁同一个套路：镜像里直接写 /etc 会被用户的旧数据屏蔽。
-#
-#  更新策略刻意不同：
-#    journald  每次比对后重放 —— 它是纯基础设施配置。镜像落盘名为
-#              /etc/systemd/journald.conf.d/baota-size.conf（不带数字前缀）。
-#              systemd 按文件名排序加载、排后面的覆盖同名键；用户想覆盖请另建
-#              一个排在 baota-size.conf 之后的 drop-in（如 zz-my.conf）——
-#              注意别用数字或大写字母开头，它们排在字母 b 之前，会被本文件盖掉
-#    logrotate 仅在缺失时生成 —— 直接改这个文件是用户的正当权利，不该被冲掉
-#
-#  两者都用 cmp 先比对，内容一致就不写，避免无谓的持久化层写入
-# ==============================================================================
-setup_log_limits() {
-    local src=/baota/conf
-    [ -d "${src}" ] || { warn "未找到 ${src}，跳过日志体积防线配置"; return 0; }
-
-    # ① journald 体积上限
-    local jtgt=/etc/systemd/journald.conf.d/baota-size.conf
-    if [ -f "${src}/log/journald.conf" ]; then
-        if ! cmp -s "${src}/log/journald.conf" "${jtgt}" 2> /dev/null; then
-            mkdir -p /etc/systemd/journald.conf.d 2> /dev/null
-            if cp -f "${src}/log/journald.conf" "${jtgt}" 2> /dev/null; then
-                log "已写入 journald 体积上限：${jtgt}（总占用 ≤200M / 保留 7 天）"
-            else
-                warn '写入 journald 配置失败：日志将退回 systemd 默认值（所在文件系统的 10%）'
-                warn '   大盘上这等于没有上限，请检查 /etc/systemd/journald.conf.d 是否可写'
-            fi
-        fi
-    fi
-
-    # ② 面板 / 站点日志轮转
-    local ltgt=/etc/logrotate.d/baota-panel
-    if [ -f "${src}/log/logrotate.conf" ] && [ ! -f "${ltgt}" ]; then
-        if cp "${src}/log/logrotate.conf" "${ltgt}" 2> /dev/null; then
-            chmod 0644 "${ltgt}" 2> /dev/null || true
-            log "已生成日志轮转配置：${ltgt}（面板 7 份 / 站点 14 份）"
-        else
-            warn '生成 logrotate 配置失败：面板与站点日志不会自动轮转，会一直增长'
-        fi
-    fi
-}
 
 # ==============================================================================
 #  首次启动初始化：端口、安全入口、账号
@@ -458,7 +408,6 @@ main() {
     prepare_runtime_dirs
     refresh_consistency
     version_guard
-    setup_log_limits
     init_first_boot
     archive_boot_report
     print_summary

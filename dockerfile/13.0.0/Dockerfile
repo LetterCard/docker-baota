@@ -76,8 +76,6 @@ RUN bash /opt/baota/build/panel.sh
 COPY shared/scripts/healthcheck.sh /baota/healthcheck.sh
 COPY shared/scripts/backup.sh      /baota/backup.sh
 COPY shared/conf/defaults.env      /baota/defaults.env
-# 日志体积防线的配置源，运行期由 entrypoint 重放到 /etc
-COPY shared/conf/log/ /baota/conf/log/
 COPY shared/conf/btpanel.service   /etc/systemd/system/btpanel.service
 COPY shared/scripts/init.sh /baota/init.sh
 COPY shared/scripts/entrypoint.sh  /baota/entrypoint.sh

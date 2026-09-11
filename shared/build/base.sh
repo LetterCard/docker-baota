@@ -100,7 +100,7 @@ install_packages() {
     apt-get install -y --no-install-recommends \
         locales tzdata ca-certificates \
         systemd systemd-sysv dbus dbus-user-session \
-        cron logrotate rsyslog \
+        cron rsyslog \
         openssh-server \
         procps psmisc lsof htop \
         net-tools iproute2 iputils-ping dnsutils \

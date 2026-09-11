@@ -16,7 +16,6 @@
 #    /baota/healthcheck.sh     健康检查入口
 #    /baota/backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 #    /baota/defaults.env       运行期配置真源
-#    /baota/conf/log/          日志体积防线的配置源
 #    /baota/init.sh     阶段 0
 #    /baota/entrypoint.sh      阶段 1
 #    /etc/systemd/system/btpanel.service

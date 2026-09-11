@@ -74,9 +74,8 @@ NAME_PREFIX='baota-backup'
 #                       不排除的话，同步目标会被下一次全量备份装进去，同样自包含
 #   system/var/log/journal  journald 的运行时日志（system.journal / user-*.journal）。
 #                       三重理由都必须排除：
-#                         1) 它由 systemd 自己管理，镜像里已限到「总占用 ≤200M、
-#                            保留 7 天」（journald.conf.d/baota-size.conf），
-#                            恢复后 journald 自动重建，不是需要保留的用户数据；
+#                         1) 它由 systemd 自己管理，恢复后 journald 自动重建，
+#                            不是需要保留的用户数据；
 #                         2) 它是打包期间写入最活跃的文件 —— 「file changed as
 #                            we read it」几乎都出自这里；
 #                         3) 体积不小却零恢复价值，白拖慢备份
