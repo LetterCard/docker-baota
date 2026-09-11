@@ -56,13 +56,13 @@ allowed-tools: Read,Bash,Grep,Glob
    函数内「局部变量」用下划线前缀 `_dir` / `_upper` / `_work` —— 不加前缀会覆盖调用方的循环变量。
 7. **清理必须写在产生垃圾的那一层内**。Docker 分层特性下，后续 `RUN` 删前面层的文件不减小体积。
 8. **CI 回写仓库时，`git rebase` 必须在「生成 / 修改任何文件」之前完成**。
-   `report.md` / `README.md` 一旦处于 modified，`git rebase` 会因 dirty tree 中止，
+   `.github/reports/report.md` / `README.md` 一旦处于 modified，`git rebase` 会因 dirty tree 中止，
    导致回写步骤整体失败 —— 表现为「日志显示成功但文件没变」。
    正确顺序：checkout → rebase（clean）→ 生成文件 → 注入 → add → commit。
 9. **工作流 job 的 `name` 不能含 `${{ }}` 动态表达式**。Actions 在表达式未求值时
    会 fallback 成英文 job key（`verify-v12`），看不出在跑什么。
    版本号放**步骤名**里，job 名用静态中文。
-10. **`report.md` / `drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
+10. **`.github/reports/report.md` / `.github/reports/drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
     不要手改 —— 下次巡检运行会被整体覆盖。
 11. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
     本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
@@ -85,7 +85,7 @@ allowed-tools: Read,Bash,Grep,Glob
 | `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑同一套 20 项 |
 | `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
-| `.github/scripts/report.py` | 把报告（report.md / drift.md）注入 README 对应标记区 |
+| `.github/scripts/report.py` | 把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区 |
 | `.github/workflows/check.yml` | 每日巡检工作流：prep → 两通道**并行**验证 → collect 回写 |
 | `.github/workflows/drift.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
 | `.github/dependabot.yml` | 每周升级 Actions 版本（只开 PR，不自动合并） |
@@ -132,7 +132,7 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
 不存在「持久层里的旧面板代码覆盖新镜像」的情况。在面板里点「更新」的写入只落在容器可写层，
 restart 不消失、销毁重建后即还原为镜像版本。想换面板版本：直接换镜像标签，无需 `reset-panel`（已废弃）。
 
-**每日巡检失败或 report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
+**每日巡检失败或 .github/reports/report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
 
 - 有 diff 却没提交 → 回写步骤挂了，多半是 `git rebase` 因 dirty tree 中止（红线 8）
 - 打印「报告内容无变化，跳过提交」 → 内容确实一致（时间戳每次不同，正常不会命中）

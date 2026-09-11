@@ -2,7 +2,7 @@
 """把报告注入 README 的标记区。
 
 用法：report.py [报告路径] [标记名]
-默认读取仓库根的 report.md，注入 DAILY-VERIFY-REPORT 标记区。
+默认读取 .github/reports/report.md，注入 DAILY-VERIFY-REPORT 标记区。
 标记名决定 START/END 注释：<!-- 标记名:START --> / <!-- 标记名:END -->。
 报告首行若是 H1，则降级为 H3，避免 README 出现两个一级标题；验证报告与
 漂移报告各自嵌在不同的 H2 章节下，互不冲突。CI 与本地复用同一份逻辑。
@@ -15,7 +15,7 @@ import pathlib
 def main() -> int:
     root = pathlib.Path(".")
     readme_path = root / "README.md"
-    report_path = root / (sys.argv[1] if len(sys.argv) > 1 else "report.md")
+    report_path = root / (sys.argv[1] if len(sys.argv) > 1 else ".github/reports/report.md")
     marker = sys.argv[2] if len(sys.argv) > 2 else "DAILY-VERIFY-REPORT"
     START = f"<!-- {marker}:START -->"
     END = f"<!-- {marker}:END -->"

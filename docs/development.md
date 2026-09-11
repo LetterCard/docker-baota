@@ -8,7 +8,7 @@ baota-docker/
 ├── CHANGELOG.md               变更记录
 ├── LICENSE                    MIT
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
-├── .github/reports/report.md                  每日巡检报告（CI 生成并回写，不要手改）
+├── .github/reports/report.md                              每日巡检报告（CI 生成并回写，不要手改）
 ├── .github/reports/drift.md                   漂移检测报告（CI 生成并回写，不要手改）
 │
 ├── docs/                      使用文档（本目录）
@@ -49,7 +49,7 @@ baota-docker/
 └── .github/
     ├── dependabot.yml             每周检查并升级 Actions 版本（只开 PR，不自动合并）
     ├── scripts/
-    │   ├── report.py       把报告（report.md / drift.md）注入 README 对应标记区
+    │   ├── report.py       把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
     │   ├── check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
     │   └── drift/           漂移检测脚本（目录漂移）
     └── workflows/                 两个通道的构建发布 + 每日巡检 + 漂移检测工作流

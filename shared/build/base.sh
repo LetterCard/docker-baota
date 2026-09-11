@@ -66,22 +66,29 @@ path-include=/usr/share/locale/locale.alias
 EOF
 
     # 统一为经典 sources.list：宝塔安装脚本对它的解析 / 换源兼容性最好（不认 DEB822）
+    write_sources "${APT_MIRROR}"
+
+    # 镜像站兜底（update 阶段）：默认用 APT_MIRROR；update 不可用时换备用镜像
+    # 重写源再试一次。单一镜像站抖动会让整条构建失败，且表现是「莫名其妙的
+    # 构建挂」，排查成本高
+    if ! apt-get update -y; then
+        warn "apt-get update 失败（镜像站 ${APT_MIRROR} 可能不可用），切备用镜像 ${APT_MIRROR_FALLBACK} 重试"
+        write_sources "${APT_MIRROR_FALLBACK}"
+        apt-get update -y
+    fi
+}
+
+# 用指定镜像站主机名写经典 sources.list（覆盖式，方便兜底时整体重写）
+write_sources() {
+    local mirror="$1"
     # shellcheck disable=SC1091
     . /etc/os-release
     rm -f /etc/apt/sources.list.d/debian.sources
-    # shellcheck disable=SC2154  # VERSION_CODENAME 来自上面 source 的 /etc/os-release，shellcheck 追踪不到
+    # shellcheck disable=SC2154  # VERSION_CODENAME 来自上面 source 的 /etc/os-release
     printf 'deb http://%s/debian %s main contrib non-free\ndeb http://%s/debian %s-updates main contrib non-free\ndeb http://%s/debian-security %s-security main contrib non-free\n' \
-        "${APT_MIRROR}" "${VERSION_CODENAME}" \
-        "${APT_MIRROR}" "${VERSION_CODENAME}" \
-        "${APT_MIRROR}" "${VERSION_CODENAME}" > /etc/apt/sources.list
-
-    # 镜像站兜底：默认用 APT_MIRROR；它不可用时换备用镜像重写源再试一次。
-    # 单一镜像站抖动会让整条构建失败，且表现是「莫名其妙的构建挂」，排查成本高
-    if ! apt-get update -y; then
-        warn "apt-get update 失败（镜像站 ${APT_MIRROR} 可能不可用），切备用镜像 ${APT_MIRROR_FALLBACK} 重试"
-        sed -i "s#${APT_MIRROR}#${APT_MIRROR_FALLBACK}#g" /etc/apt/sources.list
-        apt-get update -y
-    fi
+        "${mirror}" "${VERSION_CODENAME}" \
+        "${mirror}" "${VERSION_CODENAME}" \
+        "${mirror}" "${VERSION_CODENAME}" > /etc/apt/sources.list
 }
 
 install_packages() {
@@ -97,26 +104,38 @@ install_packages() {
     # libtool 是 Debian 的拆分包：libtool 只提供 libtoolize（phpize 链路用），
     # 命令本体 /usr/bin/libtool 在 libtool-bin 里 —— 漏装它，A14 的
     # 「command -v libtool」护栏会在发布前把整条流水线拦下（已实测踩过）。
-    apt-get install -y --no-install-recommends \
-        locales tzdata ca-certificates \
-        systemd systemd-sysv dbus dbus-user-session \
-        cron rsyslog \
-        openssh-server \
-        procps psmisc lsof htop \
-        net-tools iproute2 iputils-ping dnsutils \
-        curl wget \
-        tar xz-utils zip unzip gzip bzip2 rsync \
-        lsb-release sudo \
-        busybox-static \
-        vim-tiny less file \
-        autoconf automake libtool libtool-bin bison re2c cmake m4 flex gawk cpp binutils \
-        diffutils gettext patch git build-essential make gcc g++ libc6-dev \
-        libzip-dev libssl-dev libonig-dev libsodium-dev libssh2-1-dev libc-ares-dev \
-        libaio-dev libevent-dev libsasl2-dev libltdl-dev zlib1g-dev libglib2.0-0 \
-        libglib2.0-dev libkrb5-dev libpq-dev libpq5 libcap-dev libxslt1-dev \
-        libncurses-dev libbz2-dev libgd-dev libgd3 libwebp-dev libvpx-dev \
-        libfreetype6-dev libjpeg62-turbo libjpeg62-turbo-dev libudev-dev \
+    # 包列表收进数组，安装与兜底重试共用一份，避免两处不同步。
+    # 先尝试主镜像；若安装阶段失败（镜像站对 pool 限流 / 返回 403 等 —— 此时
+    # update 阶段索引可正常拉取，兜底不会在 update 阶段触发），自动切备用镜像
+    # 重写源并重试一次，避免「索引能拉、.deb 下载被拒」这类单点故障拖垮整条构建
+    local pkgs=(
+        locales tzdata ca-certificates
+        systemd systemd-sysv dbus dbus-user-session
+        cron rsyslog
+        openssh-server
+        procps psmisc lsof htop
+        net-tools iproute2 iputils-ping dnsutils
+        curl wget
+        tar xz-utils zip unzip gzip bzip2 rsync
+        lsb-release sudo
+        busybox-static
+        vim-tiny less file
+        autoconf automake libtool libtool-bin bison re2c cmake m4 flex gawk cpp binutils
+        diffutils gettext patch git build-essential make gcc g++ libc6-dev
+        libzip-dev libssl-dev libonig-dev libsodium-dev libssh2-1-dev libc-ares-dev
+        libaio-dev libevent-dev libsasl2-dev libltdl-dev zlib1g-dev libglib2.0-0
+        libglib2.0-dev libkrb5-dev libpq-dev libpq5 libcap-dev libxslt1-dev
+        libncurses-dev libbz2-dev libgd-dev libgd3 libwebp-dev libvpx-dev
+        libfreetype6-dev libjpeg62-turbo libjpeg62-turbo-dev libudev-dev
         libldap2-dev libxml2-dev libcurl4-openssl-dev
+    )
+
+    if ! apt-get install -y --no-install-recommends "${pkgs[@]}"; then
+        warn "基础软件包安装失败（镜像站 ${APT_MIRROR} 可能 pool 不可达 / 被限流），切备用镜像 ${APT_MIRROR_FALLBACK} 重试"
+        write_sources "${APT_MIRROR_FALLBACK}"
+        apt-get update -y
+        apt-get install -y --no-install-recommends "${pkgs[@]}"
+    fi
 
     sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
     locale-gen en_US.UTF-8
