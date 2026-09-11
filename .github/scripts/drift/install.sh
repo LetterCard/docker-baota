@@ -2,10 +2,8 @@
 # ==============================================================================
 #  [漂移检测] 在一次性容器中原样执行官方安装脚本，检测会破坏持久化的上游变更：
 #
-#   目录漂移：安装产生的文件是否仍只落在已知的持久化目录集合内。
+#   目录漂移：安装产生的文件是否仍只落在已知的 overlay 持久化目录集合内。
 #    落到集合之外 = 那部分数据不会被持久化（静默丢数据）。
-#    「按设计不持久化」的目录（`/www`：面板代码与自带组件，换镜像即整体重建）
-#    单独标注、不计入关键漂移 —— 否则每次安装都会命中一次，门禁变成常亮的红灯。
 #
 #  为什么只检测这一项：本项目的核心保证是「销毁容器重建后数据不丢」，而数据
 #  落点就是唯一会影响这条保证的上游行为。曾经还检测「面板升级入口」与「代码级
@@ -33,16 +31,10 @@ OUT_MD="${OUT_MD:-drift.md}"
 CRIT_FILE="${CRIT_FILE:-drift-critical}"
 
 # 已知 overlay 持久化目录集合（真源是 shared/conf/defaults.env 的
-# PERSIST_SYSTEM_DIRS）
+# PERSIST_SYSTEM_DIRS）。这里刻意不含 www：面板 /www 已改为按子目录 bind，
+# 不再整层 overlay —— 把 www 算进来，会让写到 /www/server/php、/www/server/mysql
+# 的内容被误判成「已被持久化覆盖」，把真正的静默丢数据判成绿
 KNOWNS='etc usr var root opt home srv'
-
-# 按设计就不持久化的顶层目录：安装脚本必然往 /www 铺面板代码与自带组件，而按
-# 「不可变面板」的约定，这些内容换镜像即整体重建 —— 不是用户数据，也不构成漂移。
-# 用户数据在 /www 的持久化子目录（wwwroot / backup / server/data）里，由
-# WWW_DATA_SUBDIRS 声明、init.sh 逐个 bind，跟这一层判断无关。
-# 为什么必须单列：不单列的话每次安装都会命中一次「未覆盖」→ 常驻 critical，
-# 门禁退化成永远红的信号，等于没有信号（这个工具就白留了）
-BY_DESIGN='www'
 
 INSTALL_LOG=/tmp/btpanel-install.log
 
@@ -56,10 +48,10 @@ die()  { echo "❌ [drift][ERROR] $*" >&2; exit 1; }
 cleanup() { docker rm -f "$CNAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-in_list() {
-    local d="$1" list="$2" k
+in_knowns() {
+    local d="$1" k
     # shellcheck disable=SC2086
-    for k in $list; do [ "$k" = "$d" ] && return 0; done
+    for k in $KNOWNS; do [ "$k" = "$d" ] && return 0; done
     return 1
 }
 
@@ -148,10 +140,8 @@ for d in $DIRS; do
     a="${AFTER_MAP[$d]:-0}"
     delta=$(( a - b ))
     [ "$delta" -gt 0 ] || continue
-    if in_list "$d" "$KNOWNS"; then
+    if in_knowns "$d"; then
         printf '| `/%s` | %s | %s | %s | ✅ 已被持久化覆盖 |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
-    elif in_list "$d" "$BY_DESIGN"; then
-        printf '| `/%s` | %s | %s | %s | ℹ️ 按设计不持久化（面板代码 / 组件，换镜像即重建） |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
     else
         printf '| `/%s` | %s | %s | %s | ❌ **未覆盖，会静默丢数据** |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
         warn "未覆盖的写入目录：/${d}（新增 ${delta} 个文件）"
@@ -167,7 +157,7 @@ done
     echo '### 结论'
     echo
     if [ "$CRIT" -eq 0 ]; then
-        echo '✅ 未检测到会破坏持久化的上游变更（写入只落在持久化目录与「按设计不持久化」的目录上）。'
+        echo '✅ 未检测到会破坏持久化的上游变更（数据仍全部落在持久化目录内）。'
     else
         echo '❌ 检测到关键漂移，需人工介入（详见上文）。'
     fi
