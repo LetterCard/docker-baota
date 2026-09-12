@@ -259,7 +259,7 @@ docker compose logs baota
 
 > 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-09-11 21:09:38
+- 生成时间（UTC）：2026-09-12 20:48:28
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）
 - 验证脚本：`.github/scripts/check/published.sh`
@@ -282,7 +282,7 @@ docker compose logs baota
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ❌ 通过 0 / 失败 1 |
-| 耗时 | 2s |
+| 耗时 | 1s |
 
 #### 测试项
 
@@ -305,7 +305,7 @@ docker compose logs baota
 | 镜像 | `bugseeker/baota:13.0.0` |
 | 期望宝塔版本 | `13.0.0` |
 | 结果 | ❌ 通过 0 / 失败 1 |
-| 耗时 | 0s |
+| 耗时 | 1s |
 
 #### 测试项
 
