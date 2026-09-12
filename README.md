@@ -334,7 +334,7 @@ docker compose logs baota
 
 > 本文件由 `.github/workflows/drift.yml` 自动生成，每次运行整体覆盖。
 
-- 生成时间（UTC）：2026-09-11 05:33:15
+- 生成时间（UTC）：2026-09-12 05:19:33
 - 触发方式：schedule
 - 12.0.0 版本：12.0.0
 - 13.0.0 版本：13.0.0
