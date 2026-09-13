@@ -106,8 +106,9 @@ for _e in ${EXCLUDES}; do
     tar_ex+=( "--exclude=./${_e}" )
 done
 
-# 优先 rsync：按 大小+mtime 跳过没变过的文件，只把被动过的文件写回去
-# （镜像副本是硬链接，"没变过的文件"占绝大多数 → 几乎不产生可写层写入）
+# 优先 rsync：按 大小+mtime 跳过没变过的文件，只把被动过的文件写回去。
+# 副本是构建期用 tar 复制的（mtime 与镜像层文件一致），所以"没变过的文件"
+# 会被跳过 → 常态几乎不产生可写层写入，只有被更新动过的那几个文件回到镜像版本
 if command -v rsync > /dev/null 2>&1; then
     rsync -a --no-motd "${rsync_ex[@]}" "${MIRROR_DIR}/" "${PANEL_DIR}/" > /dev/null 2>&1
     rc=$?

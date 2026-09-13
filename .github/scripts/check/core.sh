@@ -429,7 +429,7 @@ pass "扩展编译工具链齐备（autoconf/gcc/make/libtool），足以支撑 
 step "A15) 不可变面板守卫（解释器包装 + 镜像代码副本）"
 # 原理见 image/scripts/guard.sh 头部注释：面板代码的每一次执行都先过守卫，
 # 于是面板内「更新」写进来的新代码永远不会被执行，init_db 只由镜像版本代码执行，
-# 持久层的库不可能「比代码新」。这里验装配在位、副本是真硬链接、守卫行为正确。
+# 持久层的库不可能「比代码新」。这里验装配在位、副本完整且体积可控、守卫行为正确。
 inside test -x /baota/shim || fail "缺少 /baota/shim（解释器包装）"
 inside test -x /baota/guard.sh || fail "缺少 /baota/guard.sh（执行入口守卫）"
 for _p in python python3; do
@@ -442,12 +442,12 @@ inside test -x /www/server/panel/pyenv/bin/python-real \
 inside test -s /baota/origin/class/common.py \
     || fail "缺少镜像代码副本 /baota/origin/class/common.py"
 
-# 硬链接必须真的生效：副本与原文件同 inode。构建工具若把硬链接展开成两份，
-# 镜像体积会凭空翻倍 —— 这种回归必须在这里拦住，而不是等用户拉镜像时才发现
-_inode_panel=$(inside_sh 'stat -c %i /www/server/panel/class/common.py')
-_inode_mirror=$(inside_sh 'stat -c %i /baota/origin/class/common.py')
-[ -n "${_inode_panel}" ] && [ "${_inode_panel}" = "${_inode_mirror}" ] \
-    || fail "镜像代码副本不是硬链接（inode ${_inode_panel:-无} vs ${_inode_mirror:-无}），镜像体积会翻倍"
+# 副本是实体拷贝（跨构建层给不出硬链接，见 services.sh 注释），所以这里守的是
+# 「别把体积大头也抄进来」：pyenv 必须排除，否则镜像体积白白涨几百 MB
+if inside test -d /baota/origin/pyenv; then
+    fail "镜像代码副本里包含 pyenv（应排除）：镜像会白白多出几百 MB"
+fi
+pass "镜像代码副本不含 pyenv（体积 $(inside_sh 'du -sh /baota/origin 2>/dev/null | cut -f1' || echo 未知)）"
 
 # 行为断言：模拟「面板内更新」改写代码版本 + 往持久化的状态目录里写用户数据，
 # 然后随便跑一次 pyenv python —— 守卫应把代码换回镜像版本，但不能碰状态目录
@@ -461,7 +461,7 @@ inside_sh "grep -q '${EXPECT_VERSION}' /www/server/panel/class/common.py" \
 # 持久化目录，用户数据被静默回退 —— 这条断言专门盯它
 inside_sh 'grep -q user-data /www/server/panel/data/_guard_probe' \
     || fail "守卫恢复了状态目录（排除项失效，用户数据会被镜像初始数据覆盖）"
-pass "守卫在位：包装生效、副本为硬链接、代码被换回 ${EXPECT_VERSION}、状态目录未被碰"
+pass "守卫在位：包装生效、副本完整、代码被换回 ${EXPECT_VERSION}、状态目录未被碰"
 
 # A 阶段末（容器已完整跑过一轮）做一次面板状态漂移报告
 report_panel_state_drift

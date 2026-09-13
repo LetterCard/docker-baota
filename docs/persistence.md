@@ -144,7 +144,8 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 ```
 构建期
-  /baota/origin   = 面板目录的硬链接副本（cp -al；内容只存一份，不增加拉取体积）
+  /baota/origin   = 面板目录的实体副本（排除 pyenv，约几十 MB —— 跨构建层给不出
+                    硬链接，见 image/build/services.sh 的注释）
   pyenv/bin/python-real = 真解释器
   pyenv/bin/python{,3}  → /baota/shim（符号链接）
 

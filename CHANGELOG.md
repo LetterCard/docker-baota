@@ -19,8 +19,8 @@
 
 新机制**不拦截写入，只拦截执行**（`image/scripts/guard.sh` + `shim`）：
 
-- 构建期（`image/build/services.sh` 的 `setup_guard`）：生成面板目录的**硬链接副本**
-  `/baota/origin`（内容只存一份，不增加拉取体积）；`pyenv/bin/python-real` 保留真解释器，
+- 构建期（`image/build/services.sh` 的 `setup_guard`）：生成面板目录的**实体副本**
+  `/baota/origin`（排除 `pyenv` —— 面板更新不会碰它，且它是体积大头）；`pyenv/bin/python-real` 保留真解释器，
   `pyenv/bin/{python,python3}` 指向 `/baota/shim`；
 - 运行期：面板代码的每一次执行都先过守卫 —— 代码版本与镜像一致就直接放行（常态零开销、
   零写入）；不一致/读不到就用副本换回镜像版本（rsync，缺则 tar 回退），**新代码从未被执行**。
@@ -81,6 +81,12 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
   [docs/history.md](docs/history.md)
 
 ### 🧩 其它
+
+- **修复：镜像代码副本改用实体拷贝**。原设计用 `cp -al` 做硬链接副本（指望体积零增量），
+  但面板目录位于**更早的构建层**，overlayfs 下跨层 `link` 只会退化成复制 ——
+  构建+加载后两处 inode 不同（发布门禁 A15 实测抓到：`inode … vs …`）。
+  现在改成 `tar` 实体拷贝并**排除 `pyenv`**（面板更新不会碰它，且它是体积大头），
+  A15 相应改为断言「副本完整且不含 pyenv」，并把副本体积打进日志
 
 - **检测脚本按「本项目真实需要」重排**：`published.sh` 不再复刻 core / degrade /
   upgrade 已覆盖的场景（落盘、重建、版本护栏、只读降级、备份结构、守卫），

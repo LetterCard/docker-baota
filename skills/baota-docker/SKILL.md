@@ -68,7 +68,7 @@ description: "Development and operations guide for this repo (baota-docker: 把�
     本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
 12. **面板代码的执行入口只有一个：pyenv 解释器**。`services.sh` 的 `setup_guard`
     把 `pyenv/bin/{python,python3}` 指向 `/baota/shim`，真解释器挪到
-    `python-real`，并生成 `/baota/origin` 硬链接副本。改这块时三条铁律：
+    `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。改这块时三条铁律：
     包装必须 **fail-open**、恢复必须 **只覆盖不删除**、exec 真解释器必须用
     **venv 内的路径**（用解析后的 `/usr/bin/python3.x` 会丢 venv，面板起不来）。
 

@@ -68,7 +68,7 @@ baota-docker/
   旧版放 `/opt/baota`，而 `/opt` 是持久化目录——还原备份时旧脚本副本会反过来屏蔽新镜像
 - **面板代码的执行入口只有一个**：pyenv 解释器。`image/build/services.sh` 的
   `setup_guard` 把 `pyenv/bin/{python,python3}` 指向 `/baota/shim`、
-  真解释器挪到 `python-real`，并生成 `/baota/origin` 硬链接副本。
+  真解释器挪到 `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。
   改这块前先读 `image/scripts/guard.sh` 的头部注释：包装必须 fail-open、
   恢复必须「只覆盖不删除」、执行真解释器必须用 **venv 内的路径**（用解析后的
   `/usr/bin/python3.x` 会丢 venv）
@@ -123,7 +123,7 @@ baota-docker/
 | 面板状态 | `/data/panel` 下 bind 直通的面板自身状态（`data plugin vhost ssl config`） |
 | 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
 | 守卫 / 垫片 | `guard.sh`（执行入口守卫）与 `shim`（pyenv 解释器包装） |
-| 镜像副本 | `/baota/origin`：构建期生成的硬链接副本，守卫用它把代码换回镜像版本 |
+| 镜像副本 | `/baota/origin`：构建期生成的实体副本（排除 pyenv），守卫用它把代码换回镜像版本 |
 
 ## 漂移检测
 
@@ -173,7 +173,7 @@ baota-docker/
 面板代码来自镜像层、不持久化，且**面板内更新不会生效**：
 
 - 面板代码的每一次执行都先过执行入口守卫（`image/scripts/guard.sh`），
-  发现代码版本与镜像不一致就用镜像里的硬链接副本换回去 —— 不做只读挂载、
+  发现代码版本与镜像不一致就用镜像里的副本换回去 —— 不做只读挂载、
   也不跟踪上游脚本名与执行路径，因此不存在「禁用更新补丁」那套维护；
 - 由此得到的性质：面板的 `init_db` 永远由镜像版本代码执行，持久层的库不可能
   「比代码新」（否则会出现「库被新版迁移、代码又回退」的降级组合）；
@@ -278,7 +278,7 @@ systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
 面板与任务双进程 / 安全入口 / 版本号 / 首启随机凭据 / 写入落盘 / 开机自启 /
 **并发锁（同卷第二实例必须被拦下）** / 防火墙关闭 / SSH 与 bt 命令 / 备份工具 /
 A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make / libtool，不装 PHP）/
-A15 不可变面板守卫（解释器包装 + 硬链接镜像副本 + 改写代码后能否换回镜像版本）
+A15 不可变面板守卫（解释器包装 + 镜像副本完整且不含 pyenv + 改写代码后能否换回镜像版本）
 
 > A14 只做工具链的零网络存在性断言，不临时安装 PHP；真正的
 > 「装 PHP + 编译扩展」端到端测试在日巡检 `published.sh` 里跑

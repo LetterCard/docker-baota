@@ -130,9 +130,13 @@ install_runtime_files() {
 #  背景与原理见 image/scripts/guard.sh 的头部注释，这里只做装配：
 #    1) pyenv/bin/python-real = 真解释器；python / python3 = 指向
 #       /baota/shim 的符号链接（面板的每一次 python 执行都会先过守卫）
-#    2) /baota/origin = 面板目录的硬链接副本（cp -al）：内容在镜像层里
-#       只存一份（不增加拉取体积），运行期对面板目录的写入被 overlay copy-up
-#       隔离，副本始终保持镜像状态，作为「换回镜像版本」的来源
+#    2) /baota/origin = 面板目录的实体副本（排除 pyenv），作为「换回镜像版本」
+#       的来源。运行期对面板目录的写入会被 overlay copy-up 隔离在容器层，
+#       副本始终保持镜像状态
+#       ★ 为什么不是 cp -al 硬链接：面板目录在更早的构建层里，overlayfs 下
+#         跨层 link 只会退化成复制 —— 硬链接给不出「体积零增量」，CI 实测
+#         inode 不同（core.sh A15 就是这条断言）。所以直接做实体副本，
+#         并排除 pyenv（面板更新从不碰它，且它是面板目录的体积大头）
 #
 #  装配失败不阻断构建：上游若改掉 pyenv 布局，守卫只是失效，面板仍按上游默认
 #  行为运行；这种情况由发布门禁 core.sh 的守卫检查（A15）拦下，不会静默上线
@@ -165,19 +169,24 @@ setup_guard() {
     ln -sfn "${BAOTA_DIR}/shim" "${PANEL_DIR}/pyenv/bin/python3"
 
     # 镜像代码副本。必须在解释器包装完成之后生成：副本里包含包装后的布局，
-    # 守卫恢复后 pyenv 依然是「python → wrapper」的形态
+    # 守卫恢复后 pyenv 依然是「shim → 真解释器」的形态。
+    # 用 tar 而不是 cp -a：需要一条命令同时表达「复制内容」与「排除 pyenv」
     rm -rf "${BAOTA_DIR}/origin"
-    cp -al "${PANEL_DIR}" "${BAOTA_DIR}/origin"
+    mkdir -p "${BAOTA_DIR}/origin"
+    tar -C "${PANEL_DIR}" --exclude=./pyenv -cf - . \
+        | tar -C "${BAOTA_DIR}/origin" -xf -
 
     # 自检（失败只告警：坏镜像由发布门禁拦下，不在构建期制造假成功）
     test -x "${PANEL_DIR}/pyenv/bin/python-real" \
         || warn 'python-real 缺失，守卫将在解释器回退路径下工作'
     test -s "${BAOTA_DIR}/origin/class/common.py" \
         || warn "镜像代码副本不完整：${BAOTA_DIR}/origin/class/common.py 缺失"
+    [ ! -d "${BAOTA_DIR}/origin/pyenv" ] \
+        || warn '镜像代码副本里出现了 pyenv（会让镜像白白变大，应被排除）'
     [ "$(readlink "${PANEL_DIR}/pyenv/bin/python3")" = "${BAOTA_DIR}/shim" ] \
         || warn 'pyenv/bin/python3 未指向 shim，守卫不会生效'
 
-    log "守卫已装配（镜像版本 $(cat "${BAOTA_DIR}/VERSION" 2> /dev/null || echo unknown)）"
+    log "守卫已装配（镜像版本 $(cat "${BAOTA_DIR}/VERSION" 2> /dev/null || echo unknown)，副本 $(du -sh "${BAOTA_DIR}/origin" 2> /dev/null | cut -f1)）"
 }
 
 # ==============================================================================
