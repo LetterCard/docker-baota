@@ -25,3 +25,6 @@ data/
 
 # 本地测试残留
 .tmp-*
+
+# lint 自动下载的 shellcheck 二进制（版本钉死在 lint/shellcheck.sh）
+.cache/

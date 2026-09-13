@@ -167,14 +167,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	    sh -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- shellcheck ---'
-	@if command -v shellcheck >/dev/null 2>&1; then \
-	    shellcheck -x -S warning image/build/*.sh image/scripts/*.sh \
-	               .github/scripts/check/*.sh \
-	               .github/scripts/drift/*.sh \
-	        && echo '  shellcheck 通过'; \
-	 else \
-	    echo '  未安装 shellcheck，跳过（安装与排查见 docs/development.md「本地构建」）'; \
-	 fi
+	@bash .github/scripts/lint/shellcheck.sh
 	@echo '--- BT-Panel 字面量（非注释行）检查 ---'
 	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check 2>/dev/null \
 	      | grep -vE ':[0-9]+:[[:space:]]*#' || true); \
