@@ -134,7 +134,7 @@ jobs:
             line=$(jq -r '.line' <<< "${item}")
             channel=$(jq -r '.display' <<< "${item}")
             url=$(jq -r '.url' <<< "${item}")
-            echo "▶️ 检测 ${line}（${display}）：${url}"
+            echo "▶️ 检测 ${line}（${channel}）：${url}"
             INSTALL_URL="${url}" BASE_IMAGE="${BASE_IMAGE}" \
             OUT_MD="/tmp/uw/${line}.md" CRITICAL_FILE="/tmp/uw/${line}.critical" \
               bash .github/scripts/drift/install.sh \
@@ -173,7 +173,7 @@ jobs:
                 channel=$(jq -r '.display' <<< "${item}")
                 echo '---'
                 echo
-                echo "## ${display}（\`${line}\`）"
+                echo "## ${channel}（\`${line}\`）"
                 echo
                 if [ -f "/tmp/uw/${line}.md" ]; then
                   cat "/tmp/uw/${line}.md"
