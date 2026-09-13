@@ -3,19 +3,15 @@ name: 📦 发布：构建并发布镜像
 # ==============================================================================
 #  📦 各条线共用这一份流水线（当前：12_version / 13_version）
 #
-#  线的差异只有一处来源：image/channels.conf（安装脚本地址、探测方式、
-#  标签策略、基础镜像都在那张表里，成对排列）。本文件里**不写**任何
-#  「if 是 13 就…」式的判断 —— 唯一的分支是「读表里的 probe 字段」。
-#  新增一条线（14/15/…）= 往表里加一行，不是改这里。
+#  线的差异只有一处来源：image/lines.conf。本文件里**不写**任何「if 是 13 就…」
+#  式的判断 —— 唯一分支是「读表里的 probe 字段」；新增一条线 = 往表里加一行。
 #
 #  流程（每条线独立、互不阻塞）：
-#    prep     读声明表 → 探测上游版本（banner / api）→ 与 VERSION 文件比对
-#             → 生成「需要构建的线 × 架构」矩阵
-#    lint     shellcheck + 语法 + 配置真源一致性（与版本无关，无条件运行）
-#    build    amd64 / arm64 各自在原生 runner 上构建 → 三套发布前检查
-#             → 通过后才按 digest 推送（坏镜像不可能进入 registry）
-#    publish  合并两架构 digest → 按标签策略打 repo:<版本>（标了 latest 的线再加 :latest）
-#    writeback 把已发布的版本号回写进该通道的 VERSION 文件
+#    prep        读声明表 → 探测上游版本 → 与 VERSION 比对 → 生成「线 × 架构」矩阵
+#    lint        静态检查（与版本无关，无条件运行）
+#    build       各架构在原生 runner 构建 → 三套发布前检查 → 通过才按 digest 推送
+#    publish     合并两架构 digest → 按标签策略打 repo:<版本>
+#    write_back  把已发布版本号回写进该线的 VERSION 文件
 #
 #  🔑 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
 # ==============================================================================
@@ -26,7 +22,7 @@ on:
   # 手动触发本工作流跑一次探测（探测到新版本才真正构建）。
   workflow_dispatch:
     inputs:
-      channel:
+      line:
         # 用自由文本而不是 choice：线是会不断加的（14_version、15_version…），
         # choice 的选项得手写死，迟早要改 ✗
         description: '构建哪条线（线标识，如 12_version / 13_version；all=全部）'
@@ -37,7 +33,7 @@ on:
         type: boolean
         default: false
       base_image:
-        description: '可选：覆盖基础镜像（例如 debian:13），留空用 channels.conf 的值'
+        description: '可选：覆盖基础镜像（例如 debian:13），留空用 lines.conf 的值'
         type: string
         default: ''
 
@@ -48,12 +44,12 @@ concurrency:
 
 env:
   IMAGE_NAME: baota
-  CHANNELS: image/channels.conf
+  LINES: image/lines.conf
   VERSION_API: https://www.bt.cn/api/panel/get_version
 
 jobs:
   # ---------------------------------------------------------------------------
-  #  1) 读通道声明表、探测上游版本、算出要构建的矩阵
+  #  1) 读线声明表、探测上游版本、算出要构建的矩阵
   # ---------------------------------------------------------------------------
   prep:
     name: 🔍 读声明表并探测上游版本
@@ -67,10 +63,10 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔍 解析通道并生成计划
+      - name: 🔍 解析线并生成计划
         id: plan
         env:
-          SELECT: ${{ inputs.channel }}
+          SELECT: ${{ inputs.line }}
           FORCE: ${{ inputs.force_update }}
           BASE_OVERRIDE: ${{ inputs.base_image }}
         run: |
@@ -81,13 +77,13 @@ jobs:
           pub='[]'
           plan_rows=''
 
-          while read -r line channel vfile url probe tag base; do
+          while read -r line display vfile url probe tag base; do
             [ -n "${line:-}" ] || continue
             if [ "${SELECT}" != 'all' ] && [ "${SELECT}" != "${line}" ]; then
               continue
             fi
 
-            [ -f "${vfile}" ] || { echo "::error::通道 ${line} 的版本文件不存在：${vfile}"; exit 1; }
+            [ -f "${vfile}" ] || { echo "::error::线 ${line} 的版本文件不存在：${vfile}"; exit 1; }
             cur=$(tr -d '[:space:]' < "${vfile}")
             printf '%s' "${cur}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
               || { echo "::error::${vfile} 不是 x.y.z 形态：${cur}"; exit 1; }
@@ -108,7 +104,7 @@ jobs:
                 fi
                 ;;
               *)
-                echo "::error::通道 ${line} 的 probe 字段非法：${probe}（应为 banner 或 api）"
+                echo "::error::线 ${line} 的 probe 字段非法：${probe}（应为 banner 或 api）"
                 exit 1
                 ;;
             esac
@@ -117,18 +113,18 @@ jobs:
             target="${cur}"
             changed=false
             if [ -z "${probe_out}" ]; then
-              echo "::warning::${channel} 探测上游版本失败，按 ${vfile}（${cur}）继续"
+              echo "::warning::${display} 探测上游版本失败，按 ${vfile}（${cur}）继续"
             elif [ "${probe_out}" = "${cur}" ]; then
-              echo "✅ ${channel} 已是最新（${cur}）"
+              echo "✅ ${display} 已是最新（${cur}）"
             else
               newer=$(printf '%s\n%s\n' "${cur}" "${probe_out}" | sort -V | tail -1)
               if [ "${newer}" = "${probe_out}" ]; then
                 target="${probe_out}"
                 changed=true
-                echo "::warning::${channel} 发现上游新版本：${cur} → ${probe_out}"
+                echo "::warning::${display} 发现上游新版本：${cur} → ${probe_out}"
               else
                 # 上游回滚或探测异常：绝不自动降级，VERSION 文件是比对基准
-                echo "::warning::${channel} 上游版本（${probe_out}）低于已发布版本（${cur}），不自动降级"
+                echo "::warning::${display} 上游版本（${probe_out}）低于已发布版本（${cur}），不自动降级"
               fi
             fi
             if [ "${FORCE}" = 'true' ]; then
@@ -141,14 +137,14 @@ jobs:
             fi
             case "${tag}" in
               exact | latest) ;;
-              *) echo "::error::通道 ${line} 的 tag 字段非法：${tag}（应为 exact 或 latest）"; exit 1 ;;
+              *) echo "::error::线 ${line} 的 tag 字段非法：${tag}（应为 exact 或 latest）"; exit 1 ;;
             esac
 
             # 回写：只有「本次要发布的版本 ≠ 仓库记录」时才需要
             if [ "${target}" = "${cur}" ]; then
-              writeback='无需（就是当前记录）'
+              write_back='无需（就是当前记录）'
             else
-              writeback="将回写 ${cur} → ${target}"
+              write_back="将回写 ${cur} → ${target}"
             fi
 
             if [ "${changed}" = 'true' ]; then
@@ -159,26 +155,26 @@ jobs:
                   runner='ubuntu-24.04-arm'
                 fi
                 build=$(jq -c \
-                  --arg line "${line}" --arg channel "${channel}" --arg version "${target}" \
+                  --arg line "${line}" --arg display "${display}" --arg version "${target}" \
                   --arg url "${url}" --arg base "${base_img}" \
                   --arg arch "${arch}" --arg runner "${runner}" \
-                  '. + [{line:$line, channel:$channel, version:$version, url:$url, base:$base, arch:$arch, runner:$runner}]' \
+                  '. + [{line:$line, display:$display, version:$version, url:$url, base:$base, arch:$arch, runner:$runner}]' \
                   <<< "${build}")
               done
               pub=$(jq -c \
-                --arg line "${line}" --arg channel "${channel}" --arg version "${target}" --arg tag "${tag}" \
-                '. + [{line:$line, channel:$channel, version:$version, tag:$tag}]' <<< "${pub}")
+                --arg line "${line}" --arg display "${display}" --arg version "${target}" --arg tag "${tag}" \
+                '. + [{line:$line, display:$display, version:$version, tag:$tag}]' <<< "${pub}")
             fi
 
-            plan_rows="${plan_rows}| ${line} | ${channel} | ${cur} | ${target} | ${changed} | ${writeback} |"$'\n'
+            plan_rows="${plan_rows}| ${line} | ${display} | ${cur} | ${target} | ${changed} | ${write_back} |"$'\n'
             {
               echo "v_${line}=${target}"
               echo "changed_${line}=${changed}"
             } >> "$GITHUB_OUTPUT"
-          done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
+          done < <(grep -vE '^[[:space:]]*(#|$)' "${LINES}")
 
           if [ "${any}" = '0' ]; then
-            echo '各通道均已是最新（或探测失败），本次不构建；仍会跑静态检查'
+            echo '各条线均已是最新（或探测失败），本次不构建；仍会跑静态检查'
           fi
           {
             echo "any=${any}"
@@ -187,9 +183,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo '### 🔍 通道计划'
+            echo '### 🔍 线计划'
             echo
-            echo '| 线 | 通道 | 仓库记录 | 本次目标 | 需构建 | 回写 |'
+            echo '| 线 | 线 | 仓库记录 | 本次目标 | 需构建 | 回写 |'
             echo '|---|---|---|---|---|---|'
             printf '%s' "${plan_rows}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -216,17 +212,17 @@ jobs:
         run: make lint
 
   # ---------------------------------------------------------------------------
-  #  3) 构建（通道 × 架构，各自在原生 runner 上跑）
+  #  3) 构建（线 × 架构，各自在原生 runner 上跑）
   #     每个 job 都是：本地构建 → 三套发布前检查 → 通过后才按 digest 推送
   # ---------------------------------------------------------------------------
   build:
-    name: 🏗️ ${{ matrix.channel }} / linux-${{ matrix.arch }}
+    name: 🏗️ ${{ matrix.display }} / linux-${{ matrix.arch }}
     needs: [prep, lint]
     if: needs.prep.outputs.any == '1'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
-      # 不要 fail-fast：让所有通道/架构都跑完，一次就能看到各自的问题
+      # 不要 fail-fast：让所有线/架构都跑完，一次就能看到各自的问题
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.prep.outputs.build_matrix) }}
@@ -248,7 +244,7 @@ jobs:
       # ---- 第一次构建：只加载到本地，供三套健康检查使用 ----
       - name: 🏗️ 构建镜像（加载到本地，供健康检查）
         run: |
-          echo "构建 baota:candidate（${{ matrix.channel }} / linux/${{ matrix.arch }}）"
+          echo "构建 baota:candidate（${{ matrix.display }} / linux/${{ matrix.arch }}）"
           docker buildx build \
             --file ./image/Dockerfile \
             --platform "linux/${{ matrix.arch }}" \
@@ -256,10 +252,10 @@ jobs:
             --provenance=false \
             --build-arg "BASE_IMAGE=${{ matrix.base }}" \
             --build-arg "INSTALL_URL=${{ matrix.url }}" \
-            --build-arg "CHANNEL=${{ matrix.channel }}" \
+            --build-arg "LINE=${{ matrix.line }}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ matrix.version }}" \
-            --build-arg "IMAGE_DESCRIPTION=宝塔 Linux 面板容器化（${{ matrix.channel }} 通道 ${{ matrix.version }}）" \
+            --build-arg "IMAGE_DESCRIPTION=宝塔 Linux 面板容器化（${{ matrix.display }} 线 ${{ matrix.version }}）" \
             --tag "baota:candidate" \
             --cache-from "type=gha,scope=${{ matrix.line }}-${{ matrix.arch }}" \
             --cache-to "type=gha,scope=${{ matrix.line }}-${{ matrix.arch }},mode=max" \
@@ -312,7 +308,7 @@ jobs:
         id: push
         run: |
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          echo "推送 ${{ matrix.channel }} / linux/${{ matrix.arch }}（按 digest，无标签）"
+          echo "推送 ${{ matrix.display }} / linux/${{ matrix.arch }}（按 digest，无标签）"
 
           docker buildx build \
             --file ./image/Dockerfile \
@@ -320,7 +316,7 @@ jobs:
             --provenance=false \
             --build-arg "BASE_IMAGE=${{ matrix.base }}" \
             --build-arg "INSTALL_URL=${{ matrix.url }}" \
-            --build-arg "CHANNEL=${{ matrix.channel }}" \
+            --build-arg "LINE=${{ matrix.line }}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
             --build-arg "IMAGE_VERSION=${{ matrix.version }}" \
             --output "type=image,name=${REPO},push=true,push-by-digest=true" \
@@ -349,7 +345,7 @@ jobs:
   #     latest 发 repo:<版本> + repo:latest
   # ---------------------------------------------------------------------------
   publish:
-    name: 🚀 发布 ${{ matrix.channel }}
+    name: 🚀 发布 ${{ matrix.display }}
     needs: [prep, build]
     if: needs.prep.outputs.any == '1'
     runs-on: ubuntu-latest
@@ -390,11 +386,11 @@ jobs:
           echo "✅ 已发布：${tags[*]}"
 
   # ---------------------------------------------------------------------------
-  #  5) 回写该通道的 VERSION 文件（保证文件永远对应「已推送」的版本）
-  #     ★ max-parallel: 1：多个通道同时 push main 会互相 non-fast-forward
+  #  5) 回写该线的 VERSION 文件（保证文件永远对应「已推送」的版本）
+  #     ★ max-parallel: 1：多条线同时 push main 会互相 non-fast-forward
   # ---------------------------------------------------------------------------
-  writeback:
-    name: ✏️ 回写 ${{ matrix.channel }} 版本
+  write_back:
+    name: ✏️ 回写 ${{ matrix.display }} 版本
     needs: [prep, publish]
     if: needs.prep.outputs.any == '1'
     runs-on: ubuntu-latest
@@ -418,10 +414,10 @@ jobs:
         run: |
           set -euo pipefail
           VER="${{ matrix.version }}"
-          # 版本文件路径的真源是 channels.conf（不在这里写死 line → 路径的映射）
-          VFILE=$(grep -E "^[[:space:]]*${{ matrix.line }}[[:space:]]" image/channels.conf \
+          # 版本文件路径的真源是 lines.conf（不在这里写死 line → 路径的映射）
+          VERSION_FILE=$(grep -E "^[[:space:]]*${{ matrix.line }}[[:space:]]" image/lines.conf \
                     | awk '{print $3}')
-          [ -n "${VFILE}" ] || { echo '::error::未能从 channels.conf 解析版本文件路径'; exit 1; }
+          [ -n "${VERSION_FILE}" ] || { echo '::error::未能从 lines.conf 解析版本文件路径'; exit 1; }
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -430,24 +426,24 @@ jobs:
             git fetch origin main
             git rebase origin/main
 
-            CURRENT=$(tr -d '[:space:]' < "${VFILE}" || true)
+            CURRENT=$(tr -d '[:space:]' < "${VERSION_FILE}" || true)
             if [ "${CURRENT}" = "${VER}" ]; then
               # 正常情况：本次发布的版本与仓库记录一致（重建同一版本 / 并发回写已生效）
-              echo "✅ ${VFILE} 已是 ${VER}，本次无需回写"
+              echo "✅ ${VERSION_FILE} 已是 ${VER}，本次无需回写"
               echo 'result=skip' >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            printf '%s\n' "${VER}" > "${VFILE}"
-            git add "${VFILE}"
-            git commit -m "chore(release): baota ${VER}（回写 ${VFILE}）"
+            printf '%s\n' "${VER}" > "${VERSION_FILE}"
+            git add "${VERSION_FILE}"
+            git commit -m "chore(release): baota ${VER}（回写 ${VERSION_FILE}）"
             if git push origin HEAD:main; then
               # 推送成功 ≠ 远端真是这个值：回读校验一次，避免「静默没生效」
               git fetch origin main
-              REMOTE_VER=$(git show "origin/main:${VFILE}" 2> /dev/null | tr -d '[:space:]' || true)
+              REMOTE_VER=$(git show "origin/main:${VERSION_FILE}" 2> /dev/null | tr -d '[:space:]' || true)
               [ "${REMOTE_VER}" = "${VER}" ] \
-                || { echo "::error::回写后远端 ${VFILE} = ${REMOTE_VER:-空}，期望 ${VER}"; exit 1; }
-              echo "✅ 已回写 ${VFILE} = ${VER}（远端校验通过）"
+                || { echo "::error::回写后远端 ${VERSION_FILE} = ${REMOTE_VER:-空}，期望 ${VER}"; exit 1; }
+              echo "✅ 已回写 ${VERSION_FILE} = ${VER}（远端校验通过）"
               echo 'result=written' >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -461,9 +457,9 @@ jobs:
         run: |
           {
             if [ '${{ steps.wb.outputs.result }}' = 'written' ]; then
-              echo "### ✏️ ${{ matrix.channel }}：已回写版本记录为 \`${{ matrix.version }}\`"
+              echo "### ✏️ ${{ matrix.display }}：已回写版本记录为 \`${{ matrix.version }}\`"
             else
-              echo "### ✏️ ${{ matrix.channel }}：版本记录已是 \`${{ matrix.version }}\`，无需回写"
+              echo "### ✏️ ${{ matrix.display }}：版本记录已是 \`${{ matrix.version }}\`，无需回写"
             fi
             echo
             echo "- 镜像标签：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`$([ '${{ matrix.tag }}' = 'latest' ] && echo ' 与 `:latest`')"

@@ -27,23 +27,25 @@
 
 ## data/ 的目录模型（与容器内路径一一对应）
 
-compose 只挂一个 `data`（`./data:/data`）。三层分得很清楚：
+compose 只挂一个 `data`（`./data:/data`）。**规则只有一条：`data/www` 下的路径 =
+容器内的路径** —— 找什么按容器里的路径找，不需要记我们的分组：
 
 ```
 data/                        （./data:/data）
-├── www/                      业务数据 —— bind 目录，宿主机可直接读写
+├── www/                      业务与面板状态 —— bind 目录，宿主机可直接读写
+│                             （它就是容器 /www 的镜像）
 │   ├── wwwroot/       ↔ 容器 /www/wwwroot     （站点）
 │   ├── backup/        ↔ 容器 /www/backup      （备份）
 │   ├── server/data/   ↔ 容器 /www/server/data （MySQL）
-│   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库）
-│   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录）
-├── panel/              面板状态 —— bind 目录
-│   ├── data/          ↔ 容器 /www/server/panel/data   （面板配置 / SQLite 库）
-│   ├── plugin/        ↔ 容器 /www/server/panel/plugin （已安装的插件）
-│   ├── vhost/         ↔ 容器 /www/server/panel/vhost  （站点配置 / 证书 / 伪静态 / 反代）
-│   ├── ssl/           ↔ 容器 /www/server/panel/ssl    （面板自身 HTTPS 证书）
-│   └── config/        ↔ 容器 /www/server/panel/config （面板设置）
-├── system/                   系统层
+│   ├── server/panel/  ↔ 容器 /www/server/panel（面板状态，只持久化下列子目录）
+│   │   ├── data/      面板配置 / SQLite 库
+│   │   ├── plugin/    已安装的插件
+│   │   ├── vhost/     站点配置 / 证书 / 伪静态 / 反代
+│   │   ├── ssl/       面板自身 HTTPS 证书
+│   │   └── config/    面板设置
+│   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库，装了才出现）
+│   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录，装了才出现）
+├── .system/                  系统层（隐藏：overlay upper 是「相对镜像的改动」）
 │   ├── etc usr var root opt home srv   ← 各目录 overlay upper
 │   ├── www/server/    ← /www/server 的 overlay upper（面板里装的组件、
 │   │                     计划任务脚本 /www/server/cron、插件数据 total/btwaf…）
@@ -55,6 +57,22 @@ data/                        （./data:/data）
 `/www/wwwroot`，MySQL 在 `/www/server/data`，备份在 `/www/backup`。
 唯一的不同是：**面板代码本身不在 `data/` 里** —— 它属于镜像。
 
+> 两棵树按**持久化机制**分，不按路径分：`data/www` 是 bind 直通（内容完整、
+> 宿主可直改），`data/.system` 是 overlay upper（相对镜像的增量）。两棵树内部都
+> 与容器路径同名，所以 `/etc` → `data/.system/etc`、`/www/wwwroot` → `data/www/wwwroot`。
+>
+> **为什么 `/www/server` 在 `.system` 而不在 `data/www` 下**：它走 overlay —— 只有
+> overlay 才能「没动过的组件跟新镜像更新、动过的留在 upper」；改成整目录 bind 会让
+> 镜像里更新过的组件永久被首启时的目录遮住（正是[方案对比](../README.md#与常见方案的差异)
+> 里说的那种失效）。另外它的 upper 若放进 `data/www/server`，MySQL 源
+> （`server/data`）与面板状态源（`server/panel/*`）就落进 upperdir 内部，
+> 形成「bind 源在 overlay upper 里」的自引用。所以 `data/www` 下只有
+> `server/data` 与 `server/panel/*`，没有 `server` 整体。
+>
+> 系统层收进隐藏目录 `.system`，是为了让顶层只剩 `www` 一个可见目录：它是
+> overlay 的 upper（增量），与「内容完整、可直接读写」的 `data/www` 不是一回事，
+> 不该拿来当文件浏览。找系统配置请按容器路径想：容器 `/etc` → `data/.system/etc`。
+
 ## 为什么这样分（不可变面板）
 
 `/www` 里混着三类不同性质的东西：
@@ -62,7 +80,7 @@ data/                        （./data:/data）
 | | 例子 | 处理方式 |
 |---|---|---|
 | 面板代码 / 可再生的东西 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志）、`/www/.Recycle_bin`（回收站）、`/www/php_session`（PHP session） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志 / 回收站 / session 重建即空 |
-| 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在 `data/system/www/server`），装什么都能留住，不用按组件列清单 |
+| 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在 `data/.system/www/server`），装什么都能留住，不用按组件列清单 |
 | 插件数据 / 计划任务脚本 | `/www/server/total`、`/www/server/btwaf`、`/www/server/cron` | **同上**：都在 `/www/server` 之下，自动跟着持久化 |
 | 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin`（插件）、`panel/vhost`（站点配置与证书）、`panel/ssl`（面板证书）、`panel/config`（面板设置） | **bind 直通**：必须保留，否则等于重装面板 / 站点证书丢失 |
 | 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup`、`/www/vmail`（邮局）、`/www/dk_project`（面板 Docker 模块） | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
@@ -70,20 +88,24 @@ data/                        （./data:/data）
 判断一个 `/www` 子路径属于哪一类只看一句话：**丢了要骂人的是数据**（站点、备份、
 数据库、邮件、Docker 项目 → 加进 `WWW_DATA_SUBDIRS`）；**重新生成就好的是缓存**
 （日志、回收站、session → 不持久化）。加一个目录只是往那份清单加一个词。
+数据里再分两种：**装好就有**的进 `WWW_DATA_SUBDIRS`（站点 / 备份 / MySQL），
+**装了某个模块才有**的进 `WWW_OPTIONAL_SUBDIRS`（邮局 / Docker 项目）—— 后者
+不预建，没装模块就不在 `data/www` 下出现。
 
 所以：
 
-- `/www/server` 整层走 **overlay**：upper 在 `data/system/www/server`，面板里装的
+- `/www/server` 整层走 **overlay**：upper 在 `data/.system/www/server`，面板里装的
   组件、计划任务脚本、插件数据都在这里；换镜像/重建后它们还在，**不用重装**
 - `/www/server/panel`（面板代码）在挂 overlay 之后由 `init.sh` 用镜像那份
   **bind 盖回**：代码始终来自镜像、写入不落持久化层，换镜像即升级面板
-- 面板状态（`data`、`plugin`、`vhost`、`ssl`、`config`）逐个 **bind** 到 `data/panel/` 下
+- 面板状态（`data`、`plugin`、`vhost`、`ssl`、`config`）逐个 **bind** 到
+  `data/www/server/panel/` 下 —— 与容器内的位置同名
 - 站点 / 备份 / MySQL 逐个 **bind** 到 `data/www/` 下
-- 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/system/<同名>`
+- 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/.system/<同名>`
 
 > ✅ **面板里安装的组件（PHP / nginx / MySQL / redis…）会持久化。**
 > 它们落在 `/www/server/<组件>`，而 `/www/server` 整层是 overlay（upper =
-> `data/system/www/server`），所以销毁重建、换镜像标签之后组件都还在，
+> `data/.system/www/server`），所以销毁重建、换镜像标签之后组件都还在，
 > **不需要重新安装**；插件的运行数据（`total`、`btwaf`…）与计划任务脚本
 > （`/www/server/cron`）也在同一层里，自动跟着保住。
 >
@@ -96,25 +118,25 @@ data/                        （./data:/data）
 > 副本换回去。面板版本只有一个真源（镜像）：升级 = 换镜像标签，回退 = 换回上一个
 > 标签。这样也保证了面板的 `init_db` 永远由镜像版本代码执行，库不会「比代码新」。
 
-> `data/www/*` 与 `data/panel/*` 都是**内容完整**的目录（不是增量），
-> 可以直接拷贝、打包、迁移；`data/system/<dir>` 是 overlay **增量**，
+> `data/www/*`（含 `www/server/panel/*`）都是**内容完整**的目录（不是增量），
+> 可以直接拷贝、打包、迁移；`data/.system/<dir>` 是 overlay **增量**，
 > 完整内容 = 镜像 lower 层 + 这里的增量。
 
 ### 挂载原理
 
 ```
-/etc usr …      ←overlay→  upper = data/system/<同名>，work = data/system/.baota/<同名>.work
+/etc usr …      ←overlay→  upper = data/.system/<同名>，work = data/.system/.baota/<同名>.work
 /www/wwwroot     ←bind→    源 = data/www/wwwroot
 /www/backup      ←bind→    源 = data/www/backup
 /www/server/data ←bind→    源 = data/www/server/data
-/www/vmail       ←bind→    源 = data/www/vmail（邮局）
-/www/dk_project  ←bind→    源 = data/www/dk_project（面板 Docker 模块的项目目录）
-/www/server/panel/data   ←bind→  源 = data/panel/data
-/www/server/panel/plugin ←bind→  源 = data/panel/plugin
-/www/server/panel/vhost  ←bind→  源 = data/panel/vhost
-/www/server/panel/ssl    ←bind→  源 = data/panel/ssl
-/www/server/panel/config ←bind→  源 = data/panel/config
-/www/server              ←overlay→ upper = data/system/www/server（组件 / cron 脚本 / 插件数据）
+/www/vmail       ←bind→    源 = data/www/vmail（邮局，装了才出现）
+/www/dk_project  ←bind→    源 = data/www/dk_project（面板 Docker 模块的项目目录，装了才出现）
+/www/server/panel/data   ←bind→  源 = data/www/server/panel/data
+/www/server/panel/plugin ←bind→  源 = data/www/server/panel/plugin
+/www/server/panel/vhost  ←bind→  源 = data/www/server/panel/vhost
+/www/server/panel/ssl    ←bind→  源 = data/www/server/panel/ssl
+/www/server/panel/config ←bind→  源 = data/www/server/panel/config
+/www/server              ←overlay→ upper = data/.system/www/server（组件 / cron 脚本 / 插件数据）
 /www/server/panel        ←bind→  源 = 镜像里的面板目录（挂 overlay 前先 bind 到 /run，
                                  挂完再 bind 回，保证面板代码不落持久化层）
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
@@ -135,8 +157,8 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 | 内容 | 换镜像后 |
 |---|---|
 | 面板代码 / 默认配置 | 整体换成新镜像的版本 —— **升级面板就是这么发生的** |
-| 面板配置、插件、站点配置与证书、面板设置 | bind 目录（`data/panel/`），完全不受影响 |
-| 面板里装的组件（PHP / nginx / MySQL…）、插件数据、计划任务脚本 | overlay upper（`data/system/www/server`），完全不受影响，**不用重装** |
+| 面板配置、插件、站点配置与证书、面板设置 | bind 目录（`data/www/server/panel/`），完全不受影响 |
+| 面板里装的组件（PHP / nginx / MySQL…）、插件数据、计划任务脚本 | overlay upper（`data/.system/www/server`），完全不受影响，**不用重装** |
 | 站点 / MySQL / 备份 | bind 目录（`data/www/`），完全不受影响 |
 | 系统目录 | overlay lower 换新，你改过的部分保留在 upper |
 
@@ -155,10 +177,10 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
   /baota/origin   = 面板目录的实体副本（排除 pyenv，约几十 MB —— 跨构建层给不出
                     硬链接，见 image/build/services.sh 的注释）
   pyenv/bin/python-real = 真解释器
-  pyenv/bin/python{,3}  → /baota/shim（符号链接）
+  pyenv/bin/python{,3}  → /baota/shim.sh（符号链接）
 
 运行期（每次面板代码被拉起都会经过）
-  shim → guard.sh → 比较「面板目录里的代码版本」与 /baota/VERSION
+  shim.sh → guard.sh → 比较「面板目录里的代码版本」与 /baota/VERSION
       一致            → 直接 exec 真解释器（常态零开销、零写入）
       不一致 / 读不到 → 用 /baota/origin 把代码换回镜像版本，再 exec
 ```
@@ -181,7 +203,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 所以升级 / 降级前会自动把 `/www/server/panel/data` 复制一份到
 `/www/backup/auto/`（宿主 `data/www/backup/auto/`），默认保留 3 份。
 
-面板数据库（配置与 SQLite 库）的宿主路径：`data/panel/data/`。
+面板数据库（配置与 SQLite 库）的宿主路径：`data/www/server/panel/data/`。
 
 ---
 
@@ -189,9 +211,9 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 - 任何持久化失败 / 只读降级写 `/run/baota/degraded`；`CRITICAL_DIRS` 里的目录
   （默认为 `/etc /usr /var /www/wwwroot /www/server/data` 与
-  `/www/server/panel/{data,vhost,ssl,config}`）额外写 `degraded-critical`，
+  `/www/server/panel/{data,vhost,ssl,config}`）额外写 `critical`，
   让 healthcheck 把容器判为 unhealthy
-- 降级记录追加到 `data/system/.baota/boot-history.log`
+- 降级记录追加到 `data/.system/.baota/boot.log`
 - 磁盘水位实时查持久化根（`data` 卷）
 
 ---

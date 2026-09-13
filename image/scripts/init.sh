@@ -3,20 +3,15 @@
 # ==============================================================================
 #  [阶段 0] 早期初始化 —— 并发锁 → 系统层 overlay → 业务/面板子目录 bind → 移交阶段 1
 #
-#  解释器用 busybox 而非 bash：本脚本要给 /usr 挂 overlay，万一持久化层里的
-#  /usr 被写坏，Debian 的 usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失，
-#  脚本自身就跑不起来了。/busybox 静态链接、位于 rootfs 根部，永远可用。
+#  红线一：解释器用 busybox 而非 bash —— 本脚本要给 /usr 挂 overlay，万一持久化
+#    层里的 /usr 被写坏，usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失。
+# 红线二：只能用 POSIX 语法 —— 不能用 local / [[ ]] / 数组 / pipefail；
+#    函数内临时变量统一 `_` 前缀，避免覆盖调用方的循环变量。
 #
-#  因此本文件只能用 POSIX shell 语法：
-#    不能用 local / [[ ]] / 数组 / pipefail；函数名内的「局部变量」统一用
-#    下划线前缀（_dir / _upper / _work）标示，避免与调用方的循环变量重名。
+#  可用环境变量（真源见 /baota/defaults.env）：PERSIST_* / WWW_* / PANEL_STATE_*
+#    / CRITICAL_DIRS / STAGE1
 #
-#  可用环境变量（真源见 /baota/defaults.env）：
-#    PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_SYSTEM_DIRS /
-#    WWW_DATA_SUBDIRS / PANEL_STATE_ROOT / PANEL_STATE_SUBDIRS /
-#    CRITICAL_DIRS / STAGE2
-#
-#  日志约定：[init] 普通信息，[init][WARN] 告警
+#  日志：[init] 普通信息，[init][WARN] 告警
 # ==============================================================================
 set -eu
 
@@ -33,39 +28,39 @@ fi
 . /baota/defaults.env
 
 # init.sh 自己的运行参数（不属于配置真源）
-STAGE2="${STAGE2:-/baota/entrypoint.sh}"
+STAGE1="${STAGE1:-/baota/entrypoint.sh}"
 
 # 面板目录（不在 defaults.env，因为它由官方安装脚本固定，全项目同此约定）
 # 与它的临时钉桩：挂 /www/server 的 overlay 之前先 bind 到这里，
 # 挂完再 bind 回面板目录，面板代码因此始终来自镜像层、不落持久化层
 PANEL_DIR="${PANEL_DIR:-/www/server/panel}"
-PANEL_ORIGIN="${PANEL_ORIGIN:-/run/baota/panel}"
+PANEL_PIN_DIR="${PANEL_PIN_DIR:-/run/baota/panel}"
 
 # 业务数据与面板状态：逐个 bind 到 data 下（清单见 defaults.env）
 # 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层
 
 # Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
 # 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回
-DOCKER_META=/run/docker-meta
+STAGING_DIR=/run/staging
 DOCKER_FILES="hosts resolv.conf hostname"
 
 # 可写性探测文件名（同时用于 lower 与 upper 两侧）
-PROBE=.persist-writable-probe
+PROBE=.probe
 
-# overlay 要求 workdir 与 upperdir 同盘（内核硬性要求）：work 放在持久化层内的
-# .baota/<目录>.work。内核会在它里面再建一层 work（省不掉），详情见
+# 状态目录（各层自己的 .baota）：项目元数据 + overlay workdir 都在里面。
+# overlay 要求 workdir 与 upperdir 同盘（内核硬性要求）：work 放在状态目录内的
+# <目录>.work。内核会在它里面再建一层 work（省不掉），详情见
 # docs/persistence.md「挂载原理」
-SYS_WORK_ROOT="${PERSIST_SYSTEM_ROOT}/.baota"
-DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
-DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
 STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
 LOCK_FILE="${STATE_DIR}/lock"
+DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
+DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
 
 # 运行态标记目录。/run 是 tmpfs：每次启动重新评估，不会残留上次的状态。
 # 供 compose healthcheck 与 CI 健康检查判定「本次启动的持久化是否完整」。
 RUNTIME_DIR=/run/baota
 DEGRADED="${RUNTIME_DIR}/degraded"
-DEGRADED_CRITICAL="${RUNTIME_DIR}/degraded-critical"
+CRITICAL="${RUNTIME_DIR}/critical"
 
 # ------------------------------------------------------------------------------
 # 日志与降级标记
@@ -80,7 +75,7 @@ mark_degraded() {
 
 mark_critical() {
     mkdir -p "${RUNTIME_DIR}" 2> /dev/null || return 0
-    printf '%s\n' "$1" >> "${DEGRADED_CRITICAL}" 2> /dev/null || true
+    printf '%s\n' "$1" >> "${CRITICAL}" 2> /dev/null || true
 }
 
 # 挂载点是否属于「失败即静默丢数据」的关键目录。
@@ -94,15 +89,11 @@ is_critical() {
 
 # ==============================================================================
 #  0. 并发互斥锁（flock）
-#
-#  ★ 持锁方式必须是「独立后台进程」，不能用 exec 8<>lock + flock -n 8 的
-#    fd 方式：fd 会随 exec 链（busybox → bash entrypoint → systemd）一路
-#    移交给 PID 1，而 systemd 启动时会关闭继承的非标准 fd —— 锁随 fd 关闭
-#    而自动释放。实测（Docker Desktop，flock util-linux 2.38）主容器就绪
-#    （systemd 接管后）第二实例能再次取得同一把锁、锁文件被覆盖，并发保护
-#    在启动数秒后即失效。独立进程持锁与 exec 链无关：进程活 → 锁在；
-#    容器停止 → 进程亡 → 锁自动释放。持锁者在 docker top 里是一个 sleep
-#    进程，属预期。
+#  ★ 持锁必须是「独立后台进程」，不能用 exec 8<>lock + flock -n 8 的 fd 方式：
+#    fd 随 exec 链（busybox → bash entrypoint → systemd）移交给 PID 1，systemd
+#    启动时关闭非标准 fd → 锁随之释放。实测（flock 2.38）主容器就绪后第二实例
+#    能再次取锁、并发保护在启动数秒后即失效。独立进程持锁与 exec 链无关：
+#    进程活 → 锁在；容器停 → 进程亡 → 锁自动释放（docker top 里是个 sleep 进程）。
 # ==============================================================================
 _lock_layer() {
     _lock="$1"
@@ -165,7 +156,7 @@ acquire_lock() {
 # ==============================================================================
 #  1. overlay 分层持久化（仅系统层）
 #
-#    /etc /usr /var … ←overlay→  upper = data/system/<同名>
+#    /etc /usr /var … ←overlay→  upper = data/.system/<同名>
 #    lowerdir = 镜像内的同名目录（随镜像升级而更新）
 #
 #  ★ 面板（/www）不再走 overlay：代码由镜像层直接提供、不持久化，
@@ -176,7 +167,7 @@ mount_persist() {
     _dir="$1"
     _lower="/${_dir}"
     _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
-    _work="${SYS_WORK_ROOT}/${_dir}.work"
+    _work="${STATE_DIR}/${_dir}.work"
 
     if ! mkdir -p "${_lower}" "${_upper}" 2> /dev/null; then
         warn "无法创建 ${_upper}：持久化根不可写，/${_dir} 本次不会持久化"
@@ -215,20 +206,12 @@ mount_persist() {
 
 # ==============================================================================
 #  2. 业务数据与面板状态（逐子目录 bind）
-#
-#  面板代码不进持久化层，所以绝不能 bind 整个 /www —— 那会把镜像里的面板
-#  代码一起遮住，换镜像就再也更新不了面板。改为只 bind 需要的子目录：
-#    /www/wwwroot              <- data/www/wwwroot          （站点）
-#    /www/backup               <- data/www/backup           （备份）
-#    /www/server/data          <- data/www/server/data      （MySQL）
-#    /www/server/panel/data    <- data/panel/data     （面板配置 / SQLite）
-#    /www/server/panel/plugin  <- data/panel/plugin   （插件）
-#    /www/server/panel/vhost   <- data/panel/vhost    （站点配置 / 证书 / 伪静态）
-#    /www/server/panel/ssl     <- data/panel/ssl      （面板自身 HTTPS 证书）
-#    /www/server/panel/config  <- data/panel/config   （面板设置）
-#  其余部分（/www/server/panel 的代码、pyenv、启动器）保持镜像层原样：
-#  不持久化、换镜像即整体更新 —— 这就是「不可变面板」。
-#
+#  ★ 绝不能 bind 整个 /www —— 那会把镜像里的面板代码一起遮住，换镜像就再也
+#    更新不了面板。只 bind 需要的子目录（清单见 defaults.env 的 WWW_DATA_SUBDIRS
+#    与 PANEL_STATE_SUBDIRS，源一律是 data/www/<同名>）。
+#  ★ 规则只有一条：data/www 下的路径 = 容器内的路径，面板状态也归位在
+#    www/server/panel 下（与容器内同名），不单列一层。
+#  可选模块（vmail / dk_project）装了才 bind、不预建，见 bind_optional_subdir。
 #  面板状态首次使用时从镜像 seed 一次，之后由 data 接管，镜像不再覆盖。
 # ==============================================================================
 bind_subdir() {
@@ -249,6 +232,36 @@ bind_subdir() {
         return 0
     fi
     warn "绑定失败：${_target}（本次启动不会保存该目录）"
+    return 1
+}
+
+# 可选模块目录（邮局 / 面板 Docker 项目…）：装了才出现，所以**不预建** ——
+# 没装模块的容器不该在 data/www 下看到空目录。三种情况：
+#   ① 持久化源已存在          → 照常 bind（已装过，正常路径）
+#   ② 源与容器里都没有        → 模块没装，什么都不做
+#   ③ 容器里有、源没有        → 用户在面板里装了模块（写在容器可写层）：
+#                              先把现有内容 seed 进持久化源再 bind，
+#                              从本次启动起纳入持久化
+# 目录存在但为空按 ③ 处理会得到一个空目录，与「不预建」矛盾，所以空目录也走 ②
+# （不打印：那是常态，每次启动都提示就成了噪音）。等模块真装出内容后，
+# 下次启动走 ③ 自动纳入持久化。
+bind_optional_subdir() {
+    _source="${PERSIST_DATA_ROOT}/www/$1"
+    _target="/www/$1"
+
+    [ -e "${_source}" ] && { bind_subdir "${_source}" "${_target}"; return $?; }
+
+    if [ ! -d "${_target}" ] || [ -z "$(ls -A "${_target}" 2> /dev/null)" ]; then
+        return 0
+    fi
+
+    if mkdir -p "${_source}" 2> /dev/null && cp -a "${_target}/." "${_source}/" 2> /dev/null; then
+        log "可选模块 $1 已纳入持久化（首次装载现有数据）"
+        bind_subdir "${_source}" "${_target}"
+        return $?
+    fi
+
+    warn "可选模块 $1 的持久化源创建失败，本次启动它不会被保存"
     return 1
 }
 
@@ -304,6 +317,13 @@ mount_www_layer() {
             fi
         fi
     done
+
+    # 可选模块失败不算关键（模块没装时本来就没有数据），只记 degraded
+    for _sub in ${WWW_OPTIONAL_SUBDIRS:-}; do
+        [ -n "${_sub}" ] || continue
+        bind_optional_subdir "${_sub}" \
+            || mark_degraded "/www/${_sub}: 可选模块目录绑定失败"
+    done
 }
 
 # ==============================================================================
@@ -312,18 +332,12 @@ mount_www_layer() {
 main() {
     acquire_lock || exit 1
 
-    # ---- 0. 清理旧版 workdir 容器 ----
-    # 早期版本把各 overlay 的 workdir 收在 .baota/work/<目录>.work 下，
-    # 现在直接放在 .baota/<目录>.work。旧目录里没有任何持久数据（workdir 每次启动
-    # 都重建），直接删掉，避免它在用户的 data/ 里留下孤儿目录
-    rm -rf "${STATE_DIR}/work" 2> /dev/null || true
-
     # ---- 1. 暂存 Docker 动态注入的文件（/etc 即将被 overlay 盖住）----
-    rm -rf "${DOCKER_META}"
-    mkdir -p "${DOCKER_META}"
+    rm -rf "${STAGING_DIR}"
+    mkdir -p "${STAGING_DIR}"
     for _f in ${DOCKER_FILES}; do
         if [ -e "/etc/${_f}" ]; then
-            cp -f "/etc/${_f}" "${DOCKER_META}/${_f}"
+            cp -f "/etc/${_f}" "${STAGING_DIR}/${_f}"
         fi
     done
 
@@ -335,15 +349,15 @@ main() {
     # 面板代码来自镜像层、不落持久化层：先把镜像里的面板目录 bind 到 /run，
     # 等 /www/server 的 overlay 挂上后再 bind 回去（顺序反了装的就是镜像里那份
     # 被 overlay 合并后的视图，面板内更新会写进持久化层，换镜像就升不了面板）
-    if [ -d "${PANEL_DIR}" ] && mkdir -p "${PANEL_ORIGIN}" 2> /dev/null; then
-        if mount -o bind "${PANEL_DIR}" "${PANEL_ORIGIN}" 2> /dev/null; then
-            log "面板代码已钉在 ${PANEL_ORIGIN}（挂 overlay 后 bind 回 ${PANEL_DIR}）"
+    if [ -d "${PANEL_DIR}" ] && mkdir -p "${PANEL_PIN_DIR}" 2> /dev/null; then
+        if mount -o bind "${PANEL_DIR}" "${PANEL_PIN_DIR}" 2> /dev/null; then
+            log "面板代码已钉在 ${PANEL_PIN_DIR}（挂 overlay 后 bind 回 ${PANEL_DIR}）"
         else
-            warn "无法把 ${PANEL_DIR} bind 到 ${PANEL_ORIGIN}，本次面板代码会落进持久化层"
-            PANEL_ORIGIN=''
+            warn "无法把 ${PANEL_DIR} bind 到 ${PANEL_PIN_DIR}，本次面板代码会落进持久化层"
+            PANEL_PIN_DIR=''
         fi
     else
-        PANEL_ORIGIN=''
+        PANEL_PIN_DIR=''
     fi
 
     for _dir in ${PERSIST_SYSTEM_DIRS}; do
@@ -357,8 +371,8 @@ main() {
 
     # 把面板代码 bind 回镜像那份：/www/server 其余内容（组件、cron 脚本、
     # 插件数据）留在 overlay 的 upper 里持久化，面板目录本身则始终来自镜像
-    if [ -n "${PANEL_ORIGIN}" ]; then
-        if mount -o bind "${PANEL_ORIGIN}" "${PANEL_DIR}" 2> /dev/null; then
+    if [ -n "${PANEL_PIN_DIR}" ]; then
+        if mount -o bind "${PANEL_PIN_DIR}" "${PANEL_DIR}" 2> /dev/null; then
             log "面板代码已 bind 回镜像层：${PANEL_DIR}（不落持久化层）"
         else
             warn "面板代码 bind 回 ${PANEL_DIR} 失败：面板代码可能落进持久化层"
@@ -375,19 +389,19 @@ main() {
 
     # ---- 4. 还原 Docker 动态文件 ----
     for _f in ${DOCKER_FILES}; do
-        if [ -f "${DOCKER_META}/${_f}" ]; then
-            cp -f "${DOCKER_META}/${_f}" "/etc/${_f}" \
+        if [ -f "${STAGING_DIR}/${_f}" ]; then
+            cp -f "${STAGING_DIR}/${_f}" "/etc/${_f}" \
                 || warn "无法写回 /etc/${_f}，容器 DNS / 主机名解析可能异常"
             chmod 0644 "/etc/${_f}" 2> /dev/null || true
         fi
     done
-    rm -rf "${DOCKER_META}"
+    rm -rf "${STAGING_DIR}"
 
     # ---- 5. 交给阶段 1 ----
-    if [ -f "${STAGE2}" ] && [ -x /bin/bash ]; then
-        exec /bin/bash "${STAGE2}" "$@"
+    if [ -f "${STAGE1}" ] && [ -x /bin/bash ]; then
+        exec /bin/bash "${STAGE1}" "$@"
     fi
-    warn "未找到 /bin/bash 或 ${STAGE2}，跳过阶段 1，直接执行：$*"
+    warn "未找到 /bin/bash 或 ${STAGE1}，跳过阶段 1，直接执行：$*"
     exec "$@"
 }
 

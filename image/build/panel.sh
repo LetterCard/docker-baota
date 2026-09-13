@@ -6,7 +6,7 @@
 #    wget -O install.sh "${INSTALL_URL}" && bash install.sh <参数>
 #
 #  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量，可直接读取）：
-#    INSTALL_URL          官方安装脚本地址，两个通道各不同（必填）
+#    INSTALL_URL          官方安装脚本地址，两条线各不同（必填）
 #    PANEL_PORT           面板端口
 #    PANEL_USER           面板用户名
 #    DISABLE_PANEL_SSL    是否关闭面板自身的 HTTPS
@@ -16,7 +16,7 @@
 set -euxo pipefail
 
 PANEL_DIR=/www/server/panel
-PANEL_PY=${PANEL_DIR}/pyenv/bin/python
+PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
 
 # ---- 入参兜底：与 Dockerfile 中 ARG 的默认值保持一致 ----
 PANEL_PORT="${PANEL_PORT:-8888}"
@@ -54,7 +54,7 @@ install_panel() {
     # 变量故意不加引号：安装脚本要求逐个参数传入，加引号会被当成单个参数
     # shellcheck disable=SC2086
     bash install.sh ${args} \
-        || { echo '❌ [build][ERROR] 宝塔安装失败，日志尾部如下：'; tail -n 120 /tmp/btpanel-install.log; exit 1; }
+        || { echo '❌ [build][ERROR] 宝塔安装失败，日志尾部如下：'; tail -n 120 /tmp/install.log; exit 1; }
     cd /
 
     # 校验面板文件已就位。
@@ -83,18 +83,12 @@ install_panel() {
 
 # ==============================================================================
 #  2. 防火墙复位为关闭
-#
-#  官方脚本 Install_Deb_Pack 会显式安装 ufw，紧接着 Set_Firewall 执行
-#    ufw allow <各端口> → echo y|ufw enable → ufw default deny
-#  构建期没有 netfilter 权限，规则并未真正写入，但 ufw.conf 可能已被置为开启；
-#  而运行期容器是特权的，一旦开机自动套用 deny 策略，面板端口会被直接封死。
-#
-#  处理原则：只关开关，不动 ufw 本体与宝塔已写好的放行规则。
-#    - 默认不拦流量：容器的入口由宿主机端口映射 / 云安全组控制；
-#    - 面板「安全」页仍能正常工作，用户主动开启防火墙后配置写入持久化层，
-#      重启依然生效 —— 与装在真机上的行为一致。
-#  不能用 apt pin 之类的手段阻止安装 ufw：宝塔是显式安装，一旦 apt 报
-#  "has no installation candidate"，整条 install 命令回滚，150+ 依赖包全装不上。
+#  官方脚本会装 ufw 并 enable + default deny。构建期没 netfilter 权限、规则没真写入，
+#  但 ufw.conf 可能已被置为开启；运行期容器特权，一开机套用 deny 就封死面板端口。
+#  处理原则：只关开关，不动 ufw 本体与宝塔已写好的放行规则（默认不拦流量，
+#  入口由宿主机端口映射 / 安全组控制；面板「安全」页仍能正常开关）。
+#  不能用 apt pin 阻止安装 ufw：宝塔显式安装，apt 报 "has no installation candidate"
+#  会让整条 install 回滚，150+ 依赖包全装不上。
 # ==============================================================================
 reset_firewall() {
     log '2/5 防火墙复位为关闭'
@@ -130,7 +124,7 @@ verify_key_files() {
     ls ${PANEL_DIR}/BT-P* > /dev/null
     test -f /etc/init.d/bt
     test -L /usr/bin/bt
-    test -x "${PANEL_PY}"
+    test -x "${PANEL_PY_BIN}"
     test -f /var/bt_setupPath.conf           || echo /www          > /var/bt_setupPath.conf
     test -f "${PANEL_DIR}/data/port.pl"      || echo "${PANEL_PORT}" > "${PANEL_DIR}/data/port.pl"
     test -f "${PANEL_DIR}/data/admin_path.pl"
@@ -153,9 +147,9 @@ warmup_account_chain() {
     local secret
     secret=$(build_secret)
     cd "${PANEL_DIR}"
-    "${PANEL_PY}" tools.py panel "${secret}" > /dev/null \
+    "${PANEL_PY_BIN}" tools.py panel "${secret}" > /dev/null \
         || warn '口令预热未返回成功'
-    "${PANEL_PY}" -c "import tools;tools.set_panel_username('${PANEL_USER}')" > /dev/null \
+    "${PANEL_PY_BIN}" -c "import tools;tools.set_panel_username('${PANEL_USER}')" > /dev/null \
         || warn '用户名预热未返回成功'
     cd /
 

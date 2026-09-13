@@ -2,43 +2,35 @@
 # ==============================================================================
 #  🐳 宝塔 Linux 面板容器化 —— 唯一的一份 Dockerfile
 #
-#  各条线（12.x 稳定线 / 13.x 正式版 …）共用本文件，差异全部由 build-arg
-#  传入，声明见 image/channels.conf（12/13 的安装脚本地址就写在那里，
-#  成对排列）。构建逻辑在 image/build/ 三阶段脚本里；运行期脚本在
-#  image/scripts/；systemd unit 在 image/conf/。
+#  各条线共用本文件，差异全部由 build-arg 传入，声明见 image/lines.conf。
+#  构建逻辑在 image/build/ 三阶段脚本里，运行期脚本在 image/scripts/。
 #
-#  构建上下文是仓库根：
-#    docker build -f image/Dockerfile \
-#      --build-arg INSTALL_URL=<见 channels.conf> \
-#      --build-arg IMAGE_VERSION=13.0.0 -t baota:dev .
+#  构建上下文是仓库根：docker build -f image/Dockerfile --build-arg INSTALL_URL=... .
 #
-#  🧱 持久化与不可变面板（原理详见 docs/persistence.md）：
-#    · /etc /usr /var /root /opt /home /srv 各自 overlay（upper 在 data/system/<同名>）
-#    · /www/server 整层 overlay（面板里装的组件、计划任务脚本、插件数据都在它下面，
-#      重建/换镜像后不用重装）；/www/server/panel 由 init.sh 用镜像绑定盖回，
-#      面板代码始终来自镜像、不落持久化层
-#    · 业务数据与面板状态逐子目录 bind（data/www、data/panel）
-#    · 面板内「更新」写进来的新代码不会被执行（image/scripts/guard.sh），
-#      面板版本只有一个真源：镜像
+#  持久化与不可变面板（原理见 docs/persistence.md）：
+#    · /etc /usr /var /root /opt /home /srv 与 /www/server 各自 overlay
+#    · /www/server/panel 由 init.sh 用镜像绑定盖回：面板代码来自镜像、不落盘
+#    · 业务与面板状态逐子目录 bind（在 data/www 下，与容器内路径同名）
+#    · panel 内「更新」的新代码不会被执行（guard.sh）：面板版本真源 = 镜像
 # ==============================================================================
 
 ARG BASE_IMAGE=debian:12
 FROM ${BASE_IMAGE}
 
 # ------------------------------------------------------------------------------
-# 元数据。由 CI（.github/workflows/build.yml）按通道传入；本地手工构建用默认值
+# 元数据。由 CI（.github/workflows/build.yml）按线传入；本地手工构建用默认值
 # ------------------------------------------------------------------------------
 ARG IMAGE_SOURCE=https://github.com/
 ARG IMAGE_VERSION=dev
-ARG CHANNEL=latest
-ARG IMAGE_DESCRIPTION="宝塔 Linux 面板容器化（两条通道共用一份 Dockerfile，差异见 image/channels.conf）"
+ARG LINE=dev
+ARG IMAGE_DESCRIPTION="宝塔 Linux 面板容器化（两条线共用一份 Dockerfile，差异见 image/lines.conf）"
 
 LABEL org.opencontainers.image.title="Baota Panel" \
     org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
     org.opencontainers.image.source="${IMAGE_SOURCE}" \
     org.opencontainers.image.version="${IMAGE_VERSION}" \
     org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.ref.name="baota-${CHANNEL}"
+    org.opencontainers.image.ref.name="baota-${LINE}"
 
 # ------------------------------------------------------------------------------
 # 构建参数（各参数含义见 image/build/*.sh 头部注释）
@@ -50,7 +42,7 @@ ARG PANEL_PORT=8888
 ARG PANEL_USER=baota
 # 面板自身的 HTTPS：容器多在反代后使用，默认关；需要时在面板里挂证书
 ARG DISABLE_PANEL_SSL=true
-# 官方安装脚本地址 —— 真源是 image/channels.conf，这里只是本地构建的默认值
+# 官方安装脚本地址 —— 真源是 image/lines.conf，这里只是本地构建的默认值
 ARG INSTALL_URL=https://download.bt.cn/install/install_panel.sh
 # apt 镜像站
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
@@ -79,7 +71,7 @@ RUN bash /opt/baota/build/panel.sh
 COPY image/scripts/healthcheck.sh /baota/healthcheck.sh
 COPY image/scripts/backup.sh      /baota/backup.sh
 COPY image/scripts/guard.sh       /baota/guard.sh
-COPY image/scripts/shim           /baota/shim
+COPY image/scripts/shim.sh           /baota/shim.sh
 COPY image/conf/defaults.env      /baota/defaults.env
 COPY image/conf/btpanel.service   /etc/systemd/system/btpanel.service
 COPY image/scripts/init.sh        /baota/init.sh
@@ -91,7 +83,7 @@ RUN bash /opt/baota/build/services.sh
 EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 
 # 持久化层：挂载这一个目录即可保住全部数据
-#   业务 data/www、面板状态 data/panel、系统层 data/system（含面板里装的组件）
+#   业务与面板状态 data/www、系统层 data/.system（含面板里装的组件）
 #   面板代码不在这里 —— 它属于镜像，换镜像即升级
 VOLUME ["/data"]
 

@@ -2,20 +2,14 @@
 # ==============================================================================
 #  [阶段 1] 收尾初始化，然后交给 systemd
 #
-#  进入本脚本时挂载已就绪：
-#    系统层（/etc /usr /var …）      overlay upper 在 data/system/<dir>
-#    业务数据（wwwroot/backup/server/data）  bind 到 data/www/<子目录>
-#    面板状态（panel/data、panel/plugin）    bind 到 data/panel/<子目录>
-#    面板代码（/www/server/panel）   来自镜像层、不持久化，升级即换镜像
-#  于是面板版本随镜像升级，而用户的配置、站点与数据库在容器销毁、重建后都不丢。
+#  进入本脚本时挂载已就绪：系统层走 overlay（upper 在 data/.system/<dir>），
+#  业务与面板状态走 bind（源在 data/www/<同名>），面板代码来自镜像、不持久化。
 #
 #  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
 #    PANEL_PORT / PANEL_USER / PANEL_PASSWORD / PANEL_SAFE_PATH / ROOT_PASSWORD
-#    除 TZ 每次生效外，其余都只在首次启动（data/ 为空）时生效，
-#    避免每次启动都覆盖用户在面板里改过的设置。
+#    除 TZ 外都只在首次启动（data/ 为空）时生效 —— 避免每次启动覆盖用户的设置。
 #
-#  日志约定：[entrypoint] 普通信息，[entrypoint][WARN] 告警，
-#            [entrypoint][ERROR] 致命错误（die 会中断启动）
+#  日志：[entrypoint] / [entrypoint][WARN] / [entrypoint][ERROR]（die 中断启动）
 # ==============================================================================
 set -euo pipefail
 
@@ -32,16 +26,16 @@ fi
 . /baota/defaults.env
 
 PANEL_DIR=/www/server/panel
-PANEL_PY=${PANEL_DIR}/pyenv/bin/python
+PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
 
 # 首次启动标记。它在 /www 持久化层里，所以「首次」= 这份 /data 第一次被使用
-FIRST_BOOT_MARKER="${PANEL_DIR}/data/.docker-initialized"
+FIRST_BOOT_MARKER="${PANEL_DIR}/data/.initialized"
 
 # 运行期状态目录（在系统层持久化目录内，跨容器保留）。
 # 存放：镜像版本记录、启动历史等
-BAOTA_STATE="${PERSIST_SYSTEM_ROOT}/.baota"
-BOOT_HISTORY="${BAOTA_STATE}/boot-history.log"
-BOOT_HISTORY_MAX_LINES=200
+STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
+BOOT_LOG_FILE="${STATE_DIR}/${META_BOOT_FILE}"
+BOOT_LOG_MAX_LINES=200
 
 # 镜像自有的版本信息（/baota 不在任何持久化目录内，永远跟随当前镜像）
 IMAGE_VERSION_FILE=/baota/VERSION
@@ -49,7 +43,7 @@ IMAGE_VERSION_FILE=/baota/VERSION
 # 启动期降级标记（由 init.sh 写入 /run，tmpfs，重启即失效）
 RUNTIME_DIR=/run/baota
 DEGRADED="${RUNTIME_DIR}/degraded"
-DEGRADED_CRITICAL="${RUNTIME_DIR}/degraded-critical"
+CRITICAL="${RUNTIME_DIR}/critical"
 
 # 首次启动生成的凭据，仅用于最后打印一次
 NEW_PANEL_USER=''
@@ -84,8 +78,8 @@ check_panel_files() {
     # 进程，但全仓统一用 BT-P*，make lint 的越界检查才能直接生效
     ls ${PANEL_DIR}/BT-P* > /dev/null 2>&1 \
         || die "找不到面板主程序 ${PANEL_DIR}/BT-P*，镜像可能不完整；面板代码来自镜像层（不持久化），请重新拉取镜像"
-    [ -x "${PANEL_PY}" ] \
-        || die "找不到面板 Python 运行环境 ${PANEL_PY}；若已把 pyenv 加入 PANEL_STATE_SUBDIRS，请检查 ${PANEL_STATE_ROOT}/pyenv"
+    [ -x "${PANEL_PY_BIN}" ] \
+        || die "找不到面板 Python 运行环境 ${PANEL_PY_BIN}；若已把 pyenv 加入 PANEL_STATE_SUBDIRS，请检查 ${PANEL_STATE_ROOT}/pyenv"
 }
 
 # ==============================================================================
@@ -94,9 +88,9 @@ check_panel_files() {
 # ==============================================================================
 prepare_runtime_dirs() {
     # 清理镜像层残留的构建期运行时文件。但 /run/baota 必须保留：
-    # 里面的降级标记（degraded / degraded-critical）由 init.sh 在本脚本
+    # 里面的降级标记（degraded / critical）由 init.sh 在本脚本
     # 运行之前刚写入（/run 是 tmpfs，每次启动全新，不存在跨启动的残留），
-    # 是 healthcheck / boot-history / CI 判断「本次持久化是否完整」的唯一依据。
+    # 是 healthcheck / boot.log / CI 判断「本次持久化是否完整」的唯一依据。
     # 若连它一起清掉，最危险的「只读降级」就再也无法被观测到 ——
     # healthcheck 恒 healthy、启动历史永不记录、CI 也测不出来。
     for _r in /run/*; do
@@ -150,34 +144,18 @@ refresh_consistency() {
 
 # ==============================================================================
 #  版本护栏 + 升级前自动快照
-#
-#  比较镜像内 /baota/VERSION 与持久化层里记录的版本：
-#    - 首次使用  → 仅记录，不快照（没有可回滚的旧数据）
-#    - 版本一致  → 零写入、零开销
-#    - 版本升高  → 先快照再启动
-#    - 版本降低  → 明确告警 + 同样先快照再启动
-#                  （生产环境「拒绝启动」往往比降级更糟：
-#                   出故障时运维最需要的是能起来，所以只告警不阻断）
-#
-#  快照在 entrypoint 里做是有意的：此刻 systemd 尚未拉起面板与数据库，
-#  数据处于静止态，天然一致，无需额外停机。
-#
-#  为什么只快照 /www/server/panel/data（已实测确证）：
-#    站点（/www/wwwroot）、MySQL 数据（/www/server/data）、备份（/www/backup）
-#    都是 bind 到 data/ 的持久化目录，换镜像动不到它们；
-#    会随镜像变的是面板代码（/www/server/panel 整体来自镜像层）。
-#    于是升级后唯一「对不上」的地方是：
-#    新版面板代码 + 旧版面板数据库（SQLite，升级时可能做 schema 迁移）。
-#    快照它，升级失败就能回到
-#    「旧代码 + 旧库」的原始组合。站点与数据库另有更好的备份手段
-#    （面板内备份、baota-backup），不在这里重复造轮子
+#  比对镜像内 /baota/VERSION 与持久化层记录：首次仅记录；一致则零写入；
+#  升高 / 降低都先快照再启动 —— 降级只告警不阻断（出故障要先能起来）。
+#  快照在此刻做是有意的：systemd 尚未拉起面板与数据库，数据静止、天然一致。
+#  ★ 只快照 /www/server/panel/data：站点 / MySQL / 备份都是 bind 目录，换镜像
+#    动不到；唯一「对不上」的是新版代码 + 旧版 SQLite。推导见 docs/persistence.md
 # ==============================================================================
 prune_snapshots() {
     local dir="$1" keep="$2" n
     # 两处 ls 都要 || true：包被手工删空时 ls 会返回非零，
     # 配合 pipefail 会把整个 entrypoint 带崩，不该为「清理过期快照」冒这个险。
     # -d 让目录快照只列自己、不展开内容；匹配 baota-* 而非 baota-*.tgz，
-    # 这样旧版留下的 .tgz 快照会被一并按同一份保留策略清理掉
+    # 这样残留下来的 .tgz 也会被同一份保留策略一起清理掉
     n=$(ls -1td "${dir}"/baota-* 2> /dev/null | wc -l || true)
     [ "${n}" -le "${keep}" ] && return 0
 
@@ -188,18 +166,18 @@ prune_snapshots() {
 }
 
 take_snapshot() {
-    local prev="$1" keep="${AUTO_BACKUP_KEEP}"
+    local prev="$1" keep="${AUTO_SNAPSHOT_KEEP}"
     local dir=/www/backup/auto stamp out
 
     case "${keep}" in
         ''|*[!0-9]*)
             # 护栏开关填错（如「3份」）不能静默当成 0 禁用快照 —— 那是这类
             # 开关最危险的失效方式；与 healthcheck 的 DISK_* 阈值一样退回默认
-            warn "AUTO_BACKUP_KEEP=${keep} 不是正整数，按默认 3 继续"
+            warn "AUTO_SNAPSHOT_KEEP=${keep} 不是正整数，按默认 3 继续"
             keep=3
             ;;
         0)
-            log 'AUTO_BACKUP_KEEP=0，显式禁用快照'
+            log 'AUTO_SNAPSHOT_KEEP=0，显式禁用快照'
             return 0
             ;;
     esac
@@ -238,7 +216,7 @@ take_snapshot() {
 }
 
 version_guard() {
-    local img_ver prev='' state_file="${BAOTA_STATE}/image-version"
+    local img_ver prev='' state_file="${STATE_DIR}/${META_VERSION_FILE}"
 
     img_ver=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null || true)
     if [ -z "${img_ver}" ]; then
@@ -250,7 +228,7 @@ version_guard() {
     if [ -z "${prev}" ]; then
         # 首次使用：没有可回滚的旧数据，只记录版本，不做快照
         log "首次使用这份持久化数据，记录镜像版本 ${img_ver}"
-        mkdir -p "${BAOTA_STATE}" 2> /dev/null || true
+        mkdir -p "${STATE_DIR}" 2> /dev/null || true
         printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
             || warn "无法写入镜像版本记录：${state_file}"
         return 0
@@ -274,7 +252,7 @@ version_guard() {
     # 快照失败就不推进版本记录：prev 与 img_ver 的差异留到下次启动、
     # 自动重试快照 —— 否则一次瞬时故障（如磁盘满）就让回滚点永久缺席
     if take_snapshot "${prev}"; then
-        mkdir -p "${BAOTA_STATE}" 2> /dev/null || true
+        mkdir -p "${STATE_DIR}" 2> /dev/null || true
         printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
             || warn "无法写入镜像版本记录：${state_file}"
     else
@@ -308,10 +286,10 @@ init_first_boot() {
     # 用户名 / 口令走 tools.py —— 这是与宝塔内部实现强耦合的一处（上游改 API 就失败）。
     # 不再 die：即便失败面板仍能起来，用户用容器内 `bt` 命令即可重置，
     # 不至于「升级即整个容器起不来」
-    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY}" tools.py panel "${password}" ) > /dev/null 2>&1; then
+    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY_BIN}" tools.py panel "${password}" ) > /dev/null 2>&1; then
         warn "面板口令初始化失败（tools.py 接口可能已变动），请启动后用 \`bt\` 命令重置"
     fi
-    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY}" -c "import tools;tools.set_panel_username('${user}')" ) > /dev/null 2>&1; then
+    if ! ( cd "${PANEL_DIR}" && "${PANEL_PY_BIN}" -c "import tools;tools.set_panel_username('${user}')" ) > /dev/null 2>&1; then
         warn "面板用户名初始化失败（tools.py 接口可能已变动），默认用户名仍为镜像内置值"
     fi
 
@@ -336,13 +314,13 @@ init_first_boot() {
 #  启动报告归档
 #
 #  降级标记写在 /run（tmpfs），容器一重启就没了。这里把「本次启动是否降级」
-#  追加到持久化层的 boot-history.log，事后排查时能回答「从哪次启动开始不对的」。
+#  追加到持久化层的 boot.log，事后排查时能回答「从哪次启动开始不对的」。
 #  只在状态确实有变化时才写，常态零写入
 # ==============================================================================
 archive_boot_report() {
     local stamp detail
 
-    if [ ! -f "${DEGRADED_CRITICAL}" ] && [ ! -f "${DEGRADED}" ]; then
+    if [ ! -f "${CRITICAL}" ] && [ ! -f "${DEGRADED}" ]; then
         return 0
     fi
 
@@ -350,24 +328,24 @@ archive_boot_report() {
     # 必须 || true：cat 对缺失文件返回非零，配合 pipefail 会让这行赋值
     # 以失败收场，set -e 直接把整个 entrypoint 带崩 —— 本该「记录降级」的
     # 逻辑反而变成容器起不来
-    detail=$(cat "${DEGRADED_CRITICAL}" "${DEGRADED}" 2> /dev/null | tr -s '\n' ' ' || true)
+    detail=$(cat "${CRITICAL}" "${DEGRADED}" 2> /dev/null | tr -s '\n' ' ' || true)
     [ -n "${detail}" ] || return 0
 
     stamp=$(date '+%F %T')
     detail="[${stamp}] 镜像 $(cat "${IMAGE_VERSION_FILE}" 2> /dev/null || echo unknown) 启动降级：${detail}"
 
-    mkdir -p "${BAOTA_STATE}" 2> /dev/null \
-        || { warn "无法写入启动历史：${BAOTA_STATE}"; return 0; }
-    printf '%s\n' "${detail}" >> "${BOOT_HISTORY}" 2> /dev/null \
-        || { warn "无法写入启动历史：${BOOT_HISTORY}"; return 0; }
+    mkdir -p "${STATE_DIR}" 2> /dev/null \
+        || { warn "无法写入启动历史：${STATE_DIR}"; return 0; }
+    printf '%s\n' "${detail}" >> "${BOOT_LOG_FILE}" 2> /dev/null \
+        || { warn "无法写入启动历史：${BOOT_LOG_FILE}"; return 0; }
 
     # 只留最近若干行，避免它自己也变成一颗静默增长的种子
-    if [ -f "${BOOT_HISTORY}" ]; then
-        tail -n "${BOOT_HISTORY_MAX_LINES}" "${BOOT_HISTORY}" > "${BOOT_HISTORY}.tmp" 2> /dev/null \
-            && mv -f "${BOOT_HISTORY}.tmp" "${BOOT_HISTORY}" 2> /dev/null || true
+    if [ -f "${BOOT_LOG_FILE}" ]; then
+        tail -n "${BOOT_LOG_MAX_LINES}" "${BOOT_LOG_FILE}" > "${BOOT_LOG_FILE}.tmp" 2> /dev/null \
+            && mv -f "${BOOT_LOG_FILE}.tmp" "${BOOT_LOG_FILE}" 2> /dev/null || true
     fi
 
-    warn "本次启动存在持久化降级，已记录到 ${BOOT_HISTORY}"
+    warn "本次启动存在持久化降级，已记录到 ${BOOT_LOG_FILE}"
 }
 
 # ==============================================================================

@@ -1,57 +1,48 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  [漂移检测] 在一次性容器中原样执行官方安装脚本，检测会破坏持久化的上游变更：
+#  在一次性容器中原样跑官方安装脚本，只检测一项会破坏持久化的上游变更：
+#  **目录漂移** —— 安装产生的文件是否仍落在已知持久化目录集合内（落到集合
+#  外 = 那部分数据不会被持久化）。
 #
-#   目录漂移：安装产生的文件是否仍只落在已知的 overlay 持久化目录集合内。
-#    落到集合之外 = 那部分数据不会被持久化（静默丢数据）。
+#  ★ 为什么只检测这一项（不对抗上游）：「面板升级入口」「代码级更新旁路」要
+#    逐项跟踪上游脚本名与执行路径，永远跟不完且不影响数据安全 —— 面板内更新
+#    不生效已由 image/scripts/guard.sh 在执行入口兜住。
 #
-#  为什么只检测这一项：本项目的核心保证是「销毁容器重建后数据不丢」，而数据
-#  落点就是唯一会影响这条保证的上游行为。曾经还检测「面板升级入口」与「代码级
-#  更新旁路」——它们要求逐项跟踪上游脚本名、脚本内容乃至代码里的执行路径，与
-#  上游内部实现强耦合、永远跟不完，且并不影响数据安全，已移除。
+#  做法：装前快照 → 装 → 装后快照 → 比对。
+#  红线：前置包必须在「装前快照」之前装完，否则 apt 的写入会被误算成宝塔的。
 #
-#  做法与 docs/persistence.md 的实测一致：装前快照 → 装 → 装后快照 → 比对。
-#  注意前置软件包必须在「装前快照」之前装完，否则 apt 自身写入的文件会被
-#  误算成宝塔的写入。
-#
-#  入参（环境变量）：
-#    INSTALL_URL    官方安装脚本地址（必填）
-#    BASE_IMAGE     基础镜像（默认 debian:12，与 image/Dockerfile 的默认值一致）
-#    OUT_MD         markdown 报告输出路径（默认 drift.md）
-#    CRIT_FILE      关键标记输出路径，内容 1 表示存在关键漂移
-#
-#  退出码：安装失败等非预期错误为 1。检测到漂移不改变退出码，由 CRIT_FILE 表达，
-#          由工作流据此决定是否提醒。
+#  入参：INSTALL_URL（必填）/ BASE_IMAGE / OUT_MD / CRITICAL_FILE
+#  退出码：安装失败等为 1；检测到漂移不改退出码，由 CRITICAL_FILE 表达
 # ==============================================================================
 set -euo pipefail
 
 INSTALL_URL="${INSTALL_URL:?未指定 INSTALL_URL}"
 BASE_IMAGE="${BASE_IMAGE:-debian:12}"
 OUT_MD="${OUT_MD:-drift.md}"
-CRIT_FILE="${CRIT_FILE:-drift-critical}"
+CRITICAL_FILE="${CRITICAL_FILE:-drift-critical}"
 
-INSTALL_LOG=/tmp/btpanel-install.log
+INSTALL_LOG=/tmp/install.log
 
-CNAME="bt-drift-$$"
-CRIT=0
+CONTAINER="baota-drift-$$"
+CRITICAL=0
 
 log()  { echo "🔭 [drift] $*"; }
 warn() { echo "⚠️ [drift][WARN] $*" >&2; }
 die()  { echo "❌ [drift][ERROR] $*" >&2; exit 1; }
 
-cleanup() { docker rm -f "$CNAME" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-in_knowns() {
+in_known_dirs() {
     local d="$1" k
     # shellcheck disable=SC2086
-    for k in $KNOWNS; do [ "$k" = "$d" ] && return 0; done
+    for k in $KNOWN_DIRS; do [ "$k" = "$d" ] && return 0; done
     return 1
 }
 
 # 统计每个顶层目录的文件数（排除虚拟文件系统与临时目录）
-snapshot() {
-    docker exec -i "$CNAME" bash -s <<'EOS'
+count_top_dirs() {
+    docker exec -i "$CONTAINER" bash -s <<'EOS'
 for d in /*; do
     [ -d "$d" ] || continue
     case "$d" in /proc|/sys|/dev|/run|/tmp) continue ;; esac
@@ -64,47 +55,52 @@ EOS
 # /www 是按子路径分别处理的（server 走 overlay、wwwroot/backup/server/data 等走
 # bind、wwwlogs 按设计不持久化），顶层文件数没法表达这件事 —— 单独看它的子目录
 www_subdirs() {
-    docker exec "$CNAME" bash -c \
+    docker exec "$CONTAINER" bash -c \
         'find /www -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null | sort' || true
 }
 
 # ------------------------------------------------------------------------------
-#  声明清单**从真源派生**，不在这里另抄一份：抄一份必然与
-#  image/conf/defaults.env 漂移（那边加了数据目录、这边还在用旧清单，表现是
-#  「新的数据目录每次都被报成关键漂移」，或者反过来漏报）。
-#
-#    KNOWNS       顶层目录 = PERSIST_SYSTEM_DIRS 里不含 / 的项。
-#                 ★ 刻意不含 www：比对是按**顶层目录**统计的，而 /www 是按
-#                 子路径分别处理（server 走 overlay、其余见下），把 www 算进
-#                 KNOWNS 会把「新出现的 /www 子路径」一并放过
-#    WWW_PERSIST  /www 的一级子目录 = PERSIST_SYSTEM_DIRS 的 www/* + WWW_DATA_SUBDIRS
-#    WWW_VOLATILE 按设计不持久化的 /www 子路径（我们自己的决定，派生不出来）：
-#                 站点日志与回收站、PHP session。回收站是「删除后的暂存区」，
-#                 与容器同生共死（重建即空）；它的列表由面板扫目录得到、不是数据库
-#                 记录，所以不会留下「有记录没文件」的错位。上游 13 的落点是
-#                 /www/.Recycle_bin，裸 Recycle_bin 是历史名，一并列出
+#  声明清单**从 defaults.env 派生**，不另抄一份：抄一份必然漂移（那边加了数据
+#  目录、这边还在用旧清单 → 新目录每次被报成关键漂移，或反过来漏报）。
+#    KNOWN_DIRS           顶层目录 = PERSIST_SYSTEM_DIRS 里不含 / 的项。
+#                         ★ 刻意不含 www：算进来会把「新出现的 /www 子路径」一并放过
+#    WWW_PERSIST_SUBDIRS  /www 一级子目录 = PERSIST_SYSTEM_DIRS 的 www/*
+#                         + WWW_DATA_SUBDIRS + WWW_OPTIONAL_SUBDIRS
+#    WWW_VOLATILE_SUBDIRS 按设计不持久化的 /www 子路径（本文件定义，运行期不读：
+#                         列的是上游落点，不该固化成项目配置 —— 见「不对抗上游」）
 # ------------------------------------------------------------------------------
 DEFAULTS_ENV="${DEFAULTS_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/image/conf/defaults.env}"
-read_default() { sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" "$DEFAULTS_ENV" | head -n 1; }
+# 与 check/lib.sh 的 read_default **同名不同义**：那一份会展开嵌套引用（那边要取
+# PERSIST_SYSTEM_ROOT 这类引用别人的变量），这一份不展开 —— 本脚本只取
+# PERSIST_SYSTEM_DIRS / WWW_*_SUBDIRS 这些不含引用的清单。
+# 显式区分开：同名不同实现是最难发现的一类坑，哪天这里要取嵌套引用的变量，
+# 直接换成 lib.sh 的展开版，不要在本文件里再写第二份。
+read_raw_default() { sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" "$DEFAULTS_ENV" | head -n 1; }
 
-PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
-WWW_DATA_SUBDIRS=$(read_default WWW_DATA_SUBDIRS)
+PERSIST_SYSTEM_DIRS=$(read_raw_default PERSIST_SYSTEM_DIRS)
+WWW_DATA_SUBDIRS=$(read_raw_default WWW_DATA_SUBDIRS)
+WWW_OPTIONAL_SUBDIRS=$(read_raw_default WWW_OPTIONAL_SUBDIRS)
 [ -n "$PERSIST_SYSTEM_DIRS" ] && [ -n "$WWW_DATA_SUBDIRS" ] \
     || die "无法从 ${DEFAULTS_ENV} 解析 PERSIST_SYSTEM_DIRS / WWW_DATA_SUBDIRS"
 
 # shellcheck disable=SC2086
-KNOWNS=$(printf '%s\n' $PERSIST_SYSTEM_DIRS | grep -v / | tr '\n' ' ')
+KNOWN_DIRS=$(printf '%s\n' $PERSIST_SYSTEM_DIRS | grep -v / | tr '\n' ' ')
+# 可选模块目录也要算进「已被持久化覆盖」：它虽然按需出现，但一旦装了就是用户数据
 # shellcheck disable=SC2086
-WWW_PERSIST=$(
+WWW_PERSIST_SUBDIRS=$(
     {
         printf '%s\n' $PERSIST_SYSTEM_DIRS | grep '^www/'
         printf '%s\n' $WWW_DATA_SUBDIRS
+        printf '%s\n' $WWW_OPTIONAL_SUBDIRS
     } | sed -e 's#^www/##' -e 's#/.*##' | sort -u | tr '\n' ' '
 )
-WWW_VOLATILE='wwwlogs .Recycle_bin Recycle_bin php_session'
+
+
+# 上游落点清单：上游新增可再生目录时，把目录名加进来即可（否则会被报成关键漂移）
+WWW_VOLATILE_SUBDIRS='wwwlogs .Recycle_bin Recycle_bin php_session panel-static monitor_data'
 
 : > "$OUT_MD"
-echo 0 > "$CRIT_FILE"
+echo 0 > "$CRITICAL_FILE"
 
 # ------------------------------------------------------------------------------
 #  0. 起容器并装前置包
@@ -114,10 +110,10 @@ echo 0 > "$CRIT_FILE"
 #  同理不含 logrotate —— 它随「日志体积防线」一起从 base.sh 移除了，这里若
 #  留着，被测环境就与真实镜像不一致（漂移检测的前提是「装的东西一致」）
 # ------------------------------------------------------------------------------
-docker run -d --name "$CNAME" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
+docker run -d --name "$CONTAINER" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
 log "已启动一次性容器（${BASE_IMAGE}）"
 
-docker exec -i "$CNAME" bash -s <<'EOS'
+docker exec -i "$CONTAINER" bash -s <<'EOS'
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -142,20 +138,20 @@ log '前置软件包已就绪'
 #  1. 目录漂移检测
 # ------------------------------------------------------------------------------
 WWW_BEFORE=$(www_subdirs)
-BEFORE=$(snapshot)
+BEFORE=$(count_top_dirs)
 
 log '执行官方安装脚本（参数与 image/build/panel.sh 保持一致）'
-docker exec "$CNAME" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
+docker exec "$CONTAINER" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
     || die "下载安装脚本失败：${INSTALL_URL}"
 
 # 参数故意不加引号：官方脚本要求逐个参数传入（与 panel.sh 一致）
-docker exec "$CNAME" bash -c \
+docker exec "$CONTAINER" bash -c \
     "cd /root && bash install.sh -y --ssl-disable" \
-    || { docker exec "$CNAME" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
+    || { docker exec "$CONTAINER" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
          die '官方安装脚本执行失败'; }
 log '安装完成，开始比对'
 
-AFTER=$(snapshot)
+AFTER=$(count_top_dirs)
 
 declare -A BEFORE_MAP=() AFTER_MAP=()
 while read -r d n; do [ -n "${d:-}" ] && BEFORE_MAP["$d"]="$n"; done <<< "$BEFORE"
@@ -177,7 +173,7 @@ for d in $DIRS; do
     a="${AFTER_MAP[$d]:-0}"
     delta=$(( a - b ))
     [ "$delta" -gt 0 ] || continue
-    if in_knowns "$d"; then
+    if in_known_dirs "$d"; then
         printf '| `/%s` | %s | %s | %s | ✅ 已被持久化覆盖 |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
     elif [ "$d" = 'www' ]; then
         # /www 的子路径各有归属，顶层计数没有意义，交给下面的子目录比对
@@ -185,7 +181,7 @@ for d in $DIRS; do
     else
         printf '| `/%s` | %s | %s | %s | ❌ **未覆盖，会静默丢数据** |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
         warn "未覆盖的写入目录：/${d}（新增 ${delta} 个文件）"
-        CRIT=1
+        CRITICAL=1
     fi
 done
 
@@ -202,11 +198,11 @@ for sub in $WWW_AFTER; do
     esac
     state=''
     # shellcheck disable=SC2086
-    for p in $WWW_PERSIST; do
+    for p in $WWW_PERSIST_SUBDIRS; do
         [ "$p" = "$sub" ] && state='✅ 已在声明清单内（持久化）'
     done
     # shellcheck disable=SC2086
-    for p in $WWW_VOLATILE; do
+    for p in $WWW_VOLATILE_SUBDIRS; do
         [ "$p" = "$sub" ] && state='⚪ 按设计不持久化（重建即清空）'
     done
     if [ -n "$state" ]; then
@@ -214,7 +210,7 @@ for sub in $WWW_AFTER; do
     else
         printf '| `www/%s` | ❌ **新出现且未声明，需人工确认怎么持久化** |\n' "$sub" >> "$OUT_MD"
         warn "未声明的 /www 子目录：/www/${sub}"
-        CRIT=1
+        CRITICAL=1
     fi
 done
 
@@ -225,12 +221,12 @@ done
     echo
     echo '### 结论'
     echo
-    if [ "$CRIT" -eq 0 ]; then
+    if [ "$CRITICAL" -eq 0 ]; then
         echo '✅ 未检测到会破坏持久化的上游变更（数据仍全部落在持久化目录内）。'
     else
         echo '❌ 检测到关键漂移，需人工介入（详见上文）。'
     fi
 } >> "$OUT_MD"
 
-echo "$CRIT" > "$CRIT_FILE"
-log "检测完成（关键漂移：${CRIT}），报告：${OUT_MD}"
+echo "$CRITICAL" > "$CRITICAL_FILE"
+log "检测完成（关键漂移：${CRITICAL}），报告：${OUT_MD}"

@@ -7,7 +7,7 @@ name: 🔬 巡检：已发布镜像回归
 #  与构建工作流的分工：构建工作流验「本地构建的候选镜像」（拦在推送前）；
 #  本工作流验「线上已发布的镜像」，每天确认它仍然健康。
 #
-#  单 job 顺序跑各条线：线是从 image/channels.conf 读的，新增一条线不用改本文件。
+#  单 job 顺序跑各条线：线是从 image/lines.conf 读的，新增一条线不用改本文件。
 #  顺序而不是矩阵，是为了把「产物上传 → 下载 → 汇总」那套搬运彻底去掉 ——
 #  两条线各约 10 分钟，串行也在 60 分钟内跑完，换来的是一份一眼能读完的流水线。
 #
@@ -27,8 +27,8 @@ concurrency:
 env:
   IMAGE_NAME: baota
   REPORT: .github/reports/report.md
-  HC: .github/scripts/check
-  CHANNELS: image/channels.conf
+  CHECK_DIR: .github/scripts/check
+  LINES: image/lines.conf
 
 jobs:
   check:
@@ -63,31 +63,31 @@ jobs:
           summary=''
           detail=''
 
-          while read -r line channel vfile _url _probe _tag _base; do
+          while read -r line display vfile _url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
             ver=$(tr -d '[:space:]' < "${vfile}")
             [ -n "${ver}" ] || { echo "::error::${vfile} 为空"; exit 1; }
 
             # 回归脚本自己会 pull / 起容器 / 跑三套门禁；这里只负责收集结果
-            if bash "${HC}/published.sh" "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${ver}" \
+            if bash "${CHECK_DIR}/published.sh" "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${ver}" \
                     "${ver}" "/tmp/report-${line}.md"; then
               icon='✅'
-              echo "✅ ${channel}（${ver}）通过"
+              echo "✅ ${display}（${ver}）通过"
             else
               icon='❌'
               failed=1
-              echo "::error::${channel}（${ver}）回归未通过，详见下方报告片段"
+              echo "::error::${display}（${ver}）回归未通过，详见下方报告片段"
             fi
 
-            summary="${summary}| ${channel} | \`${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${ver}\` | ${icon} |"$'\n'
-            detail="${detail}## ${channel}（${line}，${ver}）"$'\n\n'
+            summary="${summary}| ${display} | \`${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${ver}\` | ${icon} |"$'\n'
+            detail="${detail}## ${display}（${line}，${ver}）"$'\n\n'
             if [ -f "/tmp/report-${line}.md" ]; then
               detail="${detail}$(cat "/tmp/report-${line}.md")"$'\n'
             else
               detail="${detail}_（该线未产出报告，见构建日志）_"$'\n'
             fi
             detail="${detail}"$'\n---\n\n'
-          done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
+          done < <(grep -vE '^[[:space:]]*(#|$)' "${LINES}")
 
           {
             echo '# 📊 已发布镜像每日验证报告'
@@ -97,11 +97,11 @@ jobs:
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
             echo '- 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）'
-            echo "- 验证脚本：\`${HC}/published.sh\`"
+            echo "- 验证脚本：\`${CHECK_DIR}/published.sh\`"
             echo
             echo '## 概要'
             echo
-            echo '| 通道 | 镜像 | 结果 |'
+            echo '| 线 | 镜像 | 结果 |'
             echo '|---|---|---|'
             printf '%s' "${summary}"
             echo
@@ -151,7 +151,7 @@ jobs:
       - name: 🚦 判定
         run: |
           if [ "${FAILED:-0}" = '1' ]; then
-            echo "::error::有通道未通过回归验证，详见 ${REPORT}"
+            echo "::error::有线未通过回归验证，详见 ${REPORT}"
             exit 1
           fi
-          echo '✅ 各通道的已发布镜像均通过回归验证'
+          echo '✅ 各条线的已发布镜像均通过回归验证'

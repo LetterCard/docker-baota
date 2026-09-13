@@ -3,20 +3,15 @@
 #  🩺 宝塔面板镜像发布前健康检查（CI 门禁）
 #
 #  用法：bash run.sh core <镜像名:标签> <期望的宝塔版本号>
-#        （也可直接执行本脚本，参数相同）
 #
-#  镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后，workflow 才登录
-#  并推送。任一检查失败即非零退出，阻断发布。
+#  镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后 workflow 才推送，
+#  任一检查失败即非零退出，阻断发布。
 #
-#  两阶段共 21 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
-#    A 全新数据卷：systemd / overlay 可写 / 关键路径（含 pyenv 模块）/
-#                  面板与任务进程 / 安全入口 / 版本号 / 首启凭据 / 写入落盘 /
-#                  自启 / 防火墙关闭 / SSH 与 bt 命令 / 健康检查判据 /
-#                  备份工具 / PHP 扩展编译工具链 / 不可变面板守卫
-#    B 销毁容器后用同一个卷重建：数据不丢、不会二次初始化、面板自动恢复
+#  两阶段（A 全新数据卷 / B 销毁后用同一卷重建）共 22 步，针对「本容器化方案 +
+#  真机宝塔体验」定制，不是通用探活。断言写在脚本里、step 名即用例名，细节不
+#  抄进文档 —— 抄一份必然两处漂移。
 #
-#  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 整体排除，
-#  不会进入生产镜像。
+#  本脚本只在 CI runner 上执行，放在 .github/ 下即被 .dockerignore 排除。
 # ==============================================================================
 set -euo pipefail
 
@@ -45,9 +40,11 @@ PANEL_STATE_SUBDIRS=$(read_default PANEL_STATE_SUBDIRS)
 PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
 PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
+META_BOOT_FILE=$(read_default META_BOOT_FILE)
 [ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
 [ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 [ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
+[ -n "${META_BOOT_FILE}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 META_BOOT_FILE"; exit 1; }
 
 # 面板运行状态（输出带颜色码，去掉后再判断）。
 # 面板与任务两个进程共用这一次调用的结果，不重复执行 bt status
@@ -67,25 +64,22 @@ assert_processes_up() {
 # 判据从「grep 启动日志里的中文文案」改为读容器内的降级标记文件：
 # init.sh 在任何持久化失败/只读降级时都会写 /run/baota/degraded*，
 # 这样告警文案怎么改都不影响门禁，也不会漏掉「挂载直接失败」这一类情况
-assert_no_readonly_warning() {
-    if inside test -e /run/baota/degraded-critical; then
-        fail "关键目录未持久化（/run/baota/degraded-critical 存在），数据写入会静默丢失"
+assert_no_degraded() {
+    if inside test -e /run/baota/critical; then
+        fail "关键目录未持久化（/run/baota/critical 存在），数据写入会静默丢失"
     fi
     if inside test -e /run/baota/degraded; then
         fail "存在未持久化目录（/run/baota/degraded）：$(inside cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
     fi
 }
 
-# 面板状态漂移报告（不对抗上游版）：
-# 面板代码来自镜像层、不持久化，运行期对面板目录的写入只会落在容器可写层，
-# docker pull 新镜像时这些写入会被整体丢弃。我们要暴露的是「持久化声明的盲区」——
+# 面板状态漂移报告（不对抗上游版）：面板代码来自镜像层、不持久化，运行期写入
+# 只落容器可写层，docker pull 新镜像时被整体丢弃。我们要暴露「持久化声明的盲区」——
 # 上游把状态写到了镜像里原本没有、我们也没声明进 PANEL_STATE_SUBDIRS 的全新位置。
-#
-# 怎么判断「镜像里原本有没有」：不靠手写白名单去猜上游的瞬态目录（那是在对抗上游，
-# 且上游一改写入结构就失准），而是直接问镜像本身——起一个临时容器 ls 镜像里
-# /www/server/panel 的顶层目录，作为客观基线。镜像里已有的目录（class/config/logs/…）
-# 上的任何运行期写入都是可再生的、升级会重新铺上，不算盲区；只有镜像里不存在的
-# 全新顶层目录上的写入，才可能是我们漏声明的状态。
+# 怎么判断「镜像里原本有没有」：不靠手写白名单猜上游瞬态目录（那是在对抗上游），
+# 而是直接问镜像本身——起临时容器 ls 镜像里 /www/server/panel 顶层目录作客观基线。
+# 镜像里已有的目录（class/config/logs/…）上的写入可再升、升级会重铺，不算盲区；
+# 只有镜像里不存在的全新顶层目录上的写入，才可能是漏声明的状态。
 # 只报告不阻断：确认需持久化就加进 PANEL_STATE_SUBDIRS。
 report_panel_state_drift() {
     local line path rel top
@@ -136,7 +130,7 @@ step "A1) 等待 systemd 就绪"
 wait_systemd
 
 step "A2) 校验 overlay 持久化"
-assert_no_readonly_warning
+assert_no_degraded
 MOUNTED=$(inside_sh "mount | grep -c 'type overlay'" || true)
 MOUNTED=${MOUNTED:-0}
 # overlay 只用于系统层各目录；面板代码不再 overlay，业务与面板状态走 bind
@@ -167,11 +161,11 @@ pass "系统层 upper 与业务/面板状态绑定源齐备"
 inside_sh "mount | grep -q ' on /www/server/panel '" \
     || fail "/www/server/panel 未被镜像绑定覆盖：面板代码会落进持久化层"
 inside_sh 'echo probe > /www/server/panel/_code_probe'
-if inside test -e /data/system/www/server/panel/_code_probe; then
-    fail "面板代码写进了持久化层（/data/system/www/server/panel）：换镜像将无法更新面板"
+if inside test -e "${PERSIST_SYSTEM_ROOT}/www/server/panel/_code_probe"; then
+    fail "面板代码写进了持久化层（${PERSIST_SYSTEM_ROOT}/www/server/panel）：换镜像将无法更新面板"
 fi
 inside_sh 'rm -f /www/server/panel/_code_probe'
-pass "面板代码来自镜像、不落持久化层（组件与插件数据则落在 data/system/www/server）"
+pass "面板代码来自镜像、不落持久化层（组件与插件数据则落在 ${PERSIST_SYSTEM_ROOT}/www/server）"
 
 # 并发保护：同一份 data 不能被两个实例同时挂载（内核 EBUSY / 行为未定义）。
 # 第二实例必须被独占锁拦下并中止 —— 这是数据安全性质，要在推送前就拦住
@@ -207,8 +201,8 @@ inside test -x /baota/healthcheck.sh \
 # 不同。失败时逐段复跑，把原因钉死在日志里
 if ! inside /baota/healthcheck.sh; then
     echo "----- healthcheck 三段判据取证 -----"
-    inside test -f /run/baota/degraded-critical \
-        && echo "[① 降级标记] 存在：/run/baota/degraded-critical" \
+    inside test -f /run/baota/critical \
+        && echo "[① 降级标记] 存在：/run/baota/critical" \
         || echo "[① 降级标记] 无"
     echo "[② 磁盘水位] 判据：可用 <1GB 或已用 ≥95% 即 unhealthy"
     inside_sh "df -Ph ${PERSIST_DATA_ROOT} ${PERSIST_SYSTEM_ROOT} 2>/dev/null" || true
@@ -301,7 +295,7 @@ pass "面板版本一致"
 step "A8) 校验首次启动生成的随机凭据"
 # 镜像里的构建期占位值形如 bt-build-xxxx，必须已被替换成随机十六进制，
 # 否则等于把一个公开可见的口令 / 入口发到线上
-inside test -e /www/server/panel/data/.docker-initialized \
+inside test -e /www/server/panel/data/.initialized \
     || fail "缺少首次初始化标记，entrypoint 的初始化没有执行"
 echo "$SAFE" | grep -Eq '^/[0-9a-f]{8}$' \
     || fail "安全入口不是首启随机生成的（当前：${SAFE}）"
@@ -318,32 +312,33 @@ fi
 pass "安全入口、面板口令、root 口令均为首启随机生成"
 
 step "A9) 校验写入确实落到持久化层"
-inside_sh 'echo persist > /etc/_persist_marker'
-inside_sh 'echo persist > /www/server/panel/data/_persist_marker'
-inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_marker'
-inside_sh 'echo persist > /www/wwwroot/_persist_marker'
+inside_sh 'echo persist > /etc/_marker'
+inside_sh 'echo persist > /www/server/panel/data/_marker'
+inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_marker'
+inside_sh 'echo persist > /www/wwwroot/_marker'
 # 面板里装的东西：组件（PHP/nginx/MySQL…）、计划任务脚本、插件数据 ——
 # 都落在 /www/server 的 overlay upper 里，重建后必须还在（不用重装）
 inside_sh 'mkdir -p /www/server/php /www/server/cron /www/server/total/logs'
-inside_sh 'echo persist > /www/server/php/_persist_marker'
-inside_sh 'echo persist > /www/server/cron/_persist_marker'
-inside_sh 'echo persist > /www/server/total/logs/_persist_marker'
+inside_sh 'echo persist > /www/server/php/_marker'
+inside_sh 'echo persist > /www/server/cron/_marker'
+inside_sh 'echo persist > /www/server/total/logs/_marker'
 # 落盘路径语义（容易搞混，写清楚再检查）：
-#   /etc /var               系统层 overlay，upper 在 /data/system/<dir>
+#   /etc /var               系统层 overlay，upper 在 ${PERSIST_SYSTEM_ROOT}/<dir>
 #   /www/server             系统层 overlay（组件 / cron 脚本 / 插件数据）
 #   /www/wwwroot            业务 bind，源 = /data/www/wwwroot
 #   /www/server/panel/data  面板状态 bind，源 = ${PANEL_STATE_ROOT}/data
+#                           （= /data/www/server/panel/data，与容器内位置同名）
 #   面板代码（/www/server/panel 本体）刻意不落盘：它属于镜像
-inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入未落盘"
-inside test -f "${PANEL_STATE_ROOT}/data/_persist_marker"  || fail "面板状态写入未落盘（应为 ${PANEL_STATE_ROOT}/data）"
-inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到绑定源 /data/www/wwwroot"
-inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-inside test -f /data/system/www/server/php/_persist_marker \
-    || fail "面板里装的组件未落盘（应为 /data/system/www/server/php）"
-inside test -f /data/system/www/server/cron/_persist_marker \
-    || fail "计划任务脚本未落盘（应为 /data/system/www/server/cron）"
-inside test -f /data/system/www/server/total/logs/_persist_marker \
-    || fail "插件数据未落盘（应为 /data/system/www/server/total/logs）"
+inside test -f "${PERSIST_SYSTEM_ROOT}/etc/_marker"            || fail "/etc 写入未落盘"
+inside test -f "${PANEL_STATE_ROOT}/data/_marker"  || fail "面板状态写入未落盘（应为 ${PANEL_STATE_ROOT}/data）"
+inside test -f /data/www/wwwroot/_marker           || fail "/www/wwwroot 写入未落到绑定源 /data/www/wwwroot"
+inside test -f "${PERSIST_SYSTEM_ROOT}/var/spool/cron/_marker" || fail "/var 计划任务目录未落盘"
+inside test -f "${PERSIST_SYSTEM_ROOT}/www/server/php/_marker" \
+    || fail "面板里装的组件未落盘（应为 ${PERSIST_SYSTEM_ROOT}/www/server/php）"
+inside test -f "${PERSIST_SYSTEM_ROOT}/www/server/cron/_marker" \
+    || fail "计划任务脚本未落盘（应为 ${PERSIST_SYSTEM_ROOT}/www/server/cron）"
+inside test -f "${PERSIST_SYSTEM_ROOT}/www/server/total/logs/_marker" \
+    || fail "插件数据未落盘（应为 ${PERSIST_SYSTEM_ROOT}/www/server/total/logs）"
 pass "写入分别落到系统层、面板状态、业务目录与 /www/server（组件 / cron / 插件数据）"
 
 step "A10) 校验面板服务开机自启与运行态"
@@ -371,7 +366,7 @@ pass "sshd 运行中、bt 命令可用"
 
 step "A13) 校验备份工具"
 # 备份是「持久化承诺」的兑现手段，工具本身必须随镜像可用：
-#   --list  能读出体积分布（依赖 du / PERSIST_DIRS 解析正确）
+#   --list  能读出体积分布（依赖 du / PERSIST_SYSTEM_DIRS 解析正确）
 #   生成一份备份并通过自校验（依赖排除项、xattrs、路径解析都正确）
 inside test -x /baota/backup.sh \
     || fail "backup.sh 缺失或不可执行（baota-backup 命令不可用）"
@@ -430,12 +425,12 @@ step "A15) 不可变面板守卫（解释器包装 + 镜像代码副本）"
 # 原理见 image/scripts/guard.sh 头部注释：面板代码的每一次执行都先过守卫，
 # 于是面板内「更新」写进来的新代码永远不会被执行，init_db 只由镜像版本代码执行，
 # 持久层的库不可能「比代码新」。这里验装配在位、副本完整且体积可控、守卫行为正确。
-inside test -x /baota/shim || fail "缺少 /baota/shim（解释器包装）"
+inside test -x /baota/shim.sh || fail "缺少 /baota/shim.sh（解释器包装）"
 inside test -x /baota/guard.sh || fail "缺少 /baota/guard.sh（执行入口守卫）"
 for _p in python python3; do
     _target=$(inside readlink "/www/server/panel/pyenv/bin/${_p}" 2> /dev/null || true)
-    [ "${_target}" = '/baota/shim' ] \
-        || fail "pyenv/bin/${_p} 未指向 /baota/shim（当前：${_target:-无}），守卫不会生效"
+    [ "${_target}" = '/baota/shim.sh' ] \
+        || fail "pyenv/bin/${_p} 未指向 /baota/shim.sh（当前：${_target:-无}），守卫不会生效"
 done
 inside test -x /www/server/panel/pyenv/bin/python-real \
     || fail "缺少 /www/server/panel/pyenv/bin/python-real（真解释器）"
@@ -479,18 +474,18 @@ pass "容器已用原数据卷重建"
 
 step "B1) 等待重建后的 systemd 与面板就绪"
 wait_systemd
-assert_no_readonly_warning
+assert_no_degraded
 wait_panel_http
 pass "重建后面板端口已响应"
 
 step "B2) 校验数据未丢失"
-inside test -f /data/system/etc/_persist_marker            || fail "/etc 数据在重建后丢失"
-inside test -f /www/server/panel/data/_persist_marker      || fail "面板状态数据在重建后丢失"
-inside test -f /www/wwwroot/_persist_marker                || fail "站点数据在重建后丢失"
-inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务在重建后丢失"
-inside test -f /www/server/php/_persist_marker             || fail "面板里装的组件在重建后丢失"
-inside test -f /www/server/cron/_persist_marker            || fail "计划任务脚本在重建后丢失"
-inside test -f /www/server/total/logs/_persist_marker      || fail "插件数据在重建后丢失"
+inside test -f "${PERSIST_SYSTEM_ROOT}/etc/_marker"            || fail "/etc 数据在重建后丢失"
+inside test -f /www/server/panel/data/_marker      || fail "面板状态数据在重建后丢失"
+inside test -f /www/wwwroot/_marker                || fail "站点数据在重建后丢失"
+inside test -f "${PERSIST_SYSTEM_ROOT}/var/spool/cron/_marker" || fail "/var 计划任务在重建后丢失"
+inside test -f /www/server/php/_marker             || fail "面板里装的组件在重建后丢失"
+inside test -f /www/server/cron/_marker            || fail "计划任务脚本在重建后丢失"
+inside test -f /www/server/total/logs/_marker      || fail "插件数据在重建后丢失"
 pass "系统配置、面板状态、业务数据、计划任务、组件与插件数据均已保留"
 
 SAFE_AFTER=$(inside_cat /www/server/panel/data/admin_path.pl)
@@ -500,9 +495,9 @@ PORT_AFTER=$(inside_cat /www/server/panel/data/port.pl)
 pass "未发生二次初始化，登录地址与端口保持不变"
 
 step "B3) 校验重建后无持久化降级记录"
-# boot-history.log 只在启动降级时才追加，存在即说明持久化不完整
-inside test ! -f /data/system/.baota/boot-history.log \
-    || fail "存在持久化降级记录：$(inside cat /data/system/.baota/boot-history.log 2>/dev/null | tail -3)"
+# boot.log 只在启动降级时才追加，存在即说明持久化不完整
+inside test ! -f "${PERSIST_SYSTEM_ROOT}/.baota/${META_BOOT_FILE}" \
+    || fail "存在持久化降级记录：$(inside cat "${PERSIST_SYSTEM_ROOT}/.baota/${META_BOOT_FILE}" 2>/dev/null | tail -3)"
 pass "两次启动均未发生持久化降级"
 
 step "B4) 校验重建后面板自动恢复运行"

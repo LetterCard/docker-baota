@@ -4,17 +4,14 @@
 #
 #  由 Dockerfile 调用：bash /opt/baota/build/base.sh
 #
-#  三个构建脚本为 12.0.0、13.0.0 两个通道共用，按 base → panel → services
-#  的顺序执行。顺序的真源是 Dockerfile 里那三行 RUN，不在文件名上 ——
-#  文件名只表达「这个脚本是什么」，不重复编码调用顺序。
-#  Dockerfile 只保留各通道的构建参数与元数据差异；构建脚本目录在阶段 3
-#  结束时删除，不会出现在生产镜像里。
+#  三个构建脚本各条线共用，按 base → panel → services 执行。顺序的真源是
+#  Dockerfile 里那三行 RUN，不在文件名上；本目录在阶段 3 结束时删除，不进生产镜像。
 #
-#  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量，可直接读取）：
-#    APT_MIRROR  apt 镜像站主机名
+#  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量）：
+#    APT_MIRROR  apt 镜像站主机名（不可用时自动切 APT_MIRROR_FALLBACK）
 #    TZ          时区
 #
-#  日志约定：[build] 普通信息，[build][WARN] 告警，[build][ERROR] 错误
+#  日志：[build] / [build][WARN] / [build][ERROR]
 # ==============================================================================
 set -euxo pipefail
 
@@ -42,17 +39,14 @@ setup_apt() {
     echo 'DPkg::Options { "--force-confold"; "--force-confdef"; }' \
         > /etc/apt/apt.conf.d/02dpkg-options
 
-    # 排除文档/手册页与「非 en/en_US 的多语言翻译」：容器里没人读文档，且不
-    # 需要其它语言的 .mo 翻译，却会实打实占掉 /usr 的体积（locale 翻译常达
-    # 数十~上百 MB）。/usr 是系统层持久化目录里条目最多的（实测 26750 条），
-    # 排除后镜像更小，用户后续 apt install 时写进 upper 的增量也更小。
-    #
-    # 必须在任何 apt install 之前写入 —— path-exclude 只对之后安装的包生效，
-    # 对已经装好的包没有作用（且对后续层 panel.sh 的 apt 安装同样生效）。
+    # 排除文档/手册页与「非 en/en_US 翻译」：容器里没人读文档，其余语言 .mo 翻译
+    # 却实打实占掉 /usr 体积（locale 翻译常达数十~上百 MB）。/usr 是系统层条目最多的
+    # （实测 26750 条），排除后镜像更小、后续 apt install 写进 upper 的增量也更小。
+    # 必须在任何 apt install 之前写入 —— path-exclude 只对之后安装的包生效，对
+    # 已装好的包无作用（对后续层 panel.sh 的 apt 安装同样生效）。
     # 保留：copyright（许可证要求）；en / en_US 翻译与 locale.alias（镜像默认
-    # LANG=en_US.UTF-8，需保住该 locale 的 i18n 行为，面板与运行环境均为英文）。
-    # 注意仅排除 /usr/share/locale（翻译 .mo），不动 /usr/share/i18n（locale-gen
-    # 编译 en_US.UTF-8 依赖它，已在 base.sh 内 locale-gen 完成后才清理）。
+    # LANG=en_US.UTF-8，需保住该 locale 的 i18n 行为）。仅排除 /usr/share/locale
+    # （翻译 .mo），不动 /usr/share/i18n（locale-gen 编译 en_US.UTF-8 依赖它）。
     cat > /etc/dpkg/dpkg.cfg.d/01-exclude-docs <<'EOF'
 # 排除文档、手册页与非 en/en_US 的多语言翻译，减少镜像与持久化层体积
 path-exclude=/usr/share/doc/*
@@ -94,20 +88,15 @@ write_sources() {
 install_packages() {
     log '1/3 安装基础软件包'
 
-    # 下面「编译工具链 + LNMP 依赖」这一段取自宝塔官方镜像
-    # btpanel/btpanel 的 Dockerfile（官方替我们把坑踩完了：装 PHP 扩展、编译
-    # nginx/php/各类组件所需的工具与 dev 库）。我们自己挑包必然漏——缺
-    # autoconf 就会让所有 PHP 扩展报 Cannot find autoconf）。代价约 +160MB，
-    # 换「以后不再补依赖」。包名已实测在 Debian 12 (bookworm) 下全部有效。
-    # 诊断类冗余包（traceroute/dos2unix/p7zip-full/cpio）已剔除瘦身；net-tools
-    # 因宝塔网络模块可能调用 ifconfig、dnsutils 可能调用 nslookup/dig 予以保留。
-    # libtool 是 Debian 的拆分包：libtool 只提供 libtoolize（phpize 链路用），
-    # 命令本体 /usr/bin/libtool 在 libtool-bin 里 —— 漏装它，A14 的
-    # 「command -v libtool」护栏会在发布前把整条流水线拦下（已实测踩过）。
-    # 包列表收进数组，安装与兜底重试共用一份，避免两处不同步。
-    # 先尝试主镜像；若安装阶段失败（镜像站对 pool 限流 / 返回 403 等 —— 此时
-    # update 阶段索引可正常拉取，兜底不会在 update 阶段触发），自动切备用镜像
-    # 重写源并重试一次，避免「索引能拉、.deb 下载被拒」这类单点故障拖垮整条构建
+    # 「编译工具链 + LNMP 依赖」取自宝塔官方镜像 btpanel/btpanel 的 Dockerfile
+    # （官方替我们踩完坑：装 PHP 扩展、编译 nginx/php 所需的工具与 dev 库）。
+    # 自己挑包必然漏——缺 autoconf 就让所有 PHP 扩展报 Cannot find autoconf；
+    # 代价约 +160MB，换「以后不再补依赖」，包名已实测 Debian 12 下全有效。
+    # 冗余包（traceroute/dos2unix/p7zip-full/cpio）已剔除；net-tools（ifconfig）、
+    # dnsutils（nslookup/dig）因宝塔可能调用予以保留。libtool 是拆分包：
+    # libtoolize 在 libtool、命令本体 /usr/bin/libtool 在 libtool-bin，漏装它
+    # A14 的「command -v libtool」护栏会拦下整条流水线（已踩过）。
+    # 包列表收进数组，安装与兜底重试共用；装失败自动切备用镜像重写源重试一次。
     local pkgs=(
         locales tzdata ca-certificates
         systemd systemd-sysv dbus dbus-user-session

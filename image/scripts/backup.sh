@@ -2,23 +2,16 @@
 # ==============================================================================
 #  📦 baota-backup —— 持久化数据的备份 / 校验工具（在容器内执行）
 #
-#  装到 /baota/backup.sh 并软链到 /usr/local/bin/baota-backup；
-#  宿主机用法：docker exec baota baota-backup [选项]（--help 看全部选项）
+#  为什么：手工 tar 有三个坑 —— 升级快照被打进包导致体积逐次翻倍、漏
+#    --xattrs 丢掉 overlay 的 opaque 标记、备份包把自己装进去。取舍见 docs/backup.md
 #
-#  为什么要有它：手工 tar 有三个容易踩的坑 —— 升级快照被打进备份导致体积逐次
-#  翻倍、漏 --xattrs 丢掉 overlay 的 opaque 标记、备份包把自己装进去。
-#  本工具把这些（以及 MySQL 热转储、自校验、保留策略）都固定下来。
-#  取舍与恢复步骤见 docs/backup.md
-#
-#  用法：
-#     baota-backup                  生成一份全量备份到 /www/backup/manual
-#     baota-backup --list           只看各持久化目录的体积分布与磁盘水位
-#     baota-backup --verify <包>     校验备份包完整性
-#     baota-backup --stdout         把 tar 流写到标准输出（宿主机重定向落盘）
-#     baota-backup --rsync <目录>    增量同步到另一目录（镜像语义，只留最新一份）
-#     baota-backup --keep 5         生成后只保留最近 5 份（默认不清理）
-#
-#  日志约定：[backup] 普通信息，[backup][WARN] 告警，[backup][ERROR] 错误
+#  用法（本块由 --help 原样打印）：
+#     baota-backup                 全量备份到 /www/backup/manual
+#     baota-backup --list          体积分布与磁盘水位
+#     baota-backup --verify <包>    校验完整性
+#     baota-backup --stdout        tar 流写标准输出（宿主机重定向落盘）
+#     baota-backup --rsync <目录>   增量同步（镜像语义，只留最新一份）
+#     baota-backup --keep 5        只保留最近 5 份（默认不清理）
 # ==============================================================================
 set -euo pipefail
 
@@ -43,31 +36,22 @@ fi
 OUTPUT_DIR="${PERSIST_DATA_ROOT}/www/backup/manual"
 NAME_PREFIX='baota-backup'
 
-# 打包时排除的路径。数据层 /www 是 www 这一层 overlay，归档成员是 www/，
-# rsync 又以 /data 为根同步（www/… 同理），所以快照/备份都带 www/ 前缀：
-#   .baota              项目元数据（数据层 /data/.baota、系统层 /data/system/.baota），
-#                       启动时自动重建，跟着备份走只会带来陈旧状态
-#   www/backup/auto     升级前自动快照（entrypoint take_snapshot 写到 /www/backup/auto，
-#                       业务直通 → data/www/backup/auto）。不排除会把它打进本次备份、
-#                       下次再打进来，体积逐次翻倍；它只是升级时的临时回滚点
-#   www/backup/manual   本脚本自己的产物。不排除会自包含
-#   www/backup/database 面板「数据库」页产生的备份，同样会自包含
-#   www/backup/rsync    --rsync 的落点之一（也可以挂独立卷同步到容器外）。
-#                       不排除的话，同步目标会被下一次全量备份装进去，同样自包含
-#   system/var/log/journal  journald 的运行时日志（system.journal / user-*.journal）。
-#                       三重理由都必须排除：
-#                         1) 它由 systemd 自己管理，恢复后 journald 自动重建，
-#                            不是需要保留的用户数据；
-#                         2) 它是打包期间写入最活跃的文件 —— 「file changed as
-#                            we read it」几乎都出自这里；
-#                         3) 体积不小却零恢复价值，白拖慢备份
+# 打包时排除的路径（归档成员是 www/，排除项也带 www/ 前缀）。后三项必须排除，
+# 否则**自包含**：本次产物被下一次备份装进去，体积逐次翻倍。
+#   .baota                项目元数据，启动时自动重建
+#   www/backup/{auto,manual,database,rsync}   升级快照/本脚本产物/面板备份/--rsync 落点
+#   <系统层>/var/log/journal  journald 运行时日志（systemd 自管、恢复后自动重建，
+#                         且是打包期间写入最活跃之处，零恢复价值却白拖慢备份）
+# 系统层那一项成员名从真源派生（basename PERSIST_SYSTEM_ROOT）：写死「system」
+# 会让排除静默失效 —— 表现为备份体积逐次翻倍
+SYSTEM_MEMBER=$(basename "${PERSIST_SYSTEM_ROOT}")
 EXCLUDES=(
     '.baota'
     'www/backup/auto'
     'www/backup/manual'
     'www/backup/database'
     'www/backup/rsync'
-    'system/var/log/journal'
+    "${SYSTEM_MEMBER}/var/log/journal"
 )
 
 # 由 EXCLUDES 派生 tar 参数。排除项只在这里写一次，全量打包与 --rsync 共用，
@@ -93,17 +77,9 @@ die()  { echo "❌ [backup][ERROR] $*" >&2; exit 1; }
 
 # ==============================================================================
 #  tar 退出码判定（热备份必须区分，否则会把「正常竞态」误当成失败）
-#
-#  GNU tar 的三档语义：
-#    0   干净完成
-#    1   有文件在读取期间被改写（"file changed as we read it"）——
-#        ★ 包本身是完整可用的，只是那些文件是「某一时刻的快照」。
-#        容器在跑，journald / MySQL / 面板日志随时可能写入，这是热备份的
-#        固有特性，不是错误。CI 曾在 journald 写入的瞬间随机失败，
-#        就是因为没区分这一档。
-#    ≥2  真正的失败（源读不到 / 目标写不下 / 参数错），必须拦住。
-#
-#  返回 0 表示可以接受（含第 1 档），非 0 表示真失败，由调用方 die。
+#  GNU tar 三档：0 干净；1 读取期间被改写（包仍完整可用，是热备份固有特性，
+#    非错误，CI 曾在 journald 写入瞬间随机失败就是没区分这档）；≥2 真失败必须拦。
+#  返回 0 = 可接受（含第 1 档），非 0 = 真失败，由调用方 die。
 # ==============================================================================
 check_tar_rc() {
     case "$1" in
@@ -164,14 +140,13 @@ parse_args() {
 # ==============================================================================
 #  体积分布：回答「我的 data 到底被什么占满了」
 # ==============================================================================
-show_usage() {
+show_sizes() {
     log "数据层：${PERSIST_DATA_ROOT}    系统层：${PERSIST_SYSTEM_ROOT}"
     echo
     echo '各持久化目录体积（降序）：'
     # shellcheck disable=SC2086,SC2046
     du -sh \
         "${PERSIST_DATA_ROOT}/www" \
-        "${PANEL_STATE_ROOT}" \
         $(for d in ${PERSIST_SYSTEM_DIRS}; do echo "${PERSIST_SYSTEM_ROOT}/${d}"; done) \
         2> /dev/null | sort -rh || true
     echo
@@ -194,13 +169,10 @@ show_usage() {
 # ==============================================================================
 #  数据库热转储
 #
-#  MySQL 数据在 /www/server/data —— 它是 WWW_DATA_SUBDIRS 里的 bind 目录，
-#  源在 data/www/server/data，不在任何 overlay upper 里。
-#  容器运行时它被直接复制，InnoDB 文件可能处于半写状态，
-#  恢复后表损坏。这里在打包前先做一次单事务转储，作为包内的「一致副本」：
-#  恢复时若发现 InnoDB 起不来，导入这份 SQL 即可。
-#
-#  拿不到连接就直接跳过并告警 —— 宁可少一份转储，也不让备份整体失败
+#  MySQL 数据在 /www/server/data（WWW_DATA_SUBDIRS 里的 bind 目录，不在 overlay upper 里）。
+#  容器运行时它被直接复制，InnoDB 可能半写、恢复后表损坏；所以打包前先做一次
+#  单事务转储，作为包内「一致副本」：InnoDB 起不来时导入这份 SQL 即可。
+#  拿不到连接就跳过并告警 —— 宁可少一份转储，也不让备份整体失败
 # ==============================================================================
 find_mysql_bin() {
     local name="$1" candidate
@@ -255,8 +227,8 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包是整份 data 卷的镜像（业务 data/www、面板状态 data/panel、
-系统层 data/system/... 都在里面），直接整包解回 data 即可。
+本包是整份 data 卷的镜像（业务与面板状态 data/www、系统层 data/.system/...
+都在里面），直接整包解回 data 即可。
 面板代码不在包里 —— 它属于镜像，换镜像即升级：
 
 【./data:/data（compose 默认）】
@@ -278,40 +250,30 @@ EOF
 }
 
 # ==============================================================================
-#  打包
-#
-#  --xattrs 是关键：overlay 的「删除 / 替换」信息就存在持久化层里，有两种形式 ——
-#    · 被删除的镜像文件：表现为字符设备节点（0:0），tar 默认就会原样保留
-#    · 被整体替换过的目录：表现为 trusted.overlay.opaque 扩展属性。
-#      tar 默认不带 xattrs，丢了它恢复后该目录会与镜像内容合并，
-#      而不是保持你替换后的样子
-#
-#  分两段 -C（数据层 /data 与系统层 /data/system）让包内路径保持相对，
-#  恢复到任何机器、任何目录都不受绝对路径影响
+#  打包（-C 到数据层，包内路径相对 www/... 与 .system/...，恢复不受绝对路径影响）
+#  --xattrs 是关键：overlay 把「整体替换过的目录」记成 trusted.overlay.opaque
+#    扩展属性，丢了它恢复后该目录会与镜像内容合并（被删镜像文件是 0:0 设备节点，
+#    默认就保留）。
+#  收集确实存在的持久化目录（全量 / --stdout / --rsync 共用）：tar / rsync 遇
+#    不存在的源目录会报错退出，先筛一遍；成员名从真源派生（defaults.env 允许
+#    覆盖 PERSIST_SYSTEM_ROOT / PANEL_STATE_ROOT，写死会找不到）。
 # ==============================================================================
-# 收集确实存在的持久化目录。全量打包、--stdout、--rsync 三处共用：
-# tar / rsync 遇到不存在的源目录会直接报错退出，所以必须先筛一遍。
-# 结果写进全局数组（build_archive 与 --rsync 分支都要读）
-# shellcheck disable=SC2086   # PERSIST_*_DIRS 是空格分隔的目录列表，需要按词切开
 collect_members() {
-    # 归档 data 卷内的三层顶层目录：
-    #   业务（www/）+ 面板状态（panel/）+ 系统（system/）。
+    # 归档 data 卷内的顶层成员：业务与面板状态（www/）+ 系统层（.system/）。
+    # 面板状态已归位在 www/server/panel 下（与容器内位置同名），不再独立顶层；
     # 面板代码不在 data 卷里 —— 它属于镜像，换镜像即升级，无需备份。
-    # 用显式成员而不是 '.'：'.' 会让成员名带 ./ 前缀，EXCLUDES 里
-    # 'www/backup/manual' 匹配不上 → 边写边读自己的输出包 → tar 报错。
+    # 用显式成员而非 '.'：'.' 让成员名带 ./ 前缀，EXCLUDES 里的 'www/backup/manual'
+    # 匹配不上 → 边写边读自己的输出包 → tar 报错。
     # 顶层 .baota 不进成员、内部 .baota 由 basename 排除，天然不打包。
-    #
-    # panel / system 两个成员名从配置真源派生：defaults.env 允许覆盖
-    # PANEL_STATE_ROOT / PERSIST_SYSTEM_ROOT，写死成员名在非默认布局下
-    # tar 找不到成员，报错还指向不存在的路径。系统层若被指到 data 卷之外
-    # （tar 单一来源打不进来），在这里响亮拒绝；--rsync 分支没有这个限制，
-    # 它会对 data 卷之外的系统层补第二条同步
-    local _panel _system
-    _panel=$(basename "${PANEL_STATE_ROOT}")
+    # 系统层成员名从配置真源派生（defaults.env 允许覆盖 PERSIST_SYSTEM_ROOT），
+    # 写死成员名在非默认布局下 tar 找不到成员，报错还指向不存在的路径。
+    # 系统层若被指到 data 卷之外（tar 单一来源打不进来），在这里响亮拒绝；
+    # --rsync 分支没有这个限制，会对 data 卷外的系统层补第二条同步
+    local _system
     _system=$(basename "${PERSIST_SYSTEM_ROOT}")
-    data_members=('www' "${_panel}")
+    DATA_MEMBERS=('www')
     if [ -d "${PERSIST_DATA_ROOT}/${_system}" ]; then
-        data_members+=("${_system}")
+        DATA_MEMBERS+=("${_system}")
     elif [ "${PERSIST_SYSTEM_ROOT}" != "${PERSIST_DATA_ROOT}/${_system}" ]; then
         die "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，tar 打包覆盖不到系统层（含面板账号、用户装的环境）；请改用 --rsync，或把系统层指回数据层内"
     fi
@@ -323,7 +285,7 @@ build_archive() {
 
     log '正在收集文件清单…'
     collect_members
-    [ ${#data_members[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
+    [ ${#DATA_MEMBERS[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
 
     # 附加项：清单 + 数据库转储（都放在临时目录，作为 tar 的第二个来源）
     TMP_DIR=$(mktemp -d)
@@ -342,15 +304,15 @@ build_archive() {
     local -a extra=()
     [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
 
-    # 数据层（/data）与系统层（/data/system）分两段打包，
-    # 包内路径仍为 www/... 与 etc/...，恢复时不受挂载方式影响
+    # 系统层已在数据层之内（data/.system），一次 -C 就够了；
+    # 包内路径仍为 www/... 与 .system/...，恢复时不受挂载方式影响
     #
     # 退出码不能直接 || die：热备份下 tar 常以 1（文件在读取期间被改写）结束，
     # 那是可接受的，包照样完整；只有 ≥2 才是真失败。详见 check_tar_rc。
     local rc=0
     tar --xattrs --xattrs-include='trusted.overlay.*' \
         "${EXCLUDE_ARGS[@]}" \
-        -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${data_members[@]}" \
+        -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${DATA_MEMBERS[@]}" \
         -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
         || rc=$?
 
@@ -381,13 +343,17 @@ verify_archive() {
     #   www/wwwroot/          站点（业务 bind）
     #   <面板状态根>/data     面板配置 + 数据库（面板状态 bind）
     #   MANIFEST.txt          备份清单（由 backup.sh 自动生成）
-    # 面板状态那一项必须从真源派生（basename PANEL_STATE_ROOT），不能写死 panel：
-    # defaults.env 允许覆盖 PANEL_STATE_ROOT，写死会让「备份本身成功、自校验却
-    # 恒失败」。collect_members 也是这么推导成员名的，两处口径必须一致
-    # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 一命中就关闭管道，
-    # 大清单的 printf 写不完被 SIGPIPE 终止（141），会把「含」误判成「缺少」。
-    # listing 已在变量里，case 子串匹配既无管道也无该隐患
-    panel_state_member="$(basename "${PANEL_STATE_ROOT}")/data"
+    # 面板状态那一项从真源派生（basename PANEL_STATE_ROOT），不能写死 panel：
+    # defaults.env 允许覆盖 PANEL_STATE_ROOT，写死会「备份成功、自校验却恒失败」。
+    # 用 case 而非 `printf | grep -q`：pipefail 下 grep -q 命中即关管道，大清单的
+    # printf 写不完被 SIGPIPE（141）终止，把「含」误判成「缺少」；case 无此隐患
+    # 面板状态已归位到 www/server/panel 下，成员名取「相对数据层根的路径」：
+    # basename 只有一层（panel），对不上 www/server/panel/data，会恒判缺失
+    panel_state_member="${PANEL_STATE_ROOT#${PERSIST_DATA_ROOT}/}"
+    case "${panel_state_member}" in
+        /*) die "PANEL_STATE_ROOT=${PANEL_STATE_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，备份包里不会有面板状态" ;;
+    esac
+    panel_state_member="${panel_state_member}/data"
     for pattern in 'www/wwwroot/' "${panel_state_member}" 'MANIFEST.txt'; do
         case "${listing}" in
             *"${pattern}"*) echo "  ✅ 含 ${pattern}" ;;
@@ -426,27 +392,12 @@ prune_archives() {
 
 # ==============================================================================
 #  增量同步（--rsync）
-#
-#  为什么值得有它：全量打包每次都要重读并重压整份 data/，几十 GB 时非常慢。
-#  rsync 只传变化部分，后续备份从「几十分钟」降到「几分钟」。
-#
-#  为什么必须用 -aAX：
-#    -a  归档模式（递归 + 保留权限 / 属主 / 时间 / 链接 / 设备节点）
-#    -A  保留 ACL
-#    -X  保留扩展属性 ← 关键：overlay 的 trusted.overlay.opaque 标记全靠它保住，
-#        与全量打包的 --xattrs 等价。少了它，恢复后「被整体替换过的目录」会与
-#        镜像内容合并，而不是保持你替换后的样子
-#
-#  整份持久化层同步到目标的 data/：源 ${PERSIST_DATA_ROOT}/ 下已经有 www/ 与
-#  system/ 两个顶层，一条 rsync 就都带过去了，不再分两次同步。
-#  包内结构与全量备份一致，恢复方式也一致。
-#
-#  安全护栏（--delete 的危险性）：
-#    --delete 会让目标严格对齐源，目标里「源没有的」会被删掉。
-#    指错位置等于当场删库，所以这里拦三种情况：
-#      1) 目标是 / 或持久化层自身
-#      2) 目标是持久化层的上层目录（同步会把源自己也删掉）
-#      3) 目标非空且不像本工具的同步产物（可能是用户的其它目录）
+#  为什么值得有它：全量打包每次重读重压整份 data/，几十 GB 时非常慢；rsync 只传
+#    变化部分，后续从「几十分钟」降到「几分钟」。
+#  ★ 必须用 -aAX：-X 保留扩展属性（overlay 的 opaque 标记全靠它，与 --xattrs 等价），
+#    少了它恢复后被替换过的目录会与镜像内容合并。一条 rsync 带过 www/ 与 .system/。
+#  安全护栏：--delete 让目标严格对齐源，指错位置等于当场删库，拦三种情况 ——
+#    ① 目标是 / 或持久化层自身 ② 目标是持久化层的上层目录 ③ 目标非空且不像同步产物
 # ==============================================================================
 rsync_sync() {
     local dest="$1"
@@ -475,10 +426,7 @@ rsync_sync() {
     done
 
     # 目标非空时，必须是本工具之前的同步产物，否则拒绝用 --delete。
-    # 判据只看 data/：整份持久化层（含系统层 system/）都同步进 dest/data 里，
-    # 早先版本额外建过一个 dest/system 却从不往里写，拿它当判据等于
-    # 「手工 mkdir -p dest/data dest/system 就能骗过护栏」，没有意义。
-    # 老目标里的那个空 system/ 不影响判定，可以直接删掉。
+    # 判据只看 data/：整份持久化层（含系统层 .system/）都同步进 dest/data 里。
     if [ -n "$(ls -A "${dest}" 2> /dev/null)" ]; then
         if [ ! -d "${dest}/data" ]; then
             die "目标目录非空且不像本工具的同步产物（缺少 data/ 子目录）：${dest}
@@ -500,7 +448,7 @@ rsync_sync() {
     fi
 
     collect_members
-    [ ${#data_members[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
+    [ ${#DATA_MEMBERS[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
 
     local -a rargs=( -aAX --delete --human-readable --stats )
     local _e
@@ -508,8 +456,8 @@ rsync_sync() {
         rargs+=( "--exclude=${_e}" )
     done
 
-    # --rsync 整层同步 data 卷（业务 data/www + 面板状态 data/panel
-    # + 系统层 data/system/<dir> 都在里面），一条命令覆盖全部。
+    # --rsync 整层同步 data 卷（业务与面板状态 data/www + 系统层 data/.system/<dir>
+    # 都在里面），一条命令覆盖全部。
     # 但用户把 PERSIST_SYSTEM_ROOT 指到 data 卷之外时（defaults.env 允许），
     # 这条 rsync 摸不到它 —— 会静默漏掉整个系统层，恢复后账号、环境全丢。
     # 对这种布局显式补第二条同步
@@ -540,7 +488,7 @@ main() {
 
     case "${MODE}" in
         list)
-            show_usage
+            show_sizes
             return 0
             ;;
         verify)
@@ -555,17 +503,14 @@ main() {
             # 标准输出模式下把 tar 流直接吐出去，由宿主机重定向落盘：
             #   docker exec baota baota-backup --stdout > baota-backup.tgz
             #
-            # ★ 本分支里所有输出必须走 stderr：stdout 是 tar 流，
-            #   任何混进去的文字都会让备份包损坏（且是解压时才发现）。
-            #   所以这里用 echo ... >&2，不能用 log()（log 走 stdout）。
+            # ★ 本分支所有输出必须走 stderr：stdout 是 tar 流，混进文字会让备份包
+            #   损坏（且解压时才发现）。所以这里用 echo ... >&2，不能用 log()（走 stdout）。
             #
-            # 产物必须与 create 模式一致，否则过不了自己的 --verify：
-            #   · 归档整份 data 卷（collect_members 用显式成员 www / system），与 create 一致
-            #   · 同样附加 MANIFEST.txt 与 MySQL 转储
-            #   · 排除项共用 EXCLUDE_ARGS
-            # 唯一的区别是无法生成后自校验 —— 流已经吐出去了，读不回来
+            # 产物必须与 create 一致，否则过不了自己的 --verify：整份 data 卷、
+            # 附 MANIFEST.txt 与 MySQL 转储、排除项共用 EXCLUDE_ARGS；唯一区别是
+            # 流已吐出、无法生成后自校验
             collect_members
-            [ ${#data_members[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
+            [ ${#DATA_MEMBERS[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
 
             TMP_DIR=$(mktemp -d)
 
@@ -586,7 +531,7 @@ main() {
             local rc=0
             tar --xattrs --xattrs-include='trusted.overlay.*' \
                 "${EXCLUDE_ARGS[@]}" \
-                -C "${PERSIST_DATA_ROOT}" -cz "${data_members[@]}" \
+                -C "${PERSIST_DATA_ROOT}" -cz "${DATA_MEMBERS[@]}" \
                 -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
                 || rc=$?
 

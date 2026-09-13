@@ -3,12 +3,14 @@
 本项目用 [语义化版本](https://semver.org/lang/zh-CN/) 的思路记录变更。
 镜像版本跟随宝塔上游，与本文件无关；这里记录的是**本项目自身**的变化。
 
-> **维护约定**：本文件只保留「未发布」与最近 1 个已发布版本；
-> 更早的记录归档在 [docs/history.md](docs/history.md)（注意那里的目录名是当时的布局）。
+> **维护约定**：`1.0.0` 是**首个公开版本**；它之前的 `3.0.0` 与
+> [docs/history.md](docs/history.md) 里的记录都属**开发期**（从未公开发布），
+> 保留只为追溯设计沿革，其中的目录/文件名是当时的布局。
+> 之后本文件只保留「未发布」与最近 1 个已发布版本。
 
 ---
 
-## [未发布]
+## [1.0.0] — 2026-09-14 · 首个公开版本：不可变面板 + 分层持久化
 
 ### 不可变面板：执行入口守卫（面板内更新不生效，库不可能「比代码新」）
 
@@ -39,7 +41,7 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
 - 面板状态新增 `vhost`（站点配置 / **SSL 证书** / 伪静态 / 反代 / 重定向）、
   `ssl`（面板自身证书）、`config`（面板设置）：`PANEL_STATE_SUBDIRS` 默认变成
   `data plugin vhost ssl config`，并纳入 `CRITICAL_DIRS`
-- **`/www/server` 整层 overlay**（upper 在 `data/system/www/server`）：面板里装的组件
+- **`/www/server` 整层 overlay**（upper 在 `data/.system/www/server`）：面板里装的组件
   （PHP / nginx / MySQL / redis…）、插件运行数据（`total` / `btwaf`…）、计划任务脚本
   （`/www/server/cron`）在销毁重建、换镜像后都还在，**不用重装**；不按组件列清单
 - 回收站**不持久化**（上游 13 的落点是 `/www/.Recycle_bin`）：它是删站 / 删文件后的
@@ -54,18 +56,19 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
 - 健康检查新增两段判据：`pyenv/bin/python3` → `/baota/shim`（守卫在位）、
   面板代码版本 == 镜像版本（不一致即 unhealthy）
 
-### 工程收敛：一份 Dockerfile、一份流水线、一张通道声明表
+### 工程收敛：一份 Dockerfile、一份流水线、一张线声明表
 
-- **通道声明表** [image/channels.conf](image/channels.conf)：各线的安装脚本地址、
+- **线声明表** [image/lines.conf](image/lines.conf)：各线的安装脚本地址、
   探测方式（`banner`/`api`）、标签策略、基础镜像都写在一张表里，成对排列；
   **线标识按面板主线命名**（`line` = `12_version` / `13_version`）—— 它是流水线矩阵、
-  产物名、缓存 scope、版本文件查找的统一键，一旦定下就不再改名：14/15 出来时是
-  「加一行 `14_version`」，不是给旧行改名。版本记录文件同步改成按线命名
-  （`image/versions/12/VERSION`），不再出现「目录叫 12.0.0、内容是 12.1.3」的错位
+  产物名、缓存 scope 的统一键，一旦定下就不再改名：14/15 出来时是
+  「加一行 `14_version`」，不是给旧行改名。版本记录文件则按**主线号**落盘
+  （`image/versions/12/VERSION`，路径写在 lines.conf 的 version 列），
+  不再出现「目录叫 12.0.0、内容是 12.1.3」的错位
 - 构建（`build.yml`）、每日巡检（`check.yml`）、漂移检测（`drift.yml`）都**从表生成矩阵**，
-  删除两份通道 Dockerfile 与两份 build-push 工作流；`drift.yml` 重写为表驱动
-  （基线结构变成 `{lines:{<线标识>:{sha,version}}}`，旧基线已迁移）
-- **目录重构**：`shared/` 与 `dockerfile/` 合并为 `image/`（Dockerfile / channels.conf /
+  删除两份线 Dockerfile 与两份 build-push 工作流；`drift.yml` 重写为表驱动
+  （基线结构变成 `{lines:{<线标识>:{sha,version}}}`）
+- **目录重构**：`shared/` 与 `dockerfile/` 合并为 `image/`（Dockerfile / lines.conf /
   versions / build / conf / scripts），编排文件提到仓库根：
   ```
   docker-compose.yml  Makefile  README.md  CHANGELOG.md  LICENSE
@@ -125,7 +128,7 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
   （`make up/down/logs/ps/exec` 会全部失败）→ 指回仓库根；`make lint` 的 BT-Panel
   字面量检查路径、`.dockerignore` 注释、`docs/development.md` 的结构树同步改成 `image/`
 - 漂移检测的「声明清单」改为**从 `image/conf/defaults.env` 派生**（不再另抄一份
-  `KNOWNS` / `WWW_PERSIST`）：那边加数据目录、这边还按旧清单判，就会把新目录
+  `KNOWN_DIRS` / `WWW_PERSIST_SUBDIRS`）：那边加数据目录、这边还按旧清单判，就会把新目录
   每次报成关键漂移；派生之后只有真源一处要维护
 - **门禁补一条优雅停机**：`core.sh` 新增 B5 —— `docker stop` 发 SIGRTMIN+3、
   systemd 依次停服、90s 宽限期内退出。此前所有重建测试用的都是 `docker rm -f`
@@ -134,6 +137,31 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
 - `Makefile` 的 `reset-system` 不再手写 `etc usr var root opt home srv`：改从
   `defaults.env` 的 `PERSIST_SYSTEM_DIRS` 派生**顶层**目录（`/www/server` 刻意保留，
   那里是面板里装的组件），`docs/operations.md`、`skills/` 的目录树同步补齐
+
+### 持久化目录：一个 `www` + 隐藏的 `.system`
+
+- **只有一条规则**：`data/www` 下的路径 = 容器内的路径，找什么按容器里的路径找，
+  不用记我们的分组。面板状态在 `data/www/server/panel/`（与容器里
+  `/www/server/panel` 同名），不用单列一层
+- **系统层收进隐藏目录 `.system`**：它是 overlay upper（相对镜像的**增量**），
+  与「内容完整、可直接读写」的业务数据不是一回事，不该拿来当文件浏览。
+  顶层因此只剩 `www` 一个可见目录
+- **可选模块不预建**：邮局 `vmail`、面板 Docker 项目 `dk_project` 走
+  `WWW_OPTIONAL_SUBDIRS` —— **装了才出现**，没装模块的用户不会在 `data/www` 下
+  看到两个空目录；面板里装完模块后重启一次即自动纳入持久化
+  （`init.sh` 的 `bind_optional_subdir`：源不存在但容器里有内容时先 seed 再 bind）
+- 备份随之简化：归档成员是 `www` 与 `.system` 两个（面板状态跟着 `www` 进包）
+- **新增 `docs/conventions.md`**：命名、路径、目录结构与术语的**唯一真源**
+  （宝塔官方优先 → 权威标准 → 单词优先不写连字符；含容器路径对照表、变量后缀表、
+  例外白名单、变更检查清单、以及 `make lint` 每项检查守护的约定）。术语表从
+  `docs/development.md` 迁入，避免两处各写一套
+- 按该约定统一两个「名不副实」的变量：`DEGRADED_CRITICAL` → `CRITICAL`
+  （它指向的标记文件是 `/run/baota/critical`）、`PANEL_PY` → `PANEL_PY_BIN`
+  （路径变量补上 `_BIN` 后缀）
+- **元数据文件名单纯化**：`.baota/version`（镜像版本记录）、`.baota/boot.log`
+  （降级启动历史）—— 这些名字是给人敲的（排障时 `cat data/.system/.baota/version`），
+  短比「信息完整」重要，`.baota` 已经说明了归属。文件名收进 `defaults.env` 的
+  `META_VERSION_FILE` / `META_BOOT_FILE`（脚本与 CI 都取真源），改名不会各处漂移
 
 ### 修复
 
@@ -145,36 +173,3 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
 - **回写被拒不再白跑**：`check.yml` / `drift.yml` 的 `git push` 改为失败后同步远端重试
   （最多 3 次，README 两边都改过时以本地刚生成的报告为准）—— 巡检与漂移检测都会回写
   README，非快进被拒会让整轮结果丢失
-
----
-
-## [3.0.0] — 2026-09-07 · 不对抗上游：移除更新禁用补丁，持久化成为唯一核心保证
-
-### 新增
-
-- **构建发布工作流支持「强制更新」**：stable / release 两个通道的手动触发页
-  新增 `force_update` 开关（默认关）。勾选后跳过「已是最新 / 已一致」判断，
-  无条件走完整构建发布并回写 VERSION —— 上游没变但需要重新出镜像时，
-  不用再手动改 VERSION 文件。版本仍以探测结果为准，不引入「探测与构建
-  版本不一致」的风险
-
-### 行为变更
-
-- **不再禁止面板内更新**：整体移除「禁用面板更新」补丁——`shared/scripts/patch-panel.sh`
-  删除（含 8 个升级入口的 stub 与 `verify` 断言）、两个 Dockerfile 的
-  `COPY` 与 `DISABLE_PANEL_UPDATE`、构建期调用、发布前检查中的补丁断言。
-  面板版本由使用者自己决定，本项目只保证「销毁容器重建后数据不丢」
-  （已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、面板口令与数据库不变）
-- **py3.13 官方升级通道随之放开**：stable 12.0.0（出厂 py3.7.16）可直接执行官方升级命令；
-  release 13.0.0 出厂即 py3.13.14。此前把 `upgrade_py313*` 一并 stub 属于误屏蔽
-- **漂移检测收敛为单一职责**：只检测「目录漂移」（数据落点），移除升级入口漂移、
-  隐藏入口扫描与代码级更新旁路检测 —— 跟踪上游脚本清单与代码内执行路径永远跟不完，
-  且并不影响数据安全
-
-### 修复
-
-- 漂移检测报告章节编号错乱（新增一节时漏改后续标题，导致 `drift.md` 出现两个「### 3.」）
-
-### 文档
-
-- skills 参考同步漂移检测的检测项与代码级更新旁路说明

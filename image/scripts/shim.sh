@@ -2,20 +2,14 @@
 # ==============================================================================
 #  🐍 shim —— 面板 pyenv 解释器的包装（运行期，镜像自有）
 #
-#  装配方式（构建期由 image/build/services.sh 完成）：
-#    /www/server/panel/pyenv/bin/python-real  ← 真解释器
-#    /www/server/panel/pyenv/bin/python      → 本文件（符号链接）
-#    /www/server/panel/pyenv/bin/python3     → 本文件（符号链接）
+#  装配（构建期由 services.sh 完成）：pyenv/bin/python{,3} → 本文件，
+#  真解释器挪到 python-real。面板代码的每一次执行都要经过 pyenv 解释器，
+#  所以这里是「执行入口守卫」的唯一咽喉点：先让面板代码回到镜像版本，再执行。
 #
-#  面板代码的每一次执行都要经过 pyenv 解释器（init.sh 用 $pythonV，
-#  BT-Panel / BT-Task 的 shebang 也是它），所以这里是「执行入口守卫」的
-#  唯一咽喉点：先让面板目录回到镜像版本，再真正执行。
+#  红线：① 必须放 /baota —— 面板更新不会覆盖它，不会出现「脚本自己改自己」的
+#  竞态；② 必须 fail-open —— 守卫或真解释器缺失都不能让面板起不来。
 #
-#  ★ 本文件必须放在 /baota（镜像自有目录）：面板更新不会覆盖它，
-#    守卫的恢复动作也不会改写它，因此不会出现「脚本自己改自己」的竞态。
-#  ★ 必须 fail-open：守卫缺失 / 真解释器缺失都不能让面板起不来。
-#
-#  日志约定：[guard] 由 guard.sh 输出；本文件自身不出声
+#  日志：[guard] 由 guard.sh 输出；本文件自身不出声
 # ==============================================================================
 set -u
 
@@ -33,7 +27,7 @@ fi
 #   解析后的目标只用来做一个判断：它是不是又指回本包装器（重复装配会无限递归）
 _real_target=$(readlink -f "${REAL}" 2> /dev/null || true)
 case "${_real_target}" in
-    ''|*shim) ;;
+    ''|*shim*) ;;
     *) [ -x "${REAL}" ] && exec "${REAL}" "$@" ;;
 esac
 
@@ -45,7 +39,7 @@ for _c in "${PANEL_DIR}"/pyenv/bin/python3.[0-9]*; do
     [ -e "${_c}" ] || continue
     _real=$(readlink -f "${_c}" 2> /dev/null || true)
     case "${_real}" in
-        ''|*shim) continue ;;
+        ''|*shim*) continue ;;
     esac
     [ -x "${_c}" ] && exec "${_c}" "$@"
 done

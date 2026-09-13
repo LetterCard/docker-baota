@@ -9,8 +9,11 @@
 5. 查看首次登录信息：「容器」→ `baota` →「日志」，或命令行 `docker compose logs -f baota`
 
 数据会存放在 `docker-compose.yml` 同级的 `data/` 目录里，可以直接用飞牛的「文件管理」查看和备份。
-`data/www/` 是站点、数据库与备份，`data/panel/` 是面板自己的配置与插件（你日常要管理的都在这两处）；
-`data/system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，一般不用翻）。
+`data/www/` 就是你在容器里看到的 `/www`：站点在 `data/www/wwwroot/`、数据库在
+`data/www/server/data/`、备份在 `data/www/backup/`、面板自己的配置与插件在
+`data/www/server/panel/` —— 找什么按容器里的路径找，你日常要管理的都在这里。
+`data/.system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，
+隐藏目录：它是相对镜像的改动，一般不用翻）。
 
 ## 其它 Linux 服务器
 

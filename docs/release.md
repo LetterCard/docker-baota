@@ -1,14 +1,14 @@
 # 发布流程
 
-## 通道声明表（唯一的差异来源）
+## 线声明表（唯一的差异来源）
 
-各条通道（线）的差异**只写在** [image/channels.conf](../image/channels.conf) 里，
+各条线（线）的差异**只写在** [image/lines.conf](../image/lines.conf) 里，
 成对排列、一眼能对照；Dockerfile 与流水线都只有一份：
 
 ```
 line         channel  version                    install                                             probe   tag     base
-12_version   12.x     image/versions/12/VERSION  https://download.bt.cn/install/installStable_12.sh  banner  exact   debian:12
-13_version   13.x     image/versions/13/VERSION  https://download.bt.cn/install/install_panel.sh     api     latest  debian:12
+12_version   12.x     image/versions/12/VERSION          https://download.bt.cn/install/installStable_12.sh  banner  exact   debian:12
+13_version   13.x     image/versions/13/VERSION          https://download.bt.cn/install/install_panel.sh     api     latest  debian:12
 ```
 
 | 字段 | 说明 |
@@ -32,26 +32,26 @@ line         channel  version                    install                        
 （跟进最新正式版，`latest` 指向最近一次手动发布的版本）。两者用相同的 `data/`
 目录结构，数据互相兼容。
 
-> **两条通道都是手动发布**（没有定时触发）。原因：`latest` 一旦自动推进，上游出问题
+> **两条线都是手动发布**（没有定时触发）。原因：`latest` 一旦自动推进，上游出问题
 > 就会把坏镜像立刻分发给所有使用者。现在的流程是：先看
 > [漂移检测](development.md#漂移检测)的报告与 issue，确认无关键漂移，再手动触发
 > **📦 发布：构建并发布镜像**（`.github/workflows/build.yml`）。
 
 ---
 
-## 发布流水线（一份，跑所有通道）
+## 发布流水线（一份，跑所有线）
 
 ```
-prep   读 channels.conf → 逐通道探测上游版本（banner / api）→ 与 VERSION 比对 → 生成矩阵
+prep   读 lines.conf → 逐线探测上游版本（banner / api）→ 与 VERSION 比对 → 生成矩阵
   ├─ lint   静态检查（与版本无关，无条件跑）
-  ├─ build  通道 × 架构 矩阵：本地构建 → 三套发布前检查 → 通过后才按 digest 推送
+  ├─ build  线 × 架构 矩阵：本地构建 → 三套发布前检查 → 通过后才按 digest 推送
   ├─ publish 合并两架构 digest → 按标签策略打 repo:<版本>（标了 latest 的线再加 :latest）
-  └─ writeback 把已发布版本回写进该通道的 VERSION 文件
+  └─ write_back 把已发布版本回写进该线的 VERSION 文件
 ```
 
 一次探测只做一次构建：**上游有新版本才构建**；已是最新则只有 `lint` 会跑
 （想重建当前版本，手动触发时勾「🔧 强制更新」——它只跳过「已是最新」判断，
-不改版本来源）。探测失败时按各通道 VERSION 继续，绝不自动降级。
+不改版本来源）。探测失败时按各条线 VERSION 继续，绝不自动降级。
 
 ```
         ┌─ amd64（ubuntu-latest）── 构建①(本地) → 三套验证 → 构建②按 digest 推送 ─┐
@@ -73,7 +73,7 @@ prep   读 channels.conf → 逐通道探测上游版本（banner / api）→ �
 
 buildx 一次调用里没法做到「推送发生在验证之后」，所以拆成两次：第一次只 `--load`
 到本地并跑完三套验证（坏镜像根本不会被推送）；第二次**命中第一次刚写入的 GHA 缓存**
-（按通道 + 架构分 scope），几乎不再重新编译，代价很小。第二次以 `push-by-digest`
+（按线 + 架构分 scope），几乎不再重新编译，代价很小。第二次以 `push-by-digest`
 形式入库（manifest 只按 digest 索引、无标签），publish 再用 digest 合并成正式标签 ——
 同时拿到「坏镜像不推送」和「零 arch 标签」。
 
@@ -97,12 +97,12 @@ buildx 一次调用里没法做到「推送发生在验证之后」，所以拆�
 而不是等用户踩到。
 
 ```
-prep（读 channels.conf + 各通道 VERSION）
-  └─ verify（矩阵：各通道并行）→ 拉 repo:<已发布版本> → 跑 published.sh → 上传片段
+prep（读 lines.conf + 各条线 VERSION）
+  └─ verify（矩阵：各条线并行）→ 拉 repo:<已发布版本> → 跑 published.sh → 上传片段
 collect（汇总）→ 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```
 
-- 版本号取自各通道的 VERSION 文件（由发布流水线在推送成功后回写，永远对应已发布标签），
+- 版本号取自各条线的 VERSION 文件（由发布流水线在推送成功后回写，永远对应已发布标签），
   不重新探测上游 —— 本工作流只回答「当前线上这套东西还好不好用」
 - 回归复用 `.github/scripts/check/published.sh`：持久化全生命周期（落盘 / 销毁重建 /
   升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / PHP 扩展编译链路 /
@@ -123,7 +123,7 @@ collect（汇总）→ 生成 .github/reports/report.md → 注入 README → �
 ### 触发时机与判定
 
 - 🗓️ 每天 UTC 18:30（北京时间 02:30）；🖱️ 也可手动触发
-- **即使某通道验证失败也会回写报告**（`collect` 用 `if: always()`），把失败现场留在
+- **即使某线验证失败也会回写报告**（`collect` 用 `if: always()`），把失败现场留在
   报告里，最后一步才判红 —— 看到红的运行，报告里一定有具体是哪一项挂了
 - 回写时先 `git rebase origin/main` 再生成文件：**rebase 必须在修改任何仓库文件之前**，
   否则报告 / README 处于已修改状态会让 rebase 中止，报告就写不进仓库

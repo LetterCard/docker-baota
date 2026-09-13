@@ -17,18 +17,19 @@ baota-docker/
 │   ├── upgrade.md             镜像升级、回滚、跨机器迁移
 │   ├── operations.md          运维手册
 │   ├── faq.md                 常见问题
+│   ├── conventions.md         ★ 命名、路径、目录结构的唯一真源（含术语表）
 │   ├── development.md         本文件
-│   ├── release.md             通道声明表、发布流水线、每日巡检
-│   └── history.md             旧版本变更记录（从 CHANGELOG 归档）
+│   ├── release.md             线声明表、发布流水线、每日巡检
+│   └── history.md             公开前的开发期记录（从 CHANGELOG 归档）
 │
 ├── skills/                    AI 编程助手的技能包
 │   ├── README.md              用途说明（只维护一份，按工具放入各自目录即可）
 │   └── baota-docker/          通用 skill（Codex / CodeBuddy / Trae 共用同一份）
 │
-├── image/                     镜像本体：Dockerfile、通道声明表、构建期与运行期脚本
-│   ├── Dockerfile             唯一的一份 Dockerfile（通道差异由 build-arg 传入）
-│   ├── channels.conf          ★ 通道声明表（12/13 的脚本地址成对排列）
-│   ├── versions/12|13/        各线「已发布」版本（发布流水线回写）
+├── image/                     镜像本体：Dockerfile、线声明表、构建期与运行期脚本
+│   ├── Dockerfile             唯一的一份 Dockerfile（线差异由 build-arg 传入）
+│   ├── lines.conf          ★ 线声明表（12/13 的脚本地址成对排列）
+│   ├── versions/<主线号>/         各线「已发布」版本（发布流水线回写）
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
@@ -41,7 +42,7 @@ baota-docker/
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
 │       ├── guard.sh           执行入口守卫（版本不一致就换回 /baota/origin 副本）
-│       ├── shim               pyenv 解释器包装（每次执行都先过守卫）
+│       ├── shim.sh            pyenv 解释器包装（每次执行都先过守卫）
 │       └── backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 │
 ├── docker-compose.yml         编排文件（只挂一个 data 目录）
@@ -54,77 +55,85 @@ baota-docker/
     │   ├── drift/           漂移检测脚本（目录漂移）
     │   └── lint/            配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
     └── workflows/
-        ├── build.yml        构建发布（一份流水线跑所有通道，矩阵从 channels.conf 生成）
-        ├── check.yml        每日巡检已发布镜像（矩阵：各通道并行）
+        ├── build.yml        构建发布（一份流水线跑所有线，矩阵从 lines.conf 生成）
+        ├── check.yml        每日巡检已发布镜像（矩阵：各条线并行）
         └── drift.yml        漂移检测（只监测，不发布）
 ```
 
 ### 关键约定
 
 - **构建上下文是仓库根，Dockerfile 只有一份**：`docker build -f image/Dockerfile .`
-  通道参数（安装脚本地址 / 基础镜像 / 版本）从 `image/channels.conf` 读
+  线参数（安装脚本地址 / 基础镜像 / 版本）从 `image/lines.conf` 读
 - **运行期脚本一律放 `/baota`**。它不属于任何持久化目录，永远跟随当前镜像。
-  旧版放 `/opt/baota`，而 `/opt` 是持久化目录——还原备份时旧脚本副本会反过来屏蔽新镜像
+  放进持久化目录（如 `/opt`）就不行：还原备份时会把旧脚本副本带回来，反过来屏蔽新镜像
 - **面板代码的执行入口只有一个**：pyenv 解释器。`image/build/services.sh` 的
-  `setup_guard` 把 `pyenv/bin/{python,python3}` 指向 `/baota/shim`、
+  `setup_guard` 把 `pyenv/bin/{python,python3}` 指向 `/baota/shim.sh`、
   真解释器挪到 `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。
   改这块前先读 `image/scripts/guard.sh` 的头部注释：包装必须 fail-open、
   恢复必须「只覆盖不删除」、执行真解释器必须用 **venv 内的路径**（用解析后的
   `/usr/bin/python3.x` 会丢 venv）
 - **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` /
-  `CRITICAL_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `image/conf/defaults.env`，
+  `CRITICAL_DIRS` / `AUTO_SNAPSHOT_KEEP` 的唯一真源是 `image/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
   `check/` 下的三套检查脚本也从该文件解析，不再硬编码一份
-- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]` / `[guard]`
+- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]` /
+  `[guard]` / `[verify]`（日巡检）/ `[drift]`（漂移检测）
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。
   改告警文案不会影响 CI 门禁
 
 ### 注释与文档规范
 
 这套规范的目的只有一个：**同一段道理只写一遍**。重复写的地方必然漂移
-（历史上出现过「文档说证书不会丢、代码里没持久化」「`BY_DESIGN` 早就不存在
-但文档还在写」这类问题）。
+（「文档说证书不会丢、代码里没持久化」这种错位，只可能出在写了两遍的地方）。
 
-**文件头注释**（所有脚本/工作流/配置，统一四段，总长控制在 20 行内）：
+**文件头注释**（所有脚本 / 工作流 / 配置，统一四段）：
 
 ```
 # 一句话：这个文件是什么（做哪一件事）
-# 为什么：非显然的取舍/设计理由 —— 超过三行的推导写进 docs/，这里留一行指针
+# 为什么：非显然的取舍/设计理由
 # 红线：改这个文件必须遵守的不变式（没有就省略）
 # 相关：docs/xxx.md#锚点
 ```
 
-**正文注释**只写「为什么」，不写「是什么」（代码本身说明是什么）；踩过的坑
-要写清楚**症状 + 原因**（这是回归防线，例如「`exec 9> f 2>/dev/null` 会把整个
-脚本的 stderr 永久重定向」）。
+★ **硬上限**（由 `make lint` 的 `lint/comments.sh` 强制，超了就红）：
+
+| 位置 | 上限 |
+|---|---|
+| 文件头注释块 | **16 行** |
+| 任何一段连续注释 | **10 行** |
+
+超过 10 行说明那段在讲**推导过程** —— 推导写进 `docs/`，这里只留一行指针。
+注释的价值与长度成反比：第 11 行没人会读，但它每次改动都得跟着改，
+是最容易过期、也最容易误导人的部分。
+
+**正文注释只写「为什么」**，不写「是什么」（代码本身已经说明是什么）。删除所有
+复述代码的注释，只保留三类：
+
+| 保留 | 例 |
+|---|---|
+| **取舍**：为什么这样做而不那样做 | 「用 `cp -a` 而不是 `tar czf`：面板数据主要是 SQLite 与二进制，gzip 收益很低」 |
+| **踩过的坑**：写清**症状 + 原因** | 「`exec 9> f 2>/dev/null` 会把整个脚本的 stderr 永久重定向（恢复日志全部消失）」 |
+| **红线**：改这里会破坏什么 | 「探活命令里不能出现面板进程名，否则上游判定会跳过启动」 |
 
 **文档分工**（一个主题只有一处详解）：
 
 | 位置 | 放什么 |
 |---|---|
-| `README.md` | 入口：是什么、怎么跑、三条不变式摘要、发布通道表；细节一律给链接 |
+| `README.md` | 入口：是什么、怎么跑、三条不变式摘要、发布线表；细节一律给链接 |
 | `docs/persistence.md` | 持久化的唯一详解（目录模型、守卫、方案选型、硬约束） |
+| `docs/conventions.md` | 命名、路径、目录结构与术语的唯一真源 |
 | `docs/configuration.md` | compose / 环境变量逐项说明 |
 | 其它 `docs/*.md` | 各自专题（备份 / 升级 / 运维 / 排障 / 发布 / 开发） |
 | `skills/baota-docker/` | 给 AI 助手的索引与红线，只引用 docs，不复述正文 |
-| `CHANGELOG.md` | 用户可见变更（只留最近 1 个版本）；更早的进 `docs/history.md` |
+| `CHANGELOG.md` | 用户可见变更（`1.0.0` 起）；公开前的开发期记录进 `docs/history.md` |
 
 **标题层级**：`#` 后**必须**有空格（`##标题` 会被 GitHub 当正文，目录里的锚点点了没反应）；
 一篇只允许一个 H1；README 的章节一律 H2，注入进来的报告由
 `.github/scripts/report.py` **整篇降 2 级**（H1→H3…），所以报告内部不会与章节标题同级。
 `make lint` 会检查前两项（标题缺空格、多个 H1）—— 这两类错误渲染不报错，只能靠工具拦。
 
-**术语表**（统一叫法，避免同义混用）：
-
-| 术语 | 含义 |
-|---|---|
-| 线 / 通道 | 一条跟进上游的发布流水线；标识形如 `12_version`，显示名 `12.x`（见 `image/channels.conf`） |
-| 系统层 | `/data/system` 下以 overlay 承接的目录（`etc usr var root opt home srv`、`www/server`） |
-| 业务层 | `/data/www` 下 bind 直通的用户数据（站点 / 备份 / MySQL） |
-| 面板状态 | `/data/panel` 下 bind 直通的面板自身状态（`data plugin vhost ssl config`） |
-| 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
-| 守卫 / 垫片 | `guard.sh`（执行入口守卫）与 `shim`（pyenv 解释器包装） |
-| 镜像副本 | `/baota/origin`：构建期生成的实体副本（排除 pyenv），守卫用它把代码换回镜像版本 |
+**命名、路径与目录结构**：唯一真源是 [命名与目录结构约定](conventions.md)
+（术语表也收在那里）。新增目录 / 文件 / 变量前先按它取名，不要在各文档里各写一套。
 
 ## 漂移检测
 
@@ -140,7 +149,7 @@ baota-docker/
 
 两级节奏，控制成本：
 
-- **probe**（每天，几十秒）：取两个通道安装脚本的 sha256 与版本号，
+- **probe**（每天，几十秒）：取两条线安装脚本的 sha256 与版本号，
   与 `.github/scripts/drift/baseline.json` 比对，判断是否有变更
 - **drift**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面的比对
 
@@ -152,10 +161,10 @@ baota-docker/
 
 维护要点（改上游相关代码时同步）：
 
-- 目录集合只有一份：`.github/scripts/drift/install.sh` 的 `KNOWNS`，对应
+- 目录集合只有一份：`.github/scripts/drift/install.sh` 的 `KNOWN_DIRS`，对应
   `defaults.env` 的 `PERSIST_SYSTEM_DIRS`（现在含 `www/server`）。新增系统层持久化
   目录时同步它
-- `/www` 刻意**不**计入 `KNOWNS`：它按子路径分别处理（`www/server` overlay、业务目录与
+- `/www` 刻意**不**计入 `KNOWN_DIRS`：它按子路径分别处理（`www/server` overlay、业务目录与
   面板状态 bind、站点日志 `/www/wwwlogs` 按设计不持久化），装前装后对比时仍然按
   「未覆盖」报警，由人确认新出现的子路径该不该持久化 —— 这是有意的常亮项，不是假红
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
@@ -179,13 +188,12 @@ baota-docker/
 - 由此得到的性质：面板的 `init_db` 永远由镜像版本代码执行，持久层的库不可能
   「比代码新」（否则会出现「库被新版迁移、代码又回退」的降级组合）；
   升级 / 回退面板 = 换镜像标签，不需要 `reset-panel`；
-- Python 运行环境：由官方安装脚本决定，本项目不再干预（已移除 12.0.0 通道的
-  构建期 py3.13 预升 `UPGRADE_PY313`）。13.0.0 出厂即 3.13.14；
+- Python 运行环境：由官方安装脚本决定，本项目不干预。13.0.0 出厂即 3.13.14；
   12.0.0 用官方脚本自带的版本。
 
-> 曾经内置过「禁用面板更新」补丁——把 `script/` 下的升级脚本替换为 stub，并逐项
-> 跟踪上游的脚本名与代码内执行路径；已随不可变面板整体移除（那套清单永远跟不完，
-> 且面板自更新并不影响数据安全）。
+> 「禁用面板更新」这类补丁刻意不做：把 `script/` 下的升级脚本换成 stub、再逐项
+> 跟踪上游的脚本名与代码内执行路径，那套清单永远跟不完，而面板自更新并不影响
+> 数据安全 —— 不可变面板改从执行入口兜住（见上）。
 
 ## 基础镜像（固定 Debian 12）
 
@@ -196,13 +204,13 @@ baota-docker/
 ## 本地构建
 
 ```bash
-make build CHANNEL=12.0.0        # 等价于：
-# （make build 会自己从 channels.conf 取参数，等价于：）
+make build LINE=12.0.0        # 等价于：
+# （make build 会自己从 lines.conf 取参数，等价于：）
 # docker build -f image/Dockerfile \
-#  --build-arg INSTALL_URL=<见 channels.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
+#  --build-arg INSTALL_URL=<见 lines.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
 
-make up CHANNEL=12.0.0           # 起容器
-make logs CHANNEL=12.0.0         # 看日志
+make up LINE=12.0.0           # 起容器
+make logs LINE=12.0.0         # 看日志
 make health                      # 跑发布前健康检查
 make lint                        # shellcheck + bash -n + YAML 语法
 ```
@@ -275,7 +283,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 | 脚本 | 覆盖 |
 |---|---|
 | `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
-| `check/degrade.sh` | 只读持久化根必须被识别为 `degraded-critical` 且判 unhealthy（最危险的失效模式） |
+| `check/degrade.sh` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
 | `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
 | `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述三套** |
 
@@ -300,5 +308,5 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 - **动 `image/conf/defaults.env` 的目录清单要连着发布一起做**：门禁（core / degrade /
   upgrade）读的是**仓库里**的清单，跑的是**镜像**；往 `WWW_DATA_SUBDIRS` 加一个目录
   之后，线上那份旧镜像还没有这个挂载，日巡检会红到下一次发布为止（这是预期现象，
-  不是回归）。另外，漂移检测的 `KNOWNS` / `WWW_PERSIST` **从这份清单派生**，
+  不是回归）。另外，漂移检测的 `KNOWN_DIRS` / `WWW_PERSIST_SUBDIRS` **从这份清单派生**，
   不需要跟着改第二处

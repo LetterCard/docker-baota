@@ -3,24 +3,14 @@
 #  [构建 3/3] 开机自启、运行期脚本
 #
 #  必须排在 panel.sh 之后：面板已装好，/www/server/panel 才存在。
-#  「不可变面板」下本阶段不打任何面板补丁 —— 面板代码原样来自镜像，
-#  不再需要保存启动器副本，也不再生成顶层目录基线（运行期不巡检上游落点）。
+#  「不可变面板」下本阶段不打任何面板补丁 —— 面板代码原样来自镜像，不需要
+#  保存启动器副本，也不需要顶层目录基线（运行期不巡检上游落点）。
 #
-#  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量，可直接读取）：
-#    IMAGE_VERSION         镜像版本，写入 /baota/VERSION 供运行期版本护栏使用
-#    PERSIST_DATA_ROOT     持久化根（业务 data/www 与面板状态 data/panel 的父目录）
-#    PERSIST_SYSTEM_ROOT   系统层根目录（etc/usr/var/root/opt/home/srv）
-#    PERSIST_SYSTEM_DIRS   系统层需要持久化的顶层目录
+#  本阶段只做三件事：① 运行期脚本权限 ② 开机自启与 systemd 复位
+#  ③ 执行入口守卫装配（解释器包装 + /baota/origin 代码副本）
 #
-#  以下运行期文件由 Dockerfile 在调用本脚本前 COPY 到位：
-#    /baota/healthcheck.sh     健康检查入口
-#    /baota/backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
-#    /baota/defaults.env       运行期配置真源
-#    /baota/init.sh            阶段 0
-#    /baota/entrypoint.sh      阶段 1
-#    /baota/guard.sh     执行入口守卫（不可变面板）
-#    /baota/shim     面板 pyenv 解释器的包装
-#    /etc/systemd/system/btpanel.service
+#  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量）：
+#    IMAGE_VERSION / PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_SYSTEM_DIRS
 #
 #  日志约定：[build] 普通信息，[build][WARN] 告警，[build][ERROR] 错误。
 #  与另两个阶段脚本一样开 -x：构建日志是排查构建失败的唯一线索
@@ -28,16 +18,16 @@
 set -euxo pipefail
 
 # 镜像自有运行期文件的根目录。刻意放在 rootfs 根部、不属于任何持久化目录，
-# 这样它永远跟随当前镜像，不会被用户的旧数据屏蔽（旧版放 /opt/baota，而 /opt
-# 是持久化目录，还原备份时旧副本会反过来屏蔽新镜像）。
+# 这样它永远跟随当前镜像，不会被用户的旧数据屏蔽 —— 放进持久化目录（如 /opt）
+# 时，还原备份会把旧脚本副本带回来、反过来屏蔽新镜像。
 BAOTA_DIR=/baota
 
 # 面板安装路径（官方安装脚本固定在 /www/server/panel，全项目同此约定）
 PANEL_DIR=/www/server/panel
 
 # ---- 配置真源：/baota/defaults.env（构建期已由 Dockerfile COPY 到位）----
-# 构建期也从这里取值，不再抄一份默认值：历史上就是「真源改了、兜底没改」导致
-# 镜像里凭空建出 data/system/www 空目录（用户会以为站点数据在那）
+# 构建期也从这里取值，不再抄一份默认值：「真源改了、兜底没改」会让镜像里凭空
+# 建出 data/.system/www 空目录（用户会以为站点数据在那）
 if [ ! -f "${BAOTA_DIR}/defaults.env" ]; then
     echo '❌ [build][ERROR] 缺少运行期配置真源 /baota/defaults.env，构建中止' >&2
     exit 1
@@ -126,25 +116,18 @@ install_runtime_files() {
 
 # ==============================================================================
 #  4. 执行入口守卫：包装 pyenv 解释器 + 生成镜像代码副本
-#
-#  背景与原理见 image/scripts/guard.sh 的头部注释，这里只做装配：
-#    1) pyenv/bin/python-real = 真解释器；python / python3 = 指向
-#       /baota/shim 的符号链接（面板的每一次 python 执行都会先过守卫）
-#    2) /baota/origin = 面板目录的实体副本（排除 pyenv），作为「换回镜像版本」
-#       的来源。运行期对面板目录的写入会被 overlay copy-up 隔离在容器层，
-#       副本始终保持镜像状态
-#       ★ 为什么不是 cp -al 硬链接：面板目录在更早的构建层里，overlayfs 下
-#         跨层 link 只会退化成复制 —— 硬链接给不出「体积零增量」，CI 实测
-#         inode 不同（core.sh A15 就是这条断言）。所以直接做实体副本，
-#         并排除 pyenv（面板更新从不碰它，且它是面板目录的体积大头）
-#
-#  装配失败不阻断构建：上游若改掉 pyenv 布局，守卫只是失效，面板仍按上游默认
-#  行为运行；这种情况由发布门禁 core.sh 的守卫检查（A15）拦下，不会静默上线
+#  原理见 guard.sh 头部，这里只做装配：
+#    1) pyenv/bin/python{,3} → /baota/shim.sh（包装器），真解释器挪到 python-real
+#    2) /baota/origin = 面板目录的实体副本（排除 pyenv），作「换回镜像版本」的来源
+#  ★ 不用 cp -al 硬链接：面板目录在更早的构建层，overlayfs 跨层 link 只退化成复制
+#    （CI 实测 inode 不同，即 core.sh A15 断言）。
+#  装配失败不阻断构建：上游改掉 pyenv 布局时守卫只是失效、面板仍按上游默认运行，
+#  由 core.sh 守卫检查（A15）拦下，不会静默上线。
 # ==============================================================================
 setup_guard() {
     log '4/5 装配执行入口守卫（解释器包装 + 镜像代码副本）'
 
-    chmod 0755 "${BAOTA_DIR}/guard.sh" "${BAOTA_DIR}/shim"
+    chmod 0755 "${BAOTA_DIR}/guard.sh" "${BAOTA_DIR}/shim.sh"
 
     if [ ! -x "${PANEL_DIR}/pyenv/bin/python3" ]; then
         warn "未找到 ${PANEL_DIR}/pyenv/bin/python3，跳过守卫装配（面板按上游默认行为运行）"
@@ -159,14 +142,14 @@ setup_guard() {
         return 0
     fi
     case "${real}" in
-        *shim)
+        *shim*)
             warn "pyenv 解释器已指向 shim（重复装配），跳过守卫装配"
             return 0
             ;;
     esac
     ln -sfn "${real}" "${PANEL_DIR}/pyenv/bin/python-real"
-    ln -sfn "${BAOTA_DIR}/shim" "${PANEL_DIR}/pyenv/bin/python"
-    ln -sfn "${BAOTA_DIR}/shim" "${PANEL_DIR}/pyenv/bin/python3"
+    ln -sfn "${BAOTA_DIR}/shim.sh" "${PANEL_DIR}/pyenv/bin/python"
+    ln -sfn "${BAOTA_DIR}/shim.sh" "${PANEL_DIR}/pyenv/bin/python3"
 
     # 镜像代码副本。必须在解释器包装完成之后生成：副本里包含包装后的布局，
     # 守卫恢复后 pyenv 依然是「shim → 真解释器」的形态。
@@ -183,7 +166,7 @@ setup_guard() {
         || warn "镜像代码副本不完整：${BAOTA_DIR}/origin/class/common.py 缺失"
     [ ! -d "${BAOTA_DIR}/origin/pyenv" ] \
         || warn '镜像代码副本里出现了 pyenv（会让镜像白白变大，应被排除）'
-    [ "$(readlink "${PANEL_DIR}/pyenv/bin/python3")" = "${BAOTA_DIR}/shim" ] \
+    [ "$(readlink "${PANEL_DIR}/pyenv/bin/python3")" = "${BAOTA_DIR}/shim.sh" ] \
         || warn 'pyenv/bin/python3 未指向 shim，守卫不会生效'
 
     log "守卫已装配（镜像版本 $(cat "${BAOTA_DIR}/VERSION" 2> /dev/null || echo unknown)，副本 $(du -sh "${BAOTA_DIR}/origin" 2> /dev/null | cut -f1)）"

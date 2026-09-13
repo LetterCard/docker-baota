@@ -31,7 +31,8 @@ docker compose logs -f baota
 快照是**一份完整目录**（不是压缩包），用 `cp -a` 生成：比打包快，且 `cp -a` 天然保留
 扩展属性，回滚时反向复制回去即可。
 
-宿主机路径与容器内路径一一对应（面板状态是 bind 目录，源就是 `data/panel/`）：
+宿主机路径与容器内路径一一对应（面板状态是 bind 目录，源就是
+`data/www/server/panel/`，与容器里的 `/www/server/panel` 同名）：
 
 ```bash
 # 1) 看看有哪些快照
@@ -40,15 +41,15 @@ ls -1t data/www/backup/auto/
 # 2) 必须先停容器：运行期间直接改持久化目录的内容属未定义行为
 docker compose down
 
-# 3) 替换 —— 面板配置是 bind 目录，源在 data/panel/data
-rm -rf data/panel/data
-cp -a data/www/backup/auto/baota-<版本>-<时间>  data/panel/data
+# 3) 替换 —— 面板配置是 bind 目录，源在 data/www/server/panel/data
+rm -rf data/www/server/panel/data
+cp -a data/www/backup/auto/baota-<版本>-<时间>  data/www/server/panel/data
 
 docker compose up -d
 ```
 
 > **路径为什么这样**：容器里 `/www/server/panel/data` 是 bind 目录，
-> 直接对应宿主 `data/panel/data`；快照落在业务目录 `data/www/backup/auto/`。
+> 直接对应宿主 `data/www/server/panel/data`；快照落在业务目录 `data/www/backup/auto/`。
 >
 > 升级快照只覆盖面板配置，**不覆盖站点与数据库** —— 它们同样是 bind 目录
 > （`data/www/...`），换镜像动不到；另有更好的备份手段
@@ -63,11 +64,11 @@ docker compose ps                       # 容器状态应为 healthy
 
 ⚠️ **别用 `bt default` 核对凭据**：它读的 `/www/server/panel/default.pl` 属于面板代码、
 不持久化，容器重建后会退回镜像构建期的占位值，显示的不是你的真实口令。端口与安全
-入口在持久化层里（`data/panel/data/port.pl`、`admin_path.pl`），不会变；口令用你已知
+入口在持久化层里（`data/www/server/panel/data/port.pl`、`admin_path.pl`），不会变；口令用你已知
 的那个登录即可（忘了用 `docker exec -it baota bt 5` 重置）。
 
 ✅ **面板里装的组件（PHP / nginx / MySQL…）会持久化**：它们落在 `/www/server`，
-该目录整层走 overlay（upper 在 `data/system/www/server`），换镜像重建容器后组件、
+该目录整层走 overlay（upper 在 `data/.system/www/server`），换镜像重建容器后组件、
 插件数据、计划任务脚本都还在，**不用重装**。详见[持久化原理](persistence.md)。
 
 再登录面板，确认版本号、站点、数据库都正常。
@@ -130,13 +131,13 @@ docker compose logs -f baota
 ### 迁移后自动适配的部分
 
 - **面板地址、用户名、口令、安全入口全部不变**——它们都随 `data/` 持久化数据一起保留
-- `data/system/etc/` 下的 `hosts`、`resolv.conf`、`hostname` 会被新宿主机的 Docker 注入值覆盖
+- `data/.system/etc/` 下的 `hosts`、`resolv.conf`、`hostname` 会被新宿主机的 Docker 注入值覆盖
 - SSH 主机密钥跟着走，客户端不会报密钥变更
 
 ### 迁移后需要你确认的部分
 
-1. **面板端口**：新机器的端口映射要和 `data/panel/data/port.pl` 里的值对得上
-2. **架构**：amd64 与 arm64 的镜像不通用。`apt` 装在 `/usr`（即 `data/system/usr`）里的
+1. **面板端口**：新机器的端口映射要和 `data/www/server/panel/data/port.pl` 里的值对得上
+2. **架构**：amd64 与 arm64 的镜像不通用。`apt` 装在 `/usr`（即 `data/.system/usr`）里的
    二进制是编给原架构的，搬到另一种架构上起不来；面板代码在镜像层，会随架构自动匹配。
    **跨架构迁移只搬业务数据**：在新机器上全新启动，
    再用面板导入站点文件与数据库备份

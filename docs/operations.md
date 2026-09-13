@@ -16,7 +16,7 @@
 | 不要 | 原因 |
 |---|---|
 | 在面板里点「更新」 | 写入落在容器可写层，且**不会生效**：面板代码的每次执行都先过执行入口守卫，发现版本与镜像不一致就用镜像副本换回去（见[持久化原理](persistence.md#执行入口守卫不可变面板的兜底)）；升级请换镜像标签 |
-| 手动改、删 `data/system/.baota/` | 项目元数据目录（工作目录、锁、版本记录、启动历史），删了会自动重建，改它可能导致下次挂载异常或丢锁 |
+| 手动改、删 `data/.system/.baota/` | 项目元数据目录（工作目录、锁、版本记录、启动历史），删了会自动重建，改它可能导致下次挂载异常或丢锁 |
 | 运行中直接拷贝 `data/` 当备份 | 数据库文件可能处于半写状态，恢复后表损坏 |
 | 用图形界面「压缩 / 复制」备份 `data/` | 丢 overlay 扩展属性，详见[备份与恢复](backup.md) |
 | 把 `data/` 放在网络共享上跑 | 见硬约束第一条 |
@@ -57,7 +57,7 @@ docker compose logs --tail 100 baota    # 启动日志里的告警
 docker exec baota bt status             # 面板 + 任务进程
 ```
 
-若出现持久化降级，除日志外还会追加到 `data/system/.baota/boot-history.log`，
+若出现持久化降级，除日志外还会追加到 `data/.system/.baota/boot.log`，
 事后可以回答「从哪次启动开始不对的」。
 
 ## 重置系统层（保留数据）
@@ -77,12 +77,12 @@ make reset-system CONFIRM=yes      # 必须显式确认，避免误操作
 | | 内容 |
 |---|---|
 | **会丢** | apt 装的软件、手工改过的 `/etc`、计划任务（`/var/spool/cron`）、root 家目录（含 `.ssh/authorized_keys`）、`/var/log` 历史日志 |
-| **不会丢** | 面板账号与配置、站点文件、数据库、备份、站点证书与伪静态、面板自身证书、面板设置 —— 全在数据层 `data/`；**面板里装的组件**（PHP / nginx / MySQL…，在 `data/system/www/server`）也刻意保留 —— 清掉它等于让用户重装一遍环境，与项目目的相反（真要清就手动删 `data/system/www/server`） |
+| **不会丢** | 面板账号与配置、站点文件、数据库、备份、站点证书与伪静态、面板自身证书、面板设置 —— 全在数据层 `data/`；**面板里装的组件**（PHP / nginx / MySQL…，在 `data/.system/www/server`）也刻意保留 —— 清掉它等于让用户重装一遍环境，与项目目的相反（真要清就手动删 `data/.system/www/server`） |
 
-`data/system/.baota/` 元数据刻意保留：里面有镜像版本记录，删了会被判成「首次使用」，
+`data/.system/.baota/` 元数据刻意保留：里面有镜像版本记录，删了会被判成「首次使用」，
 下次启动就不会再生成升级前快照了。
 
-> 没有 `make` 时手动做也一样：停容器 → 删掉 `data/system/` 下
+> 没有 `make` 时手动做也一样：停容器 → 删掉 `data/.system/` 下
 > `PERSIST_SYSTEM_DIRS` 里的**顶层**目录（默认 `etc usr var root opt home srv`）→ 启动容器。
 > 关键是**必须先停容器**：运行期间系统层正挂着 overlay，此时删 upper 属未定义行为。
 

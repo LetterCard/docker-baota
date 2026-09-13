@@ -4,34 +4,24 @@
 #
 #  用法：published.sh <镜像:标签> <期望的宝塔版本> [输出 md 文件]
 #
-#  与发布前门禁的分工：core / degrade / upgrade 验的是「本地构建的候选镜像」，
-#  把坏镜像拦在推送之前；本脚本验的是「DockerHub 上已发布的镜像」，
-#  每天确认线上那套东西仍然健康（上游脚本变更、镜像被重推、依赖漂移都能发现）。
+#  分工：core / degrade / upgrade 验「本地构建的候选镜像」（拦在推送前）；
+#  本脚本验「DockerHub 上已发布的镜像」，每天确认线上那套仍然健康。
 #
-#  为什么只在这里做三件事：
-#    1) 拉取  —— 只有线上镜像才需要
-#    2) 首启日志 —— 报告要附一段脱敏后的首次启动日志，供人回看
-#    3) PHP 扩展编译链路 —— 需要联网装 php-dev 真编译，且**不能**在推送前的
-#       候选镜像上跑（会把环境改脏，污染随后要推送的那份）
-#  其余场景一律**复用三套门禁脚本**（core / degrade / upgrade）：
-#  它们本来就覆盖持久化、重建、隔离、守卫、版本护栏、只读降级等全部承诺，
-#  在这里再抄一遍的结果是「同一件事有两份断言」——历史上已经漂移过多次
-#  （published 里的面板状态路径、overlay 期望数都曾与真实布局不一致，出现假红）。
-#  唯一从旧脚本搬进 core.sh 的是并发锁（同卷第二实例必须被拦下）——
-#  那是数据安全性质，应该在推送前就拦住。
-#
-#  本脚本只在 CI runner 上执行；放在 .github/ 下即被 .dockerignore 排除。
+#  ★ 只在这里做三件只有线上镜像才需要的事：① 拉取 ② 留一段脱敏首启日志
+#    ③ PHP 扩展真编译（要联网装 php-dev，且不能在推送前的候选镜像上跑 ——
+#    会把环境改脏）。其余一律复用三套门禁脚本：在这里再抄一遍就是同一件事
+#    两份断言，必然漂移（表现是假红）。
 # ==============================================================================
 set -uo pipefail
 
 IMAGE=${1:?用法: published.sh <镜像:标签> <期望版本> [输出 md]}
-EXPECT=${2:?用法: published.sh <镜像:标签> <期望版本> [输出 md]}
+EXPECT_VERSION=${2:?用法: published.sh <镜像:标签> <期望版本> [输出 md]}
 OUT_MD=${3:-}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-C="baota-verify-$$"
-V="baota-verify-vol-$$"
+CONTAINER="baota-verify-$$"
+VOLUME="baota-verify-data-$$"
 
 START_TS=$(date +%s)
 RESULTS=()
@@ -44,13 +34,13 @@ ok()   { PASS=$((PASS + 1)); RESULTS+=("- [x] $*"); echo "  ✅ $*"; }
 bad()  { FAIL=$((FAIL + 1)); RESULTS+=("- [ ] ❌ $*"); echo "  ❌ $*"; }
 
 cleanup() {
-    docker rm -f "$C" >/dev/null 2>&1 || true
-    docker volume rm -f "$V" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-inside()     { docker exec "$C" "$@"; }
-inside_sh()  { docker exec "$C" sh -c "$1"; }
+inside()     { docker exec "$CONTAINER" "$@"; }
+inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
 
 # 首启日志里的凭据与安全入口不能进仓库（report.md 会被提交）
 sanitize() {
@@ -140,22 +130,22 @@ zend_module_entry myext_module_entry = {
 ZEND_GET_MODULE(myext)
 C
 
-    if ! docker cp "$_build" "$C:/tmp/myext_check" >/dev/null 2>&1; then
+    if ! docker cp "$_build" "$CONTAINER:/tmp/myext_check" >/dev/null 2>&1; then
         _rc=1; _msg="无法拷贝扩展源码进容器"
     else
         # 分步执行、分步报错：失败时报告里直接写出是 phpize / configure / make /
         # 产出 / 加载 哪一环挂了（笼统一句「链路未通过」的排查成本太高）
-        _out=$(docker exec "$C" sh -c "
+        _out=$(docker exec "$CONTAINER" sh -c "
             cd /tmp/myext_check || exit 9
-            '$_phpize' > /tmp/myext-phpize.log 2>&1 \
-                || { echo 'phpize 失败'; tail -n 10 /tmp/myext-phpize.log; exit 1; }
-            ./configure --with-php-config='$_phpcfg' > /tmp/myext-configure.log 2>&1 \
-                || { echo 'configure 失败'; tail -n 10 /tmp/myext-configure.log; exit 1; }
-            make -j\"\$(nproc)\" > /tmp/myext-make.log 2>&1 \
-                || { echo 'make 失败'; tail -n 10 /tmp/myext-make.log; exit 1; }
+            '$_phpize' > /tmp/phpize.log 2>&1 \
+                || { echo 'phpize 失败'; tail -n 10 /tmp/phpize.log; exit 1; }
+            ./configure --with-php-config='$_phpcfg' > /tmp/configure.log 2>&1 \
+                || { echo 'configure 失败'; tail -n 10 /tmp/configure.log; exit 1; }
+            make -j\"\$(nproc)\" > /tmp/make.log 2>&1 \
+                || { echo 'make 失败'; tail -n 10 /tmp/make.log; exit 1; }
             test -f modules/myext.so || { echo '未产出 modules/myext.so'; exit 1; }
-            '$_php' -d extension=\"\$PWD/modules/myext.so\" -m 2> /tmp/myext-load.log | grep -iq myext \
-                || { echo '加载 myext 失败'; tail -n 5 /tmp/myext-load.log; exit 1; }
+            '$_php' -d extension=\"\$PWD/modules/myext.so\" -m 2> /tmp/load.log | grep -iq myext \
+                || { echo '加载 myext 失败'; tail -n 5 /tmp/load.log; exit 1; }
         " 2>&1)
         _rc=$?
         [ "$_rc" -ne 0 ] && _msg="phpize→configure→make→加载 未通过"
@@ -184,7 +174,7 @@ run_suites() {
         if [ "$suite" = 'degrade' ]; then
             bash "${SCRIPT_DIR}/run.sh" "$suite" "$IMAGE" > "/tmp/suite-${suite}.log" 2>&1 || rc=$?
         else
-            bash "${SCRIPT_DIR}/run.sh" "$suite" "$IMAGE" "$EXPECT" > "/tmp/suite-${suite}.log" 2>&1 || rc=$?
+            bash "${SCRIPT_DIR}/run.sh" "$suite" "$IMAGE" "$EXPECT_VERSION" > "/tmp/suite-${suite}.log" 2>&1 || rc=$?
         fi
         if [ "$rc" -eq 0 ]; then
             ok "门禁 ${suite} 通过"
@@ -208,13 +198,13 @@ fi
 
 BOOT_LOG=''
 if [ "$FAIL" -eq 0 ]; then
-    docker volume create "$V" >/dev/null
+    docker volume create "$VOLUME" >/dev/null
     log "首次启动（全新数据卷）"
-    docker run -d --name "$C" --privileged \
+    docker run -d --name "$CONTAINER" --privileged \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
         --tmpfs /run --tmpfs /run/lock --shm-size=512m \
         --stop-signal=SIGRTMIN+3 --stop-timeout=90 \
-        -v "${V}:/data" "$IMAGE" >/dev/null
+        -v "${VOLUME}:/data" "$IMAGE" >/dev/null
 
     # 等面板端口响应（最多 120s），再抓首启日志与跑扩展编译
     _port=''
@@ -231,9 +221,9 @@ if [ "$FAIL" -eq 0 ]; then
         ok "首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）"
     else
         bad "首次启动失败（面板 120 秒内未响应）"
-        docker logs "$C" --tail 30 >&2 2>/dev/null || true
+        docker logs "$CONTAINER" --tail 30 >&2 2>/dev/null || true
     fi
-    BOOT_LOG=$(docker logs "$C" 2>&1 | sanitize | tail -n 40)
+    BOOT_LOG=$(docker logs "$CONTAINER" 2>&1 | sanitize | tail -n 40)
 
     check_php_ext_compile
     run_suites
@@ -248,7 +238,7 @@ RESULT_ICON=$([ "$FAIL" -eq 0 ] && echo '✅' || echo '❌')
     echo '| 项 | 值 |'
     echo '|---|---|'
     echo "| 镜像 | \`${IMAGE}\` |"
-    echo "| 期望宝塔版本 | \`${EXPECT}\` |"
+    echo "| 期望宝塔版本 | \`${EXPECT_VERSION}\` |"
     echo "| 结果 | ${RESULT_ICON} 通过 ${PASS} / 失败 ${FAIL} |"
     echo "| 耗时 | ${ELAPSED}s |"
     echo

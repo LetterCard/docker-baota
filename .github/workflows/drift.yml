@@ -13,7 +13,7 @@ name: 🔭 监测：变更与漂移检测
 #    ② 仅当有变更 / 手动强制：真装一遍做目录比对（几分钟），然后更新基线
 #  基线只在②成功后更新 —— 否则一次失败就会把「上游变了」这个信号吞掉。
 #
-#  检测范围 = image/channels.conf 里的各条线：新增一条线不用改本文件。
+#  检测范围 = image/lines.conf 里的各条线：新增一条线不用改本文件。
 # ==============================================================================
 
 on:
@@ -37,8 +37,8 @@ concurrency:
 env:
   BASELINE: .github/scripts/drift/baseline.json
   REPORT: .github/reports/drift.md
-  CHANNELS: image/channels.conf
-  # 与构建所用基础镜像一致（image/channels.conf 的 base 字段）
+  LINES: image/lines.conf
+  # 与构建所用基础镜像一致（image/lines.conf 的 base 字段）
   BASE_IMAGE: debian:12
   LABEL: BUG
 
@@ -75,7 +75,7 @@ jobs:
           reason=''
           summary=''
 
-          while read -r line channel vfile url _probe _tag _base; do
+          while read -r line display vfile url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
             recorded=$(tr -d '[:space:]' < "${vfile}" || true)
 
@@ -89,20 +89,20 @@ jobs:
             [ -f "${BASELINE}" ] && base_sha=$(jq -r --arg k "${line}" '.lines[$k] // ""' "${BASELINE}")
             if [ "${sha}" != "${base_sha}" ]; then
               changed=true
-              reason="${reason}${channel} 安装脚本已变更；"
+              reason="${reason}${display} 安装脚本已变更；"
               state='已变更'
             else
               state='与基线一致'
             fi
 
-            lines=$(jq -c --arg line "${line}" --arg channel "${channel}" \
+            lines=$(jq -c --arg line "${line}" --arg display "${display}" \
               --arg url "${url}" --arg sha "${sha}" --arg ver "${recorded}" \
               --arg state "${state}" \
-              '. + [{line:$line, channel:$channel, url:$url, sha:$sha, version:$ver, state:$state}]' \
+              '. + [{line:$line, display:$display, url:$url, sha:$sha, version:$ver, state:$state}]' \
               <<< "${lines}")
-            summary="${summary}| ${channel} | \`${line}\` | ${recorded} | ${state} | \`${sha:0:12}\` |"$'\n'
-            echo "${line}（${channel}）：${state}（sha ${sha:0:12}…）"
-          done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
+            summary="${summary}| ${display} | \`${line}\` | ${recorded} | ${state} | \`${sha:0:12}\` |"$'\n'
+            echo "${line}（${display}）：${state}（sha ${sha:0:12}…）"
+          done < <(grep -vE '^[[:space:]]*(#|$)' "${LINES}")
 
           if [ "${changed}" = 'false' ]; then
             reason='与基线一致，本次不跑安装对比'
@@ -132,14 +132,14 @@ jobs:
 
           while IFS= read -r item; do
             line=$(jq -r '.line' <<< "${item}")
-            channel=$(jq -r '.channel' <<< "${item}")
+            channel=$(jq -r '.display' <<< "${item}")
             url=$(jq -r '.url' <<< "${item}")
-            echo "▶️ 检测 ${line}（${channel}）：${url}"
+            echo "▶️ 检测 ${line}（${display}）：${url}"
             INSTALL_URL="${url}" BASE_IMAGE="${BASE_IMAGE}" \
-            OUT_MD="/tmp/uw/${line}.md" CRIT_FILE="/tmp/uw/${line}.crit" \
+            OUT_MD="/tmp/uw/${line}.md" CRITICAL_FILE="/tmp/uw/${line}.critical" \
               bash .github/scripts/drift/install.sh \
               || { echo "::error::${line} 安装对比失败"; exit 1; }
-            [ "$(cat "/tmp/uw/${line}.crit" 2> /dev/null || echo 0)" = '1' ] && critical=1
+            [ "$(cat "/tmp/uw/${line}.critical" 2> /dev/null || echo 0)" = '1' ] && critical=1
           done < <(jq -c '.[]' <<< "${LINES}")
 
           echo "critical=${critical}" >> "$GITHUB_OUTPUT"
@@ -161,7 +161,7 @@ jobs:
             echo "- 触发方式：${{ github.event_name }}"
             echo "- 变更判定：${{ steps.probe.outputs.reason }}"
             echo
-            echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
             # SUMMARY 由 step output 传回，末尾换行会被 GitHub 吃掉：
             # 只 printf '%s' 再 echo 会让表格与下面的 --- 粘成一行（表格失效），
@@ -170,10 +170,10 @@ jobs:
             if [ "${analyzed}" = 'success' ]; then
               while IFS= read -r item; do
                 line=$(jq -r '.line' <<< "${item}")
-                channel=$(jq -r '.channel' <<< "${item}")
+                channel=$(jq -r '.display' <<< "${item}")
                 echo '---'
                 echo
-                echo "## ${channel}（\`${line}\`）"
+                echo "## ${display}（\`${line}\`）"
                 echo
                 if [ -f "/tmp/uw/${line}.md" ]; then
                   cat "/tmp/uw/${line}.md"
@@ -241,7 +241,7 @@ jobs:
             echo
             echo "- 变更判定：${{ steps.probe.outputs.reason }}"
             echo
-            echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
             printf '%s\n\n' "${SUMMARY}"
             echo '完整报告见 `.github/reports/drift.md`（也已内嵌进 README「漂移检测报告」章节）。'

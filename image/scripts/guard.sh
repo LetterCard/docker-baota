@@ -2,43 +2,22 @@
 # ==============================================================================
 #  🛡️ guard.sh —— 「不可变面板」的执行入口守卫（运行期，镜像自有）
 #
-#  为什么需要它：
-#    面板代码不进持久化层、直接来自镜像，但容器可写层是**可写**的：在面板里点
-#    「更新」会把新版代码写进容器可写层。而更新的最后一步必然是重启面板
-#    （init.sh 的 panel_start → $pythonV script/init_db.py init_db），init_db 会用
-#    **当时磁盘上的代码**去升级持久层的 SQLite。于是会出现最坏组合：
-#    「库被新版代码迁移过，代码后来又回退成镜像版本」——宝塔不保证降级可用。
-#
-#  做法（不拦截写入，只拦截执行）：
-#    pyenv 解释器被包装成「先跑本脚本，再 exec 真解释器」。本脚本比较
-#    「面板目录里的代码版本」与「镜像版本」（/baota/VERSION）：
-#      · 一致            → 直接返回（常态零开销、零写入）
-#      · 不一致 / 读不到 → 用镜像里的代码副本（/baota/origin）覆盖回去，
-#                          然后才让解释器去执行 —— 新版代码从未被执行过
-#
-#  于是：面板内「更新」在 UI 上仍显示成功，但新代码不会生效；init_db 永远由
-#  镜像版本的代码执行，持久层的库不可能「比代码新」。升级面板 = 换镜像标签。
-#  这同时是「升级到一半写坏面板」的兜底：代码只要与镜像不一致就会被换回去。
-#
-#  边界与约定：
-#    · 只覆盖、不删除：镜像里没有、容器运行期新增的文件（class/404_settings.json、
-#      install/jdk.sh、插件 pip 进 pyenv 的包……）一律保留
-#    · 排除项 = 我们声明持久化的面板状态目录（PANEL_STATE_SUBDIRS）+ pyenv，
-#      与「上游会往哪写」无关，不构成需要跟上游走的清单
-#    · 任何异常一律 fail-open：读不到版本 / 缺副本 / 恢复失败 → 放行，
-#      绝不把面板卡死在启动路径上
-#
-#  入参（默认即生产路径，一般不需要设置）：
-#    PANEL_DIR / MIRROR_DIR / IMAGE_VERSION_FILE / EXCLUDES / LOCK_FILE
-#
-#  日志约定：[guard] 普通信息（写 stderr）
+#  为什么：面板代码来自镜像，但容器可写层**可写** —— 面板内「更新」会把新代码
+#    写进可写层，而更新最后必然重启面板、用**磁盘上的代码**跑 init_db 升级
+#    持久层 SQLite，于是可能出现「库被新版迁移、代码又回退」的降级组合。
+#  做法：不拦截写入，只拦截执行 —— 每次执行前比对代码版本与镜像版本，
+#    不一致就用 /baota/origin 覆盖回去，新代码从未被执行。升级面板 = 换镜像标签。
+#  红线：只覆盖不删除；排除项 = PANEL_STATE_SUBDIRS + pyenv；异常一律 fail-open
+#    （读不到版本 / 缺副本 / 恢复失败都放行，绝不把面板卡死在启动路径上）。
+#  原理：docs/persistence.md#执行入口守卫不可变面板的兜底
+#  日志：[guard] 写 stderr
 # ==============================================================================
 set -u
 
 log() { echo "🛡️ [guard] $*" >&2; }
 
 PANEL_DIR=${PANEL_DIR:-/www/server/panel}
-MIRROR_DIR=${MIRROR_DIR:-/baota/origin}
+PANEL_ORIGIN_DIR=${PANEL_ORIGIN_DIR:-/baota/origin}
 IMAGE_VERSION_FILE=${IMAGE_VERSION_FILE:-/baota/VERSION}
 LOCK_FILE=${LOCK_FILE:-/run/baota/guard.lock}
 
@@ -64,8 +43,8 @@ read_version() {
 # 镜像版本的判定基准优先取**副本里的代码版本**：副本就是镜像那份面板代码，
 # 两边天然一致；本地手工构建时 /baota/VERSION 可能是 dev/unknown，拿它比较会失真
 img_ver=''
-if [ -d "${MIRROR_DIR}" ]; then
-    img_ver=$(read_version "${MIRROR_DIR}/class/common.py")
+if [ -d "${PANEL_ORIGIN_DIR}" ]; then
+    img_ver=$(read_version "${PANEL_ORIGIN_DIR}/class/common.py")
 fi
 [ -n "${img_ver}" ] || img_ver=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null | tr -d '[:space:]' || true)
 
@@ -74,7 +53,7 @@ case "${img_ver}" in
     [0-9]*.[0-9]*.[0-9]*) ;;
     *) log "镜像代码副本不可用或版本无法比较（'${img_ver}'），跳过守卫"; exit 0 ;;
 esac
-[ -d "${MIRROR_DIR}" ] || { log "镜像代码副本不存在（${MIRROR_DIR}），跳过守卫"; exit 0; }
+[ -d "${PANEL_ORIGIN_DIR}" ] || { log "镜像代码副本不存在（${PANEL_ORIGIN_DIR}），跳过守卫"; exit 0; }
 
 cur_ver=$(read_version "${PANEL_DIR}/class/common.py")
 [ "${cur_ver}" = "${img_ver}" ] && exit 0
@@ -110,10 +89,10 @@ done
 # 副本是构建期用 tar 复制的（mtime 与镜像层文件一致），所以"没变过的文件"
 # 会被跳过 → 常态几乎不产生可写层写入，只有被更新动过的那几个文件回到镜像版本
 if command -v rsync > /dev/null 2>&1; then
-    rsync -a --no-motd "${rsync_ex[@]}" "${MIRROR_DIR}/" "${PANEL_DIR}/" > /dev/null 2>&1
+    rsync -a --no-motd "${rsync_ex[@]}" "${PANEL_ORIGIN_DIR}/" "${PANEL_DIR}/" > /dev/null 2>&1
     rc=$?
 else
-    ( cd "${MIRROR_DIR}" && tar -cf - "${tar_ex[@]}" . ) | ( cd "${PANEL_DIR}" && tar -xf - ) \
+    ( cd "${PANEL_ORIGIN_DIR}" && tar -cf - "${tar_ex[@]}" . ) | ( cd "${PANEL_DIR}" && tar -xf - ) \
         > /dev/null 2>&1
     rc=$?
 fi

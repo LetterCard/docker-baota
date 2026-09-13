@@ -2,26 +2,17 @@
 # ==============================================================================
 #  发布前健康检查的公共样板（被 core.sh / degrade.sh / upgrade.sh source）
 #
-#  三套检查脚本各自盯一个互不相关的失效面（功能完整性 / 挂载正确性 / 版本演进），
-#  但下面这些「跟 docker 打交道 + 输出格式」的样板原本是三份逐字重复的实现，
-#  改一处要同步三处，抽在这里：
-#    配置解析  expand_vars / read_default（含嵌套引用展开）
-#    输出      pass / step / fail（失败时 dump 容器日志尾部再退出）
-#    容器操作  inside / inside_sh / inside_cat / is_running / logs_match
-#    等待      wait_systemd / wait_panel_http
-#    启动      start_container（命名卷单挂，参数与 compose 的生产配置一致）
-#    清理      cleanup（EXIT trap，按各脚本实际用到的资源名收尾）
+#  三套检查脚本（core / degrade / upgrade）各自盯一个互不相关的失效面，但「跟
+#  docker 打交道 + 输出格式」的样板原本是三份逐字重复的实现，抽在这里：
+#    配置解析 expand_vars / read_default（含嵌套引用展开）｜输出 pass / step / fail
+#    容器操作 inside / inside_sh / inside_cat / is_running / logs_match
+#    等待 wait_systemd / wait_panel_http ｜ 启动 start_container ｜ 清理 cleanup
 #
-#  source 之前必须先设置：
-#    CONTAINER   容器名
-#  可选（设了才会被 cleanup 回收）：VOLUME / VOL_RO / WORK_ROOT
-#  ICON 用于 step 的日志前缀 emoji（🩺 / 🧪 / 🔼），只影响输出观感
+#  source 前必须先设置 CONTAINER；可选（设了才会被 cleanup 回收）：
+#    VOLUME / VOL_RO / WORK_ROOT；ICON 是 step 的日志前缀 emoji，只影响观感
 #
-#  ★ 这里只放「三套都一样」的样板。各脚本特有的断言（版本护栏、混合挂载、
-#    面板状态漂移……）仍留在各自文件里 —— 那些逻辑本就只在一处，抽出来只会
+#  ★ 只放「三套都一样」的样板：各脚本特有的断言留在各自文件里，抽出来只会
 #    让「这套检查到底验了什么」变得难读。
-#
-#  日志约定：✅ 通过项；失败走 ::error::（GitHub Actions 会渲染成红色注解）
 # ==============================================================================
 
 # 配置真源：与镜像共用 image/conf/defaults.env，不在脚本里再写一份硬编码。
@@ -128,24 +119,20 @@ wait_systemd() {
 
 # 面板进程由 systemd 拉起，需要等一会儿才会监听端口
 #
-# ⚠️ curl 失败时 -w '%{http_code}' 依然会输出 000，若写成 `|| echo 000`，
-#    得到的是两行 000（$'000\n000'）—— 永远不等于 "000"，等待循环第一次
-#    迭代就 break、末尾判定也恒过：面板没起来时这里既不等待也不报错。
-#    正确写法是 `|| true` + case 匹配（000 由 -w 自行输出，空值兜底）
+# ⚠️ curl 失败时 -w 仍会输出 000，写成 `|| echo 000` 会得到两行 000 ——
+#    永远不等于 "000"，等待循环第一次就 break：面板没起来时既不等待也不报错。
+#    正确写法是 `|| true` + case 匹配。
 #
-# 就绪判据与 healthcheck.sh、core.sh 的 A6 保持同一套语义：'' / 000（连不上）
-# 之外，5xx 同样算「还没起来」。502 的典型含义正是「nginx 已起、面板后端未起」，
-# 属于启动过程中的正常瞬态，应当继续等而不是当成就绪 —— 否则面板真挂住时这里
-# 会提前放行，连取证（panel_diag）也一起跳过，最后在更靠后的断言上抛一句
-# 含糊的失败，把「磁盘满 / 后端崩」的线索丢掉
-# 面板没起来时的取证：只报一句「端口 120 秒没响应」等于什么都没说。
-# 磁盘被打满（判据②：可用 <1GB 或已用 ≥95%）会让面板初始化写不进数据库而
-# 起不来，表象与「面板本身有问题」一模一样，但修法完全不同（清 runner 磁盘
-# vs 查宝塔安装）。所以失败时一次把证据打全，别让人对着一行报错猜
+# 就绪判据与 healthcheck.sh 同一套语义：'' / 000 之外，5xx 也算「还没起来」
+# （502 = nginx 已起、面板后端未起，是启动瞬态，要继续等而不是当成就绪）。
+# 失败时一次把证据打全（磁盘满与面板本身故障表象一样、修法完全不同），
+# 别让人对着一行「端口没响应」猜
 panel_diag() {
     echo "----- 面板启动失败取证 -----"
     echo "[磁盘水位] 判据②：可用 <1GB 或已用 ≥95% 即 unhealthy"
-    inside_sh 'df -Ph /data /data/system 2>/dev/null' || true
+    # ${PERSIST_SYSTEM_ROOT:-} 是空值保护（本文件可能在它赋值前被 source），
+    # 不是默认值副本 —— 真正的默认值只在 defaults.env
+    inside_sh "df -Ph /data ${PERSIST_SYSTEM_ROOT:-} 2>/dev/null" || true
     echo "[监听端口]"
     inside_sh 'ss -lntp 2>/dev/null | head -10' || true
     echo "[systemd 失败单元]"

@@ -53,7 +53,7 @@ def headings(path: pathlib.Path, content: str):
             yield i, line
 
 docs = [p for p in pathlib.Path('.').glob('**/*.md')
-        if not any(x in str(p) for x in ('.git/', 'data/', '.tmp-repro/'))]
+        if not any(x in str(p) for x in ('.git/', 'data/'))]
 
 for f in docs:
     content = f.read_text(encoding='utf-8', errors='ignore')
