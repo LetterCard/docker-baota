@@ -211,7 +211,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 - 任何持久化失败 / 只读降级写 `/run/baota/degraded`；`CRITICAL_DIRS` 里的目录
   （默认为 `/etc /usr /var /www/wwwroot /www/server/data` 与
-  `/www/server/panel/{data,vhost,ssl,config}`）额外写 `critical`，
+  `/www/server/panel/{data,plugin,vhost,ssl,config}`）额外写 `critical`，
   让 healthcheck 把容器判为 unhealthy
 - 降级记录追加到 `data/.system/.baota/boot.log`
 - 磁盘水位实时查持久化根（`data` 卷）
