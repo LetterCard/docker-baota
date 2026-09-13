@@ -4,7 +4,7 @@
 #
 #  为什么需要独立脚本，而不是 make lint 里内联一段：
 #  1) 之前 make lint 只在 `command -v shellcheck` 命中时才跑，没装就「静默跳过」——
-#     结果 display/channel 这类未定义变量 bug 在 CI 上也没拦住（CI 同样没预装）。
+#     结果未定义变量（如 display）这类 bug 在 CI 上也没拦住（CI 同样没预装）。
 #     这里改成：PATH 没有就自动下载到 .cache（版本钉死），保证一定跑。
 #  2) .sh 脚本用 --source-path=. 让 `# shellcheck source=image/conf/defaults.env`
 #     解析到真源，消除 defaults.env 配置变量的误报（SC2154）。

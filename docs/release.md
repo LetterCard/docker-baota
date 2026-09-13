@@ -6,7 +6,7 @@
 成对排列、一眼能对照；Dockerfile 与流水线都只有一份：
 
 ```
-line         channel  version                    install                                             probe   tag     base
+line         display  version                    install                                             probe   tag     base
 12_version   12.x     image/versions/12/VERSION          https://download.bt.cn/install/installStable_12.sh  banner  exact   debian:12
 13_version   13.x     image/versions/13/VERSION          https://download.bt.cn/install/install_panel.sh     api     latest  debian:12
 ```
@@ -14,7 +14,7 @@ line         channel  version                    install                        
 | 字段 | 说明 |
 |---|---|
 | `line` | **线标识**：所有内部键都用它（流水线矩阵、产物名、缓存 scope、版本文件查找）。按面板主线命名，一旦定下就再也不用改 —— 14/15 出来时是「加一行 `14_version`」，不是给旧行改名 |
-| `channel` | 显示名（镜像标签始终是版本号，不是这个名字） |
+| `display` | 显示名（镜像标签始终是版本号，不是这个名字） |
 | `version` | 该线当前**已发布**版本的文件（发布成功后由流水线回写） |
 | `install` | 官方安装脚本地址 —— 上游换线时只改这里 |
 | `probe` | 版本探测方式：`banner`=抓安装脚本横幅、`api`=官方 `get_version` 接口 |

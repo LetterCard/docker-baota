@@ -132,9 +132,9 @@ jobs:
 
           while IFS= read -r item; do
             line=$(jq -r '.line' <<< "${item}")
-            channel=$(jq -r '.display' <<< "${item}")
+            display=$(jq -r '.display' <<< "${item}")
             url=$(jq -r '.url' <<< "${item}")
-            echo "▶️ 检测 ${line}（${channel}）：${url}"
+            echo "▶️ 检测 ${line}（${display}）：${url}"
             INSTALL_URL="${url}" BASE_IMAGE="${BASE_IMAGE}" \
             OUT_MD="/tmp/uw/${line}.md" CRITICAL_FILE="/tmp/uw/${line}.critical" \
               bash .github/scripts/drift/install.sh \
@@ -170,10 +170,10 @@ jobs:
             if [ "${analyzed}" = 'success' ]; then
               while IFS= read -r item; do
                 line=$(jq -r '.line' <<< "${item}")
-                channel=$(jq -r '.display' <<< "${item}")
+                display=$(jq -r '.display' <<< "${item}")
                 echo '---'
                 echo
-                echo "## ${channel}（\`${line}\`）"
+                echo "## ${display}（\`${line}\`）"
                 echo
                 if [ -f "/tmp/uw/${line}.md" ]; then
                   cat "/tmp/uw/${line}.md"

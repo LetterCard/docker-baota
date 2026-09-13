@@ -178,7 +178,7 @@ skills/     AI 助手技能包，只引用 docs，不复述正文
 
 | 术语 | 含义 |
 |---|---|
-| 线 | 一条跟进上游的发布流水线。**文档一律叫「线」**；`lines.conf` 里 `line` 是线标识（`12_version`）、`channel` 是该线的显示名（`12.x`）—— 二者不同义，不要把「线」当「线」的同义词混用 |
+| 线 | 一条跟进上游的发布流水线。**文档一律叫「线」**；`lines.conf` 里 `line` 是线标识（`12_version`）、`display` 是该线的显示名（`12.x`）—— 二者不同义，不要把「线」当「线」的同义词混用 |
 | 数据层 | `data/` 整体（`PERSIST_DATA_ROOT`）：业务层 + 系统层 + 元数据。与「系统层」对举时指「非镜像的那一份」 |
 | 系统层 | `data/.system` 下以 overlay 承接的目录（`etc usr var root opt home srv`、`www/server`）；**增量** |
 | 业务层 | `data/www` 下 bind 直通的用户数据（与容器 `/www` 同名） |

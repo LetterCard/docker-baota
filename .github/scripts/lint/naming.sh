@@ -28,7 +28,7 @@ bad: list[str] = []
 # 词边界匹配：避免 `SYSTEM` 被 `SYS` 命中、`CONTAINERS` 被 `C` 命中。
 BANNED = [
     'SYS', 'VFILE', 'CNAME', 'KNOWNS', 'in_knowns', 'CRIT_FILE', 'SNAP',
-    'HC', 'COMPOSE_DIR', 'CHANNEL', 'channels.conf', 'AUTO_BACKUP_KEEP',
+    'HC', 'COMPOSE_DIR', 'CHANNEL', 'channel', 'channels.conf', 'AUTO_BACKUP_KEEP',
     'WWW_PERSIST', 'WWW_VOLATILE', 'data_members', 'pythonreal',
     'STAGE2', 'PERSIST_DIRS', 'show_usage',
     # 已废弃的旧名：写回来说明是在照抄旧文档
