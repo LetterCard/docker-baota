@@ -403,8 +403,15 @@ if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'www/backup/\(auto\|manual\|datab
     fail "备份包自包含：含有 www/backup 下的产物"
 fi
 # journald 日志体积大且零恢复价值，必须在排除清单里（否则备份包白胖一圈）
-if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'system/var/log/journal'"; then
-    fail "备份包含 journald 日志（应排除：system/var/log/journal）"
+# 成员名从配置真源派生（与 backup.sh 的 SYSTEM_MEMBER 同源），写死 system 会
+# 永远匹配不上 —— 真实成员是 <PERSIST_SYSTEM_ROOT 的 basename>/var/log/journal
+_sys_member=$(basename "${PERSIST_SYSTEM_ROOT}")
+_journal="${_sys_member}/var/log/journal"
+# 整条命令作为单个引号变量传给 inside_sh：变量已在构建期展开，容器内 grep 收到的
+# 是字面成员名（如 .system/var/log/journal），不受 shellcheck SC2086 干扰
+_journal_check="tar tzf ${BACKUP_PATH} | grep -qF ${_journal}"
+if inside_sh "${_journal_check}"; then
+    fail "备份包含 journald 日志（应排除：${_journal}）"
 fi
 _bk=$(basename "${BACKUP_PATH}")
 pass "备份工具可用，生成的备份包通过自校验（${_bk}）"

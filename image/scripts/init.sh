@@ -287,7 +287,7 @@ seed_panel_state() {
     # virtiofs 不豁免 —— 首次启动写 port.pl 直接 Permission denied，容器起不来；
     # CI 的宿主机侧断言（非 root）也穿不透，会误报「写入未落盘」。
     # 源目录是本方案的挂载基础设施，归我们管，归位 700；目录内容仍保持镜像原样
-    if [ -d "${_source}" ] && ! [ -x "${_source}" ]; then
+    if [ -d "${_source}" ]; then
         chmod 700 "${_source}" 2> /dev/null \
             || warn "无法修正 ${_source} 目录权限（缺少 x 位），面板可能无法写入"
     fi
