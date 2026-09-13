@@ -202,3 +202,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	    python3 -c "import sys,yaml;yaml.safe_load(open('$$f'))" \
 	        && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
+	@echo '--- workflow 内嵌脚本语法 ---'
+	@bash .github/scripts/lint/workflow.sh
+	@echo '--- 文档链接与锚点 ---'
+	@bash .github/scripts/lint/links.sh

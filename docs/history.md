@@ -1,11 +1,11 @@
-# 📜 历史变更（归档）
+# 历史变更（归档）
 
 > 从 [CHANGELOG](../CHANGELOG.md) 归档出来的旧版本记录，按时间倒序。
 > 注意：条目里的目录/文件名是**当时的布局**（项目后来重构过，例如 `shared/` → `image/`、`dockerfile/` → 根目录的 `docker-compose.yml`）。
 
 ## [2.0.0] — 2026-09-04 · 三层分离布局（业务直通 + 面板/系统 overlay）+ 结构与可维护性重构
 
-### ⚠️ 布局：一个 data，三层分清楚（全新部署请从空 data/ 开始）
+### 布局：一个 data，三层分清楚（全新部署请从空 data/ 开始）
 
 ```
 data/                        （./data:/data）
@@ -28,7 +28,7 @@ data/                        （./data:/data）
 > ⚠️ 旧布局（data/www 整棵 overlay 或早先的 data/wwwroot 直通）与本版不兼容，
 > 升级前请用旧版 `baota-backup` 打完整备份再按 docs/upgrade.md 恢复。
 
-### ✨ 新增
+### 新增
 
 - **代码级更新旁路检测**（`install.sh` 新增第 3 节，`versions.sh` 同步）。
   宝塔面板代码里存在绕过 `script/` stub、现拉 `/install/update*.sh` 直接执行的更新路径
@@ -103,7 +103,7 @@ data/                        （./data:/data）
   安装位置在 `~/Library/Python/<版本>/bin`、不在默认 PATH，此前会静默跳过。
   Makefile 找到就自动加进 PATH，找不到才跳过（安装与排查见 docs/development.md「本地构建」）
 
-### 🐛 修复
+### 修复
 
 - **`BAOTA_STATE` 用错 `PERSIST_ROOT`**：它原本在加载 `defaults.env` **之前**计算，
   用户通过 compose 改了 `PERSIST_ROOT` 时，镜像版本记录会写到错误位置，
@@ -148,7 +148,7 @@ data/                        （./data:/data）
   （`[stable|release]` 可选参数），用项目自己的安装法在一次性容器里真装，抓取
   `panel/script/` 全量清单、升级脚本内容与自更新机制引用，用于核对升级入口清单是否完整
 
-### ⚡ 优化
+### 优化
 
 - **升级前快照改用 `cp -a`**：原来 `tar czf` 每次换镜像都要付一次完整压缩的 CPU 时间，
   而面板数据里主要是 SQLite 与二进制，gzip 收益很低。`cp -a` 更快，
@@ -159,7 +159,7 @@ data/                        （./data:/data）
 - **镜像瘦身**：构建期配置 dpkg 排除 `/usr/share/{doc,man,info}`
   （保留 `copyright` 与 locale），减小镜像体积与系统层 upper 的增量
 
-### ♻️ 重构
+### 重构
 
 - **目录结构**：文档从 README 拆到 `docs/`，构建脚本按执行顺序重命名为
   `base.sh` / `panel.sh` / `services.sh`

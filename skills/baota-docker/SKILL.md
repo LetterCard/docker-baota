@@ -38,7 +38,7 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 
 核心不变式：**你从没动过的文件跟镜像走，你改过的文件跟持久化层走。**
 
-## 🔴 红线（违反会静默丢数据或让坏镜像上线）
+## 红线（违反会静默丢数据或让坏镜像上线）
 
 1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
    `AUTO_BACKUP_KEEP` 的唯一真源是 `image/conf/defaults.env`。
@@ -152,7 +152,12 @@ restart 不消失、销毁重建后即还原为镜像版本。想换面板版本
 
 ## References
 
-- `references/troubleshooting.md` — 症状 → 原因 → 处置的对照表
-- 仓库文档（技能的正文来源，技能只做索引与红线）：
-  `docs/persistence.md`（持久化与守卫原理）、`docs/development.md`（改代码须知）、
-  `docs/release.md`（通道声明表与流水线）
+本技能**只做索引与红线**，正文一律在仓库文档里（避免两处各写一份然后互相矛盾）：
+
+| 想了解 | 读 |
+|---|---|
+| 持久化模型、守卫原理、方案选型 | `docs/persistence.md` |
+| 排障（症状 → 原因 → 处置） | `docs/faq.md`、`docs/operations.md` |
+| 改代码须知、注释规范、门禁覆盖 | `docs/development.md` |
+| 通道声明表与流水线 | `docs/release.md` |
+| 备份 / 升级 / 配置 / 快速开始 | `docs/` 下同名文档 |

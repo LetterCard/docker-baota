@@ -1,12 +1,6 @@
 {
   "lines": {
-    "12_version": {
-      "sha": "37a30edb17bb7802c0210f652609daad2d4213823e1b84f89a065ddc12421ad3",
-      "version": "12.0.0"
-    },
-    "13_version": {
-      "sha": "c8ae8d6d048de8ec039fae5d639c6f2c1912bf5971c1528ea9fdf07e4029093d",
-      "version": "13.0.0"
-    }
+    "12_version": "37a30edb17bb7802c0210f652609daad2d4213823e1b84f89a065ddc12421ad3",
+    "13_version": "c8ae8d6d048de8ec039fae5d639c6f2c1912bf5971c1528ea9fdf07e4029093d"
   }
 }

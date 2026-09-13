@@ -1,6 +1,6 @@
-# 🏗️ 开发指南
+# 开发指南
 
-## 📁 仓库结构
+## 仓库结构
 
 ```
 baota-docker/
@@ -90,11 +90,8 @@ baota-docker/
 
 ```
 # 一句话：这个文件是什么（做哪一件事）
-#
 # 为什么：非显然的取舍/设计理由 —— 超过三行的推导写进 docs/，这里留一行指针
-#
 # 红线：改这个文件必须遵守的不变式（没有就省略）
-#
 # 相关：docs/xxx.md#锚点
 ```
 
@@ -186,19 +183,19 @@ baota-docker/
 > 跟踪上游的脚本名与代码内执行路径；已随不可变面板整体移除（那套清单永远跟不完，
 > 且面板自更新并不影响数据安全）。
 
-## 🧱 基础镜像（固定 Debian 12）
+## 基础镜像（固定 Debian 12）
 
 两个 Dockerfile 固定 `ARG BASE_IMAGE=debian:12`（bookworm，LTS 支持至 2028），不切换基座。
 `base.sh` 在构建期删除 `debian.sources`、写回经典 one-line `sources.list`——这是 Debian 12 的
 默认格式，也是宝塔安装脚本唯一能解析的格式。
 
-## 🛠️ 本地构建
+## 本地构建
 
 ```bash
 make build CHANNEL=12.0.0        # 等价于：
 # （make build 会自己从 channels.conf 取参数，等价于：）
 # docker build -f image/Dockerfile \
-#   --build-arg INSTALL_URL=<见 channels.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
+#  --build-arg INSTALL_URL=<见 channels.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
 
 make up CHANNEL=12.0.0           # 起容器
 make logs CHANNEL=12.0.0         # 看日志
@@ -226,7 +223,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 
 验证是否生效：`make lint` 输出应出现「shellcheck 通过」，而不是「未安装，跳过」。
 
-## 🧩 架构支持
+## 架构支持
 
 **amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（功能检查 +
 挂载与降级场景 + 升级与降级路径，含容器重建后的持久化验证）。
@@ -240,7 +237,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 因为两个架构都已发布，compose 里的 `platform: linux/amd64` 在 ARM 机型上**应该注释掉**，
 否则会跑在 QEMU 模拟下、性能损耗明显。
 
-## 🧹 镜像纯净度
+## 镜像纯净度
 
 生产镜像不含构建期垃圾（apt 缓存 / 日志 / 临时文件）。以下清理项都经过实测确认：
 
@@ -266,58 +263,22 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 > （旧层仍在，只是被 whiteout 遮住）。所以清理必须写在产生垃圾的那一层内。
 > 清理效果的实测数字待重测：此前记录的 1644.7 MB → 1622.8 MB 已随基础层依赖清单变更而失效。
 
-## 🧪 发布前检查覆盖什么
+## 发布前检查覆盖什么
 
-发布前共三套检查，覆盖不同的失效面：
+四份脚本，各覆盖一个**互不相关**的失效面；具体断言写在脚本里（脚本头有说明），
+这里只给索引 —— 细节抄一份到这里只会两处漂移：
 
-### ① `check/core.sh` —— 功能检查（A0–A15 + B0–B4）
+| 脚本 | 覆盖 |
+|---|---|
+| `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢 |
+| `check/degrade.sh` | 只读持久化根必须被识别为 `degraded-critical` 且判 unhealthy（最危险的失效模式） |
+| `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
+| `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述三套** |
 
-**A 阶段（全新数据卷，A0–A15）**
-systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
-生产 healthcheck 脚本 / 关键文件路径 / pyenv 模块 /
-面板与任务双进程 / 安全入口 / 版本号 / 首启随机凭据 / 写入落盘 / 开机自启 /
-**并发锁（同卷第二实例必须被拦下）** / 防火墙关闭 / SSH 与 bt 命令 / 备份工具 /
-A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make / libtool，不装 PHP）/
-A15 不可变面板守卫（解释器包装 + 镜像副本完整且不含 pyenv + 改写代码后能否换回镜像版本）
+入口 `check/run.sh <core|degrade|upgrade|all> <镜像> <版本>`；
+`make health` / `health-degrade` / `health-upgrade` / `health-all` 是它的包装。
 
-> A14 只做工具链的零网络存在性断言，不临时安装 PHP；真正的
-> 「装 PHP + 编译扩展」端到端测试在日巡检 `published.sh` 里跑
-> （在已发布的纯净镜像上真编译并加载最小扩展）。
-
-> A15 是「面板内更新不生效、库不可能比代码新」的守卫：把 `class/common.py` 的版本
-> 改写成假版本，再随便跑一次 pyenv python，断言代码被换回镜像版本。
-
-**B 阶段（销毁容器后用同一个卷重建）**
-数据不丢 / 不会二次初始化 / 无持久化降级记录 / 面板自动恢复运行
-
-### ② `check/degrade.sh` —— 挂载方式与降级场景
-
-功能检查全程只用「命名卷 + 单挂」一种挂载方式，这套补上它测不到的两类场景：
-
-**唯一场景（只读持久化根）**
-必须写 `degraded-critical`、健康检查必须判 unhealthy ——
-「挂载成功但写入静默丢失」是本方案最危险的失效模式，这条用例盯住它
-
-### ③ `check/upgrade.sh` —— 升级 / 降级路径
-
-版本护栏、升级前快照**只在镜像版本变化时执行**，
-①②都走不到那个分支。不可变面板下启动器随镜像层提供（不持久化）、无需运行期刷新。这套通过改写持久化层里的版本记录触发两条路径：
-
-**升级分支（记录改成更低版本）** 识别为升级 / 快照生成且内容完整 /
-版本记录回写 / 升级后面板可用
-
-**降级分支（记录改成更高版本）** 识别为降级 / 生成快照 /
-**不阻断启动**（出故障时能起来比什么都重要）
-
-### ④ 每日巡检 `check/published.sh` —— 已发布镜像
-
-只做三件**只有线上镜像才需要**的事：拉取镜像、留一段脱敏后的首启日志、
-在真镜像上跑一次 PHP 扩展「安装 + 编译 + 加载」（要联网装 php-dev，且不能
-污染推送前的候选镜像）。其余场景**复用上面三套门禁脚本** ——
-同一件事只留一份断言，避免两处漂移（历史上 published 里的面板状态路径、
-overlay 期望数都曾与真实布局不一致，产出假红）。
-
-## ➕ 改代码时的注意事项
+## 改代码时的注意事项
 
 - `image/scripts/init.sh` 由 **busybox sh** 执行，只能用 POSIX 语法。
   函数内的「局部变量」统一用下划线前缀（`_dir` / `_upper` / `_work`）标示 ——

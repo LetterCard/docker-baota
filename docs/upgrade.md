@@ -1,4 +1,4 @@
-# ⬆️ 升级与迁移
+# 升级与迁移
 
 ## 镜像升级
 
@@ -6,13 +6,13 @@
 版本」变得不确定）；**最新正式线（`13_version`）的 `latest` 永远指向最近一次发布**。
 换线/加线见[发布流程](release.md)。
 
-### 📋 升级步骤
+### 升级步骤
 
 ```bash
 # 1) 先备份（数据不会动，但备份是底线）
 docker exec baota baota-backup
 
-# 2) 改 docker-compose.yml 里的 image 标签，例如 12.0.0 → 12.1.0
+# 2) 改 docker-compose.yml 里的 image 标签，例如 12.0.0  12.1.0
 
 # 3) 拉新镜像、重建容器
 docker compose pull
@@ -54,7 +54,7 @@ docker compose up -d
 > （`data/www/...`），换镜像动不到；另有更好的备份手段
 > （面板内备份、`baota-backup`）。
 
-### ✅ 升级后验证
+### 升级后验证
 
 ```bash
 docker compose exec baota bt status     # 面板 + 任务进程都应在运行
@@ -72,14 +72,14 @@ docker compose ps                       # 容器状态应为 healthy
 
 再登录面板，确认版本号、站点、数据库都正常。
 
-### ⏪ 回滚
+### 回滚
 
 把 `docker-compose.yml` 里的标签改回旧版本，再 `docker compose up -d`。
 
 注意：**回滚只保证镜像层回退，不保证持久化层回退。** 你手工改过、或面板写进 `data/` 的文件
 不会跟着回退。要干净回滚，就用升级前打的那个备份包，按[恢复](backup.md#恢复)流程走一遍。
 
-### ✅ 面板版本由镜像决定（不可变面板）
+### 面板版本由镜像决定（不可变面板）
 
 面板代码不进持久化层、直接来自镜像层。在面板里点「更新」的写入落在容器可写层，
 但**不会生效**：面板代码的每一次执行都先过执行入口守卫
@@ -102,7 +102,7 @@ docker compose up -d
 
 ---
 
-## 📤 迁移到新机器
+## 迁移到新机器
 
 ### 老机器
 
@@ -127,13 +127,13 @@ docker compose up -d
 docker compose logs -f baota
 ```
 
-### ✅ 迁移后自动适配的部分
+### 迁移后自动适配的部分
 
 - **面板地址、用户名、口令、安全入口全部不变**——它们都随 `data/` 持久化数据一起保留
 - `data/system/etc/` 下的 `hosts`、`resolv.conf`、`hostname` 会被新宿主机的 Docker 注入值覆盖
 - SSH 主机密钥跟着走，客户端不会报密钥变更
 
-### ⚠️ 迁移后需要你确认的部分
+### 迁移后需要你确认的部分
 
 1. **面板端口**：新机器的端口映射要和 `data/panel/data/port.pl` 里的值对得上
 2. **架构**：amd64 与 arm64 的镜像不通用。`apt` 装在 `/usr`（即 `data/system/usr`）里的

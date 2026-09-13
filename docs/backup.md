@@ -1,4 +1,4 @@
-# 💾 备份与恢复
+# 备份与恢复
 
 所有状态都在持久化层里：一个 `data/` 目录（compose 默认 `./data:/data`）——
 业务数据（站点/备份/MySQL）在 `data/www/`（bind，宿主可直改），面板状态在
@@ -8,7 +8,7 @@
 
 ---
 
-## 🤔 三种方式怎么选
+## 三种方式怎么选
 
 | 方式 | 是否停机 | 覆盖范围 | 保留 overlay 元数据 | 适合场景 |
 |---|---|---|---|---|
@@ -35,7 +35,7 @@
 
 ---
 
-## 📦 方式一：baota-backup（推荐）
+## 方式一：baota-backup（推荐）
 
 镜像内置，软链到 `/usr/local/bin/baota-backup`，在宿主机上直接 exec：
 
@@ -74,18 +74,18 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 
 ---
 
-## 📦 方式二：宿主机手工打包
+## 方式二：宿主机手工打包
 
 ```bash
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
 # 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www、panel、system 三个顶层
-#    ★ 必须用显式成员 www panel system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
-#      下面的 --exclude='www/backup/manual' 就匹配不上了（排除静默失效）。把输出包放在
-#      data/ 里时 tar 还会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
-#      与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
-#    ★ panel 不能漏：面板配置与 SQLite 库都在里面，漏了等于恢复后回到出厂设置
+#    必须用显式成员 www panel system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
+#     下面的 --exclude='www/backup/manual' 就匹配不上了（排除静默失效）。把输出包放在
+#     data/ 里时 tar 还会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
+#     与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
+#    panel 不能漏：面板配置与 SQLite 库都在里面，漏了等于恢复后回到出厂设置
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
     -C data --exclude='.baota' --exclude='www/backup/auto' \
@@ -113,7 +113,7 @@ docker compose up -d
 
 ---
 
-## 📦 方式三：--rsync 增量同步（定期备份首选）
+## 方式三：--rsync 增量同步（定期备份首选）
 
 `data/` 大了以后，每次全量打包都要重读并重压整份数据。`--rsync` 只传变化的部分，
 后续备份从「几十分钟」降到「几分钟」。
@@ -166,7 +166,7 @@ docker compose up -d && docker compose logs -f baota
 
 ---
 
-## 🔎 验证备份（别跳过）
+## 验证备份（别跳过）
 
 ```bash
 # 通配符必须交给容器内的 sh 展开 —— 直接写路径的话宿主 shell 展开不了（宿主没有
@@ -205,7 +205,7 @@ docker exec -i baota mysql < /path/to/databases.sql
 
 ---
 
-## 🖱️ 图形界面备份（飞牛 NAS，无需命令行）
+## 图形界面备份（飞牛 NAS，无需命令行）
 
 你不用敲任何命令。宝塔的所有数据都装在一个叫 `data` 的文件夹里
 （就是创建 Docker 项目时那个目录下的 `data`，用飞牛「文件管理」就能看到）。

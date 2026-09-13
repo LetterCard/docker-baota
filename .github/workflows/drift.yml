@@ -1,32 +1,28 @@
-name: 🔭 变更与漂移检测
+name: 🔭 官方源：变更与漂移检测
 
 # ==============================================================================
-#  本工作流只做「看」，绝不发布任何镜像。
+#  只监测、不发布。目的：上游更新后第一时间发现会破坏持久化的变更 ——
+#  「安装产生的文件落到了已知持久化位置之外」= 那部分数据不会被持久化。
 #
-#  目的：宝塔上游更新后第一时间发现会破坏持久化的变更 ——
-#    目录漂移：安装产生的文件落到已知持久化位置之外 → 那部分数据不会被持久化，
-#             属于静默丢数据
+#  刻意不检测「面板升级入口 / 代码路径」：那要逐项跟踪上游脚本名与执行路径，
+#  永远跟不完，且不影响数据安全（面板内更新不生效现在由 image/scripts/guard.sh
+#  在执行入口兜住）。
 #
-#  刻意不检测「面板升级入口 / 代码级更新路径」：那要求逐项跟踪上游脚本名与
-#  代码内的执行路径，与上游内部实现强耦合、永远跟不完，且不影响数据安全
-#  （「面板内更新不生效」现在由 image/scripts/guard.sh 在执行入口兜住）。
+#  两级节奏（同一个 job 内串联，省掉产物搬运）：
+#    ① 每天：逐线取安装脚本 sha256，与本仓库基线比对（几十秒）
+#    ② 仅当有变更 / 手动强制：真装一遍做目录比对（几分钟），然后更新基线
+#  基线只在②成功后更新 —— 否则一次失败就会把「上游变了」这个信号吞掉。
 #
-#  两级节奏（控制成本）：
-#    · probe  每天跑：只取版本号与安装脚本 sha256，与基线比对，几十秒完成
-#    · drift  仅在上游有变更（或手动强制）时跑：真的装一遍并做文件系统比对
-#
-#  ★ 哪些线要检测：读 image/channels.conf（与构建、巡检同一张表）。
-#    新增一条线（14/15/…）不需要改本文件。
+#  检测范围 = image/channels.conf 里的各条线：新增一条线不用改本文件。
 # ==============================================================================
 
 on:
   schedule:
-    # 每天 UTC 01:00（北京时间 9 点）
-    - cron: '0 1 * * *'
+    - cron: '0 1 * * *'        # 每天 UTC 01:00（北京时间 09:00）
   workflow_dispatch:
     inputs:
       force_drift:
-        description: '强制跑重量级安装对比（默认仅在上游有变更时执行）'
+        description: '强制跑重量级安装对比（默认仅在上游脚本变更时执行）'
         type: boolean
         default: false
 
@@ -42,210 +38,119 @@ env:
   BASELINE: .github/scripts/drift/baseline.json
   REPORT: .github/reports/drift.md
   CHANNELS: image/channels.conf
-  # 与构建所用的基础镜像保持一致（image/channels.conf 的 base 字段）。
-  # 若改用 debian:13 构建，这里要同步 —— 漂移检测要以同一个基座为基准
+  # 与构建所用基础镜像一致（image/channels.conf 的 base 字段）
   BASE_IMAGE: debian:12
-  VERSION_API: https://www.bt.cn/api/panel/get_version
   LABEL: BUG
 
 jobs:
-  # ---------------------------------------------------------------------------
-  #  1) 每天跑：轻量探测（逐线取 sha256 + 版本，与基线比对）
-  # ---------------------------------------------------------------------------
-  probe:
-    name: 🔍 探测上游版本与安装脚本
+  drift:
+    name: 🔭 探测上游变更并（必要时）做目录对比
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      changed: ${{ steps.cmp.outputs.changed }}
-      reason: ${{ steps.cmp.outputs.reason }}
-      lines: ${{ steps.fetch.outputs.lines }}
-      summary: ${{ steps.fetch.outputs.summary }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      issues: write
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: 📡 逐线拉取安装脚本与版本
-        id: fetch
+      # rebase 必须在「生成 / 修改任何仓库文件」之前执行（否则 dirty tree 会中止 rebase）
+      - name: 🔄 同步 main（rebase）
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+
+      - name: 🔍 逐线探测安装脚本（sha256 与基线比对）
+        id: probe
         run: |
           set -euo pipefail
           lines='[]'
+          changed=false
+          reason=''
           summary=''
 
-          while read -r line channel vfile url probe tag base; do
+          while read -r line channel vfile url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
+            recorded=$(tr -d '[:space:]' < "${vfile}" || true)
+
             tmp=$(mktemp)
             curl -fsSL --connect-timeout 10 --max-time 60 "${url}" -o "${tmp}" \
               || { echo "::error::拉取 ${line} 的安装脚本失败：${url}"; exit 1; }
             sha=$(sha256sum "${tmp}" | awk '{print $1}')
-            case "${probe}" in
-              banner)
-                ver=$(grep -m1 '您正在安装宝塔面板' "${tmp}" \
-                      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-                ;;
-              api)
-                ver=$(curl -fsSL --connect-timeout 10 --max-time 30 "${VERSION_API}" \
-                      | tr -d '[:space:]' || true)
-                ;;
-              *)
-                echo "::error::${line} 的 probe 字段非法：${probe}（应为 banner 或 api）"
-                exit 1
-                ;;
-            esac
             rm -f "${tmp}"
 
-            lines=$(jq -c --arg line "${line}" --arg channel "${channel}" --arg url "${url}" \
-              --arg sha "${sha}" --arg ver "${ver:-unknown}" \
-              '. + [{line:$line, channel:$channel, url:$url, sha:$sha, version:$ver}]' <<< "${lines}")
-            summary="${summary}| ${channel} | \`${line}\` | ${ver:-unknown} | \`${sha:0:12}\` |"$'\n'
-            echo "${line}（${channel}）：版本 ${ver:-unknown}，sha ${sha:0:12}…"
+            base_sha=''
+            [ -f "${BASELINE}" ] && base_sha=$(jq -r --arg k "${line}" '.lines[$k] // ""' "${BASELINE}")
+            if [ "${sha}" != "${base_sha}" ]; then
+              changed=true
+              reason="${reason}${channel} 安装脚本已变更；"
+              state='已变更'
+            else
+              state='与基线一致'
+            fi
+
+            lines=$(jq -c --arg line "${line}" --arg channel "${channel}" \
+              --arg url "${url}" --arg sha "${sha}" --arg ver "${recorded}" \
+              '. + [{line:$line, channel:$channel, url:$url, sha:$sha, version:$ver, state:$state}]' \
+              <<< "${lines}")
+            summary="${summary}| ${channel} | \`${line}\` | ${recorded} | ${state} | \`${sha:0:12}\` |"$'\n'
+            echo "${line}（${channel}）：${state}（sha ${sha:0:12}…）"
           done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
 
+          if [ "${changed}" = 'false' ]; then
+            reason='与基线一致，本次不跑安装对比'
+          fi
           {
+            echo "changed=${changed}"
+            echo "reason=${reason}"
             echo "lines=$(jq -c . <<< "${lines}")"
             echo "summary<<EOF"
             printf '%s' "${summary}"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
+          echo "变更判定：${reason}"
 
-      - name: 🆚 与基线比对
-        id: cmp
+      - name: 🧪 安装对比（有变更 / 手动强制时）
+        if: >-
+          steps.probe.outputs.changed == 'true' ||
+          inputs.force_drift ||
+          github.event_name == 'workflow_dispatch'
+        id: analyze
         env:
-          LINES: ${{ steps.fetch.outputs.lines }}
-        run: |
-          set -euo pipefail
-          changed=false
-          reason=''
-
-          if [ ! -f "$BASELINE" ]; then
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-            echo 'reason=首次运行，尚无基线' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          while IFS= read -r item; do
-            line=$(jq -r '.line' <<< "${item}")
-            channel=$(jq -r '.channel' <<< "${item}")
-            sha=$(jq -r '.sha' <<< "${item}")
-            ver=$(jq -r '.version' <<< "${item}")
-            b_sha=$(jq -r --arg k "${line}" '.lines[$k].sha // ""' "$BASELINE")
-            b_ver=$(jq -r --arg k "${line}" '.lines[$k].version // ""' "$BASELINE")
-
-            if [ "${sha}" != "${b_sha}" ]; then
-              changed=true
-              reason="${reason}${channel} 安装脚本已变更；"
-            fi
-            if [ "${ver}" != 'unknown' ] && [ -n "${ver}" ] && [ "${ver}" != "${b_ver}" ]; then
-              changed=true
-              reason="${reason}${channel} 版本 ${b_ver:-未知} → ${ver}；"
-            fi
-          done < <(jq -c '.[]' <<< "${LINES}")
-
-          if [ "${changed}" = 'true' ]; then
-            echo "检测到上游变更：${reason}"
-          else
-            reason='与基线一致，本次不跑安装对比'
-            echo "${reason}"
-          fi
-          {
-            echo "changed=${changed}"
-            echo "reason=${reason}"
-          } >> "$GITHUB_OUTPUT"
-
-  # ---------------------------------------------------------------------------
-  #  2) 有变更时跑：逐线真装一遍并比对
-  # ---------------------------------------------------------------------------
-  drift:
-    name: 🧪 安装对比（目录漂移）
-    needs: probe
-    if: >-
-      needs.probe.outputs.changed == 'true' ||
-      inputs.force_drift ||
-      github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    outputs:
-      critical: ${{ steps.merge.outputs.critical }}
-    steps:
-      - name: 📥 检出代码
-        uses: actions/checkout@v7.0.1
-
-      - name: 🧪 逐线安装并检测
-        env:
-          LINES: ${{ needs.probe.outputs.lines }}
+          LINES: ${{ steps.probe.outputs.lines }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/uw
-          : > /tmp/uw/critical
+          critical=0
 
           while IFS= read -r item; do
             line=$(jq -r '.line' <<< "${item}")
             channel=$(jq -r '.channel' <<< "${item}")
             url=$(jq -r '.url' <<< "${item}")
-            echo "▶️ 开始检测 ${line}（${channel}）：${url}"
-            INSTALL_URL="${url}" \
-            BASE_IMAGE="${BASE_IMAGE}" \
-            OUT_MD="/tmp/uw/${line}.md" \
-            CRIT_FILE="/tmp/uw/${line}.crit" \
+            echo "▶️ 检测 ${line}（${channel}）：${url}"
+            INSTALL_URL="${url}" BASE_IMAGE="${BASE_IMAGE}" \
+            OUT_MD="/tmp/uw/${line}.md" CRIT_FILE="/tmp/uw/${line}.crit" \
               bash .github/scripts/drift/install.sh \
-              || { echo "::error::${line} 检测失败"; exit 1; }
-            echo "${line} $(cat "/tmp/uw/${line}.crit")" >> /tmp/uw/critical
+              || { echo "::error::${line} 安装对比失败"; exit 1; }
+            [ "$(cat "/tmp/uw/${line}.crit" 2> /dev/null || echo 0)" = '1' ] && critical=1
           done < <(jq -c '.[]' <<< "${LINES}")
 
-      - name: 📤 上传中间产物
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: drift-detail
-          path: /tmp/uw/
-          retention-days: 30
+          echo "critical=${critical}" >> "$GITHUB_OUTPUT"
+          [ "${critical}" -eq 0 ] || echo '::error::检测到关键漂移（详见报告）'
 
-      - name: 🔀 汇总关键标记
-        id: merge
-        run: |
-          set -euo pipefail
-          if grep -q ' 1$' /tmp/uw/critical; then
-            echo 'critical=1' >> "$GITHUB_OUTPUT"
-            echo '::error::检测到关键漂移，详见报告'
-          else
-            echo 'critical=0' >> "$GITHUB_OUTPUT"
-          fi
-
-  # ---------------------------------------------------------------------------
-  #  3) 写报告、更新基线、必要时开 issue 提醒
-  # ---------------------------------------------------------------------------
-  report:
-    name: 📝 报告与提醒
-    needs: [probe, drift]
-    if: always() && needs.probe.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: 📥 检出代码
-        uses: actions/checkout@v7.0.1
-
-      - name: 📥 下载中间产物
-        if: needs.drift.result == 'success'
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: drift-detail
-          path: /tmp/uw
-
-      # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
-      # 否则 baseline.json / README 已处于 modified，git rebase 会因 dirty tree 中止
-      - name: 🔄 对齐远端
-        run: |
-          set -euo pipefail
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin "${GITHUB_REF_NAME}"
-          git rebase "origin/${GITHUB_REF_NAME}"
-
-      - name: 📝 生成报告并更新基线
+      - name: 📝 生成报告（必要时更新基线）
         env:
-          LINES: ${{ needs.probe.outputs.lines }}
-          SUMMARY: ${{ needs.probe.outputs.summary }}
+          LINES: ${{ steps.probe.outputs.lines }}
+          SUMMARY: ${{ steps.probe.outputs.summary }}
         run: |
           set -euo pipefail
+          analyzed='${{ steps.analyze.outcome }}'
           {
             echo '# 🔭 漂移检测报告'
             echo
@@ -253,14 +158,13 @@ jobs:
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
-            echo "- 检测范围：\`${CHANNELS}\` 里的各条线"
-            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo "- 变更判定：${{ steps.probe.outputs.reason }}"
             echo
-            echo '| 通道 | 线 | 上游版本 | 安装脚本 sha256 |'
-            echo '|---|---|---|---|'
+            echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '|---|---|---|---|---|'
             printf '%s' "${SUMMARY}"
             echo
-            if [ "${{ needs.drift.result }}" = 'success' ]; then
+            if [ "${analyzed}" = 'success' ]; then
               while IFS= read -r item; do
                 line=$(jq -r '.line' <<< "${item}")
                 channel=$(jq -r '.channel' <<< "${item}")
@@ -278,40 +182,35 @@ jobs:
             else
               echo '---'
               echo
-              echo '本次未执行安装对比（与基线一致，或被跳过）。'
+              echo '本次未执行安装对比（安装脚本与基线一致，或被跳过）。'
               echo
             fi
-          } > "$REPORT"
+          } > "${REPORT}"
 
-          # 基线仅在成功跑完分析后更新，避免把失败运行的中间值写进去
-          if [ "${{ needs.drift.result }}" = 'success' ]; then
+          # 基线只在对比真的跑完后更新：否则一次失败就会把「上游变了」的信号吞掉
+          if [ "${analyzed}" = 'success' ]; then
             jq -n --argjson lines "${LINES}" \
-              '{lines: ($lines | map({key: .line, value: {sha: .sha, version: .version}}) | from_entries)}' \
-              > "$BASELINE"
-            echo '基线已更新。'
+              '{lines: ($lines | map({key: .line, value: .sha}) | from_entries)}' > "${BASELINE}"
+            echo '基线已更新（只记安装脚本 sha256）'
           fi
 
-      - name: ✏️ 注入 README（漂移检测报告章节）
+      - name: ✏️ 注入 README 并回写仓库
         run: |
           set -euo pipefail
-          python3 .github/scripts/report.py "${{ env.REPORT }}" DAILY-DRIFT-REPORT
-
-      - name: 💾 回写报告、基线与 README
-        run: |
-          set -euo pipefail
-          git add "$REPORT" "$BASELINE" README.md
+          python3 .github/scripts/report.py "${REPORT}" DAILY-DRIFT-REPORT
+          git add "${REPORT}" "${BASELINE}" README.md
           if git diff --cached --quiet; then
             echo '报告与基线无变化，跳过提交。'
           else
             git commit -m 'chore(drift): 更新漂移检测报告与基线'
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git push origin HEAD:main
           fi
 
-      - name: 🚨 关键漂移：开 issue 提醒并让本作业失败
-        if: needs.drift.outputs.critical == '1'
+      - name: 🚨 关键漂移：开 issue 并让本次运行失败
+        if: steps.analyze.outputs.critical == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SUMMARY: ${{ needs.probe.outputs.summary }}
+          SUMMARY: ${{ steps.probe.outputs.summary }}
         run: |
           set -euo pipefail
           TITLE='[上游变更] 检测到关键漂移，需人工介入'
@@ -320,10 +219,10 @@ jobs:
           {
             echo "## 检测时间（UTC）：$(date -u '+%F %T')"
             echo
-            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo "- 变更判定：${{ steps.probe.outputs.reason }}"
             echo
-            echo '| 通道 | 线 | 上游版本 | 安装脚本 sha256 |'
-            echo '|---|---|---|---|'
+            echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '|---|---|---|---|---|'
             printf '%s' "${SUMMARY}"
             echo
             echo '完整报告见 `.github/reports/drift.md`（也已内嵌进 README「漂移检测报告」章节）。'

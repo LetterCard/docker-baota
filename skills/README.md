@@ -1,4 +1,4 @@
-# 🤖 AI 编程助手技能包（通用一份）
+# AI 编程助手技能包（通用一份）
 
 `baota-docker/` 是**给 AI 编程助手看的**本仓库说明：红线、文件地图、命令速查、
 排障入口。它不绑定任何工具 —— **Codex / CodeBuddy / Trae / 其它都放同一份**，
@@ -7,9 +7,7 @@
 ```
 skills/
 └── baota-docker/
-    ├── SKILL.md                     入口：红线、文件地图、命令速查、排障入口
-    └── references/
-        └── troubleshooting.md       症状 → 原因 → 处置
+    └── SKILL.md                     唯一入口：红线、文件地图、命令速查、排障入口
 ```
 
 ## 怎么装

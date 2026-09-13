@@ -1,6 +1,6 @@
-# 🚀 快速开始
+# 快速开始
 
-## 🐂 飞牛 NAS（fnOS）
+## 飞牛 NAS（fnOS）
 
 1. 打开「Docker」→「项目」→「新建项目」
 2. 项目名填 `baota`，把 `docker-compose.yml` 整段粘贴进去
@@ -12,7 +12,7 @@
 `data/www/` 是站点、数据库与备份，`data/panel/` 是面板自己的配置与插件（你日常要管理的都在这两处）；
 `data/system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，一般不用翻）。
 
-## 🐧 其它 Linux 服务器
+## 其它 Linux 服务器
 
 ```bash
 cd baota-docker          # 仓库根目录（docker-compose.yml 就在这里）
@@ -21,7 +21,7 @@ docker compose up -d
 docker compose logs -f baota
 ```
 
-## ✅ 启动后自检
+## 启动后自检
 
 ```bash
 docker compose ps             # STATUS 应为 Up (healthy)
@@ -37,7 +37,7 @@ docker exec baota bt status   # 面板 + 任务进程都应在运行
 
 ---
 
-## 🔌 端口说明（飞牛必看）
+## 端口说明（飞牛必看）
 
 fnOS 会占用宿主机的 80 / 443 / 22，所以 compose 里分别避让到 8880 / 8443 / 2222。
 

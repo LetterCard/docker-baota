@@ -144,6 +144,13 @@ jobs:
               *) echo "::error::通道 ${line} 的 tag 字段非法：${tag}（应为 exact 或 latest）"; exit 1 ;;
             esac
 
+            # 回写：只有「本次要发布的版本 ≠ 仓库记录」时才需要
+            if [ "${target}" = "${cur}" ]; then
+              writeback='无需（就是当前记录）'
+            else
+              writeback="将回写 ${cur} → ${target}"
+            fi
+
             if [ "${changed}" = 'true' ]; then
               any=1
               for arch in amd64 arm64; do
@@ -163,7 +170,7 @@ jobs:
                 '. + [{line:$line, channel:$channel, version:$version, tag:$tag}]' <<< "${pub}")
             fi
 
-            plan_rows="${plan_rows}| ${line} | ${channel} | ${cur} | ${target} | ${changed} |"$'\n'
+            plan_rows="${plan_rows}| ${line} | ${channel} | ${cur} | ${target} | ${changed} | ${writeback} |"$'\n'
             {
               echo "v_${line}=${target}"
               echo "changed_${line}=${changed}"
@@ -182,8 +189,8 @@ jobs:
           {
             echo '### 🔍 通道计划'
             echo
-            echo '| 角色 | 通道 | 已发布 | 本次目标 | 需构建 |'
-            echo '|---|---|---|---|---|'
+            echo '| 线 | 通道 | 仓库记录 | 本次目标 | 需构建 | 回写 |'
+            echo '|---|---|---|---|---|---|'
             printf '%s' "${plan_rows}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -407,6 +414,7 @@ jobs:
           fetch-depth: 0
 
       - name: ✏️ 回写已发布的版本号
+        id: wb
         run: |
           set -euo pipefail
           VER="${{ matrix.version }}"
@@ -424,7 +432,9 @@ jobs:
 
             CURRENT=$(tr -d '[:space:]' < "${VFILE}" || true)
             if [ "${CURRENT}" = "${VER}" ]; then
-              echo "${VFILE} 已是 ${VER}（并发回写已生效），跳过"
+              # 正常情况：本次发布的版本与仓库记录一致（重建同一版本 / 并发回写已生效）
+              echo "✅ ${VFILE} 已是 ${VER}，本次无需回写"
+              echo 'result=skip' >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
@@ -432,7 +442,13 @@ jobs:
             git add "${VFILE}"
             git commit -m "chore(release): baota ${VER}（回写 ${VFILE}）"
             if git push origin HEAD:main; then
-              echo "已回写 ${VFILE} = ${VER}"
+              # 推送成功 ≠ 远端真是这个值：回读校验一次，避免「静默没生效」
+              git fetch origin main
+              REMOTE_VER=$(git show "origin/main:${VFILE}" 2> /dev/null | tr -d '[:space:]' || true)
+              [ "${REMOTE_VER}" = "${VER}" ] \
+                || { echo "::error::回写后远端 ${VFILE} = ${REMOTE_VER:-空}，期望 ${VER}"; exit 1; }
+              echo "✅ 已回写 ${VFILE} = ${VER}（远端校验通过）"
+              echo 'result=written' >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "::warning::push 失败（第 ${attempt} 次），rebase 后重试"
@@ -444,7 +460,11 @@ jobs:
       - name: 📋 输出摘要
         run: |
           {
-            echo "### ✏️ ${{ matrix.channel }} 已回写为 \`${{ matrix.version }}\`"
+            if [ '${{ steps.wb.outputs.result }}' = 'written' ]; then
+              echo "### ✏️ ${{ matrix.channel }}：已回写版本记录为 \`${{ matrix.version }}\`"
+            else
+              echo "### ✏️ ${{ matrix.channel }}：版本记录已是 \`${{ matrix.version }}\`，无需回写"
+            fi
             echo
             echo "- 镜像标签：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`$([ '${{ matrix.tag }}' = 'latest' ] && echo ' 与 `:latest`')"
             echo "- 架构：linux/amd64、linux/arm64"
