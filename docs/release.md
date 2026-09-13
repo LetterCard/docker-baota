@@ -114,8 +114,8 @@ collect（汇总）→ 生成 .github/reports/report.md → 注入 README → �
 ### 产出
 
 - **`.github/reports/report.md`**：每次运行整体覆盖（不追加，体积恒定）
-- README 的「🩺 镜像验证报告」章节：由 `.github/scripts/report.py` 注入，折叠在
-  `<details>` 里，点开即看
+- README 的「镜像验证报告」章节：由 `.github/scripts/report.py` 注入（整篇标题降 2 级，
+  让它严格嵌在 README 的 H2 章节之下），折叠在 `<details>` 里，点开即看
 - ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前**已脱敏**
 - ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START/END -->` 与
   `<!-- DAILY-DRIFT-REPORT:START/END -->` 之间由 CI 维护，**不要手改**，下次运行会被覆盖

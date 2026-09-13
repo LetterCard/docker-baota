@@ -206,7 +206,24 @@ jobs:
             echo '报告与基线无变化，跳过提交。'
           else
             git commit -m 'chore(drift): 更新漂移检测报告与基线'
-            git push origin HEAD:main
+            # 巡检工作流也会改 README（本步还会改报告与基线），两边同时回写时
+            # 推送会被拒（非快进）：重取远端再试；README 两边都改过时 rebase 会冲突，
+            # 此时以本地刚生成的报告为准（-X ours）
+            pushed=false
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then
+                pushed=true
+                break
+              fi
+              echo "::warning::push 失败（第 ${attempt} 次），同步远端后重试"
+              git fetch origin main
+              if ! git rebase origin/main; then
+                git rebase --abort
+                git merge -X ours --no-edit origin/main
+              fi
+              sleep 5
+            done
+            [ "${pushed}" = 'true' ] || { echo '::error::报告回写失败（连续 3 次 push 被拒）'; exit 1; }
           fi
 
       - name: 🚨 关键漂移：开 issue 并让本次运行失败

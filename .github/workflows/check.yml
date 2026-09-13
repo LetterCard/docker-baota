@@ -129,7 +129,24 @@ jobs:
             exit 0
           fi
           git commit -m "docs: 更新每日镜像验证报告 $(date -u '+%F')"
-          git push origin HEAD:main
+
+          # 漂移检测工作流也会改 README，两边同时回写时推送会被拒（非快进）：
+          # 重取远端再试，而不是让整轮巡检白跑（报告已经生成好了）；README 两边都
+          # 改过时 rebase 会冲突，此时以本地刚生成的报告为准（-X ours）
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "::warning::push 失败（第 ${attempt} 次），同步远端后重试"
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort
+              git merge -X ours --no-edit origin/main
+            fi
+            sleep 5
+          done
+          echo '::error::报告回写失败（连续 3 次 push 被拒）'
+          exit 1
 
       - name: 🚦 判定
         run: |
