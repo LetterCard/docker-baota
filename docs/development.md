@@ -10,7 +10,6 @@ baota-docker/
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
 │
 ├── docs/                      使用文档（本目录）
-│   ├── README.md              文档索引
 │   ├── quickstart.md          快速开始、端口、首次登录凭据
 │   ├── persistence.md         持久化原理、候选方案、硬约束
 │   ├── configuration.md       compose 逐项配置详解
@@ -26,7 +25,10 @@ baota-docker/
 │   ├── README.md              用途说明（只维护一份，按工具放入各自目录即可）
 │   └── baota-docker/          通用 skill（Codex / CodeBuddy / Trae 共用同一份）
 │
-├── shared/                    两个通道共用
+├── image/                     镜像本体：Dockerfile、通道声明表、构建期与运行期脚本
+│   ├── Dockerfile             唯一的一份 Dockerfile（通道差异由 build-arg 传入）
+│   ├── channels.conf          ★ 通道声明表（12/13 的脚本地址成对排列）
+│   ├── versions/12|13/        各线「已发布」版本（发布流水线回写）
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
@@ -35,18 +37,15 @@ baota-docker/
 │   │   ├── btpanel.service    systemd unit
 │   │   └── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
-│       ├── init.sh     阶段 0：并发锁 + overlay 持久化
+│       ├── init.sh            阶段 0：并发锁 + overlay 持久化
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
 │       ├── guard.sh           执行入口守卫（版本不一致就换回 /baota/origin 副本）
 │       ├── shim               pyenv 解释器包装（每次执行都先过守卫）
 │       └── backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 │
-├── image/Dockerfile                      唯一的一份 Dockerfile（通道差异由 build-arg 传入）
-├── image/channels.conf                   ★ 通道声明表（12/13 的脚本地址成对排列）
-├── docker-compose.yml              编排文件（只挂一个 data 目录）
-├── image/versions/12/VERSION                  各线「已发布」版本（发布流水线回写）
-├── image/versions/13/VERSION
+├── docker-compose.yml         编排文件（只挂一个 data 目录）
+│
 └── .github/
     ├── reports/                 CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
     ├── scripts/
@@ -116,7 +115,7 @@ baota-docker/
 |---|---|
 | 线 / 通道 | 一条跟进上游的发布流水线；标识形如 `12_version`，显示名 `12.x`（见 `image/channels.conf`） |
 | 系统层 | `/data/system` 下以 overlay 承接的目录（`etc usr var root opt home srv`、`www/server`） |
-| 业务层 | `/data/www` 下 bind 直通的用户数据（站点 / 备份 / MySQL / 回收站） |
+| 业务层 | `/data/www` 下 bind 直通的用户数据（站点 / 备份 / MySQL） |
 | 面板状态 | `/data/panel` 下 bind 直通的面板自身状态（`data plugin vhost ssl config`） |
 | 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
 | 守卫 / 垫片 | `guard.sh`（执行入口守卫）与 `shim`（pyenv 解释器包装） |
@@ -270,7 +269,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 | 脚本 | 覆盖 |
 |---|---|
-| `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢 |
+| `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
 | `check/degrade.sh` | 只读持久化根必须被识别为 `degraded-critical` 且判 unhealthy（最危险的失效模式） |
 | `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
 | `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述三套** |
@@ -293,3 +292,8 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 - **shellcheck 的 warning 会让 CI 失败**（`make lint` 用 `-S warning`），而本地没装
   shellcheck 时这一步被跳过，所以务必装上再验。典型例子：未使用的循环计数器
   （`for i in $(seq 1 60)` 但循环体没读到 `i`）会报 SC2034 —— 用不到就写成 `_`
+- **动 `image/conf/defaults.env` 的目录清单要连着发布一起做**：门禁（core / degrade /
+  upgrade）读的是**仓库里**的清单，跑的是**镜像**；往 `WWW_DATA_SUBDIRS` 加一个目录
+  之后，线上那份旧镜像还没有这个挂载，日巡检会红到下一次发布为止（这是预期现象，
+  不是回归）。另外，漂移检测的 `KNOWNS` / `WWW_PERSIST` **从这份清单派生**，
+  不需要跟着改第二处

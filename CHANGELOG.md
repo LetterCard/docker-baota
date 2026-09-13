@@ -34,7 +34,7 @@
 面板代码本身也做了隔离：`/www/server` 整层走 overlay 时，`init.sh` 在挂载前先把面板目录
 bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落持久化层。
 
-### 持久化补齐：面板状态、面板里装的东西、回收站
+### 持久化补齐：面板状态、面板里装的东西
 
 - 面板状态新增 `vhost`（站点配置 / **SSL 证书** / 伪静态 / 反代 / 重定向）、
   `ssl`（面板自身证书）、`config`（面板设置）：`PANEL_STATE_SUBDIRS` 默认变成
@@ -42,8 +42,15 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
 - **`/www/server` 整层 overlay**（upper 在 `data/system/www/server`）：面板里装的组件
   （PHP / nginx / MySQL / redis…）、插件运行数据（`total` / `btwaf`…）、计划任务脚本
   （`/www/server/cron`）在销毁重建、换镜像后都还在，**不用重装**；不按组件列清单
-- `/www/Recycle_bin`（面板回收站）纳入业务持久化；`panel-static`、`enterprise_backup`
-  在配置注释里明确为「按设计不持久化」
+- 回收站**不持久化**（上游 13 的落点是 `/www/.Recycle_bin`）：它是删站 / 删文件后的
+  暂存区，与容器同生共死、重建即空；面板的回收站列表靠扫目录得出、不是数据库记录，
+  所以不会留下「有记录没文件」的错位。站点日志 `/www/wwwlogs`、`panel-static`、
+  `enterprise_backup` 同样按设计不持久化（想保住回收站，把它加进 `WWW_DATA_SUBDIRS` 即可）
+- `/www` 下的用户数据补齐 **`vmail`**（邮局：邮件与账号库）与 **`dk_project`**
+  （面板 Docker 模块的项目目录 / compose 备份）：它们是面板/插件写在 `/www` 下、
+  但**不在 `/www/server`** 里的数据，原先只活在容器可写层 —— 已发布镜像上实测
+  （12.0.0 / 13.0.0 各跑一遍「写探针 → 销毁重建」）：`/www/vmail`、`/www/dk_project`
+  连文件一起消失，`wwwroot` / `server` / `/etc` / `/root` / `/var` 均正常保留
 - 健康检查新增两段判据：`pyenv/bin/python3` → `/baota/shim`（守卫在位）、
   面板代码版本 == 镜像版本（不一致即 unhealthy）
 
@@ -98,6 +105,35 @@ bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落
   删除只服务于已放弃的「跟踪上游升级脚本」工作流的 `drift/versions.sh`
 - 门禁扩展：`core.sh` 新增 A15（守卫）、A2/A9/B2 扩展到新布局（面板代码不落持久化层、
   组件 / cron 脚本 / 插件数据落盘且重建后仍在）；`published.sh` 同步新增对应断言
+
+### 巡检可读性与命名统一
+
+- **三个工作流按职责统一命名**（两字作用 + 原有描述）：`📦 发布：构建并发布镜像` /
+  `🔬 巡检：已发布镜像回归` / `🔭 监测：变更与漂移检测`
+- **修掉一处假红**：`published.sh` 的「PHP 扩展编译链路」原来**必定失败**。最小扩展
+  源码里的 `ZEND_GET_MODULE(myext)` 被 `#ifdef COMPILE_DL_MYEXT` 包着，而这份扩展没有
+  include 生成的 `config.h`，该宏在编译期并不生效 —— 编译照过、加载时报
+  `Invalid library (maybe not a PHP library)`。现在无条件导出 `get_module`（实测通过），
+  并把检查改成**分步报错**：phpize / configure / make / 产出 / 加载 哪一环挂了直接写进报告
+- **回收站不进持久化层**：上游 13 的落点是 `/www/.Recycle_bin`（原先持久化的
+  `/www/Recycle_bin` 是历史名）。它是删站 / 删文件的暂存区，与容器同生共死、重建即空；
+  面板的回收站列表靠扫目录得出、不是数据库记录，所以不会留下「有记录没文件」的错位。
+  漂移检测把它列进「按设计不持久化」清单，不再每次报关键漂移
+- **漂移报告 Markdown 修复**：摘要表与紧随其后的 `---` 粘成一行会让表格失效
+  （GitHub 会吃掉 step output 末尾的换行）—— 现在显式补空行
+- 修掉重构后遗留的失效路径：`Makefile` 的 `COMPOSE_DIR` 还指着已删除的 `dockerfile/`
+  （`make up/down/logs/ps/exec` 会全部失败）→ 指回仓库根；`make lint` 的 BT-Panel
+  字面量检查路径、`.dockerignore` 注释、`docs/development.md` 的结构树同步改成 `image/`
+- 漂移检测的「声明清单」改为**从 `image/conf/defaults.env` 派生**（不再另抄一份
+  `KNOWNS` / `WWW_PERSIST`）：那边加数据目录、这边还按旧清单判，就会把新目录
+  每次报成关键漂移；派生之后只有真源一处要维护
+- **门禁补一条优雅停机**：`core.sh` 新增 B5 —— `docker stop` 发 SIGRTMIN+3、
+  systemd 依次停服、90s 宽限期内退出。此前所有重建测试用的都是 `docker rm -f`
+  （硬杀），这条**生产停机路径没有任何覆盖**；它坏掉的表现是「宽限期内停不下来 →
+  被 SIGKILL（退出码 137）→ MySQL/InnoDB 被硬杀」，属于丢数据风险
+- `Makefile` 的 `reset-system` 不再手写 `etc usr var root opt home srv`：改从
+  `defaults.env` 的 `PERSIST_SYSTEM_DIRS` 派生**顶层**目录（`/www/server` 刻意保留，
+  那里是面板里装的组件），`docs/operations.md`、`skills/` 的目录树同步补齐
 
 ---
 

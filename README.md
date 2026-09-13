@@ -105,8 +105,9 @@ data/
 ├── www/          业务数据（bind，宿主机可直接 SMB 读写）
 │   ├── wwwroot/       站点            ↔ /www/wwwroot
 │   ├── backup/        备份            ↔ /www/backup
-│   ├── Recycle_bin/   面板回收站       ↔ /www/Recycle_bin
-│   └── server/data/   MySQL 数据       ↔ /www/server/data
+│   ├── server/data/   MySQL 数据       ↔ /www/server/data
+│   ├── vmail/         邮局数据         ↔ /www/vmail
+│   └── dk_project/    面板 Docker 项目  ↔ /www/dk_project
 ├── panel/        面板状态（bind）
 │   └── data/ plugin/ vhost/ ssl/ config/
 │                      配置与 SQLite / 插件 / 站点配置与证书 / 面板证书 / 面板设置
@@ -115,10 +116,6 @@ data/
     ├── www/server/                       面板里装的组件、计划任务脚本、插件数据
     └── .baota/                           锁 / 镜像版本记录 / 启动历史
 ```
-
-**面板代码**（`/www/server/panel`）**不持久化**：它属于镜像，随镜像替换整体更新
-（`init.sh` 在挂 `/www/server` 的 overlay 之前先把面板目录 bind 到 `/run`，
-挂完再 bind 回来，所以面板代码不落持久化层，面板里装的东西照常持久化）。
 
 **面板代码**（`/www/server/panel`）**不持久化**：它属于镜像，随镜像替换整体更新
 （`init.sh` 在挂 `/www/server` 的 overlay 之前先把面板目录 bind 到 `/run`，

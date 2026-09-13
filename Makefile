@@ -37,8 +37,12 @@ CHANNEL_FILE := $(word 3,$(CHANNEL_ROW))
 CHANNEL_URL  := $(word 4,$(CHANNEL_ROW))
 CHANNEL_BASE := $(word 7,$(CHANNEL_ROW))
 CHANNEL_VER  := $(shell [ -n "$(CHANNEL_FILE)" ] && tr -d '[:space:]' < "$(CHANNEL_FILE)" 2>/dev/null)
-# Dockerfile 只有一份；编排文件与它同级
-COMPOSE_DIR := $(ROOT_DIR)/dockerfile
+# 系统层顶层目录的真源：image/conf/defaults.env 的 PERSIST_SYSTEM_DIRS。
+# 只取不含 / 的项 —— reset-system 重置的正是这些顶层目录；
+# /www/server（面板里装的组件）刻意保留，理由见 reset-system 的注释
+SYSTEM_DIRS := $(shell sed -n 's/^PERSIST_SYSTEM_DIRS="$${PERSIST_SYSTEM_DIRS:-\(.*\)}"$$/\1/p' image/conf/defaults.env | tr ' ' '\n' | grep -v / | tr '\n' ' ')
+# 编排文件与 Dockerfile 同在仓库根（docker build -f image/Dockerfile .）
+COMPOSE_DIR := $(ROOT_DIR)
 
 # shellcheck 可能由 pip --user 安装（macOS 系统 Python 在 ~/Library/Python/<版本>/bin，
 # 不在默认 PATH）。已在 PATH 就直接用，否则自动定位，避免本地 lint 静默跳过
@@ -108,10 +112,15 @@ health-all: ## 三套全部跑一遍，任一失败即终止
 backup: ## 在运行中的容器里生成一份全量备份
 	docker exec baota baota-backup $(OPTS)
 
-# 重置系统层：清空 etc usr var root opt home srv 的持久化内容，
-# 让系统层回到「当前镜像」的状态。业务与面板状态
+# 重置系统层：清空 PERSIST_SYSTEM_DIRS 里各**顶层**目录的持久化内容
+# （默认 etc usr var root opt home srv，清单从 image/conf/defaults.env 读，
+# 不在本文件里另抄一份），让系统层回到「当前镜像」的状态。业务与面板状态
 # （data/www 下的站点 / 备份 / MySQL，data/panel 下的面板配置与插件）
 # 完全不受影响 —— 这正是把「持久化」与「镜像内容」分开的意义。
+#
+# /www/server 刻意不动：它是「面板里装的组件」（PHP / nginx / MySQL…）的落点，
+# 重置它等于让用户重装一遍环境，与项目目的相反。要连它一起清就手动删
+# data/system/www/server
 #
 # 会丢什么：apt 装的软件、手工改过的 /etc、计划任务（/var/spool/cron）、
 #           root 家目录（含 .ssh/authorized_keys）、/var/log 历史日志
@@ -127,7 +136,8 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	@[ "$(CONFIRM)" = "yes" ] || { \
 	    echo '⚠️  系统层将被清空，以下内容会丢失：'; \
 	    echo '    apt 装的软件、手工改过的 /etc、计划任务、root 家目录、历史日志'; \
-	    echo '  以下内容不受影响：面板账号与配置、站点、数据库、备份、证书'; \
+	    echo '  以下内容不受影响：面板账号与配置、站点、数据库、备份、证书，'; \
+	    echo '                  以及面板里装的组件（PHP / nginx / MySQL…）'; \
 	    echo '  确认执行：make reset-system CONFIRM=yes'; \
 	    exit 1; \
 	}
@@ -140,7 +150,7 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	fi; \
 	echo "系统层目录：$$SYS"; \
 	docker compose down; \
-	for d in etc usr var root opt home srv; do \
+	for d in $(SYSTEM_DIRS); do \
 	    if [ -d "$$SYS/$$d" ]; then \
 	        rm -rf "$$SYS/$$d"; \
 	        echo "  已清空 $$SYS/$$d"; \
@@ -185,7 +195,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	    echo '  未安装 shellcheck，跳过（安装与排查见 docs/development.md「本地构建」）'; \
 	 fi
 	@echo '--- BT-Panel 字面量（非注释行）检查 ---'
-	@BAD=$$(grep -rn 'BT-Panel' shared/build shared/scripts .github/scripts/check 2>/dev/null \
+	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check 2>/dev/null \
 	      | grep -vE ':[0-9]+:[[:space:]]*#' || true); \
 	 if [ -n "$$BAD" ]; then \
 	   echo '  FAIL 非注释行出现 BT-Panel 字面量：'; \
