@@ -1,106 +1,81 @@
 # 🚀 发布流程
 
-镜像有两条跟进上游的通道。**构建逻辑（`shared/build/` 三阶段脚本）、持久化原理、
-编排配置完全共用**，只有安装脚本与发布策略不同：
+## 通道声明表（唯一的差异来源）
 
-| 通道 | 目录 | 安装脚本 | 版本跟进方式 | DockerHub 标签 |
-|---|---|---|---|---|
-| **12.0.0** | `dockerfile/12.0.0/` | `installStable_12.sh`（稳定线 12.x） | 手动触发：下载安装脚本取横幅版本 → 与 `dockerfile/12.0.0/VERSION` 比对 | 仅精确版本（如 `12.0.0`），**无 latest** |
-| **13.0.0** | `dockerfile/13.0.0/` | `install_panel.sh`（最新正式版） | 手动触发：get_version API 取版本号 → 与 `dockerfile/13.0.0/VERSION` 比对 | `13.0.0` + `latest` |
+各条通道（线）的差异**只写在** [image/channels.conf](../image/channels.conf) 里，
+成对排列、一眼能对照；Dockerfile 与流水线都只有一份：
 
-选哪个：**求稳用 12.0.0**（只跟进稳定线，节奏慢、变更少），
-**求新用 13.0.0**（跟进最新正式版，`latest` 指向最近一次手动发布的版本）。
-两者用相同的 `data/` 目录结构，数据迁移互相兼容。
+```
+line         channel  version                    install                                             probe   tag     base
+12_version   12.x     image/versions/12/VERSION  https://download.bt.cn/install/installStable_12.sh  banner  exact   debian:12
+13_version   13.x     image/versions/13/VERSION  https://download.bt.cn/install/install_panel.sh     api     latest  debian:12
+```
 
-> **两个通道均已改为手动发布**（移除了定时触发）。
-> 原因：`13.0.0` 会推进 `latest`，若每天自动发布，上游一出问题坏镜像就会立刻
-> 分发给所有 `latest` 用户。现在发布前应先看
-> [漂移检测](development.md#漂移检测) 的报告与 issue，确认无关键漂移再手动触发。
+| 字段 | 说明 |
+|---|---|
+| `line` | **线标识**：所有内部键都用它（流水线矩阵、产物名、缓存 scope、版本文件查找）。按面板主线命名，一旦定下就再也不用改 —— 14/15 出来时是「加一行 `14_version`」，不是给旧行改名 |
+| `channel` | 显示名（镜像标签始终是版本号，不是这个名字） |
+| `version` | 该线当前**已发布**版本的文件（发布成功后由流水线回写） |
+| `install` | 官方安装脚本地址 —— 上游换线时只改这里 |
+| `probe` | 版本探测方式：`banner`=抓安装脚本横幅、`api`=官方 `get_version` 接口 |
+| `tag` | 标签策略：`exact` 或 `latest`；某条线成为「最新正式线」时把 `latest` 挪到那一行、旧行改回 `exact` |
+| `base` | 基础镜像（要与该线的上游目标发行版一致） |
+
+**新增一条线 = 加一行**：14 出来时加 `14_version` 行（新 `install` 地址 + 新
+`image/versions/14/VERSION` 文件 + `tag: latest`），同时把 13 行的 `tag` 改回
+`exact`。上游换稳定线时只改对应行的 `install`。日常维护里**不应该**出现「为了 14
+去改流水线逻辑」的改动 —— 唯一按线分支的地方是流水线读 `probe` 字段选探测方式；
+如果哪天必须为某条线写 `if 是 14 就…` 式的逻辑，说明它该"毕业"成独立的薄壳
+（复用共享脚本），而不是往共享文件里堆条件。
+
+选哪个：**求稳用 12.x**（只跟进稳定线，节奏慢、变更少），**求新用 13.x**
+（跟进最新正式版，`latest` 指向最近一次手动发布的版本）。两者用相同的 `data/`
+目录结构，数据互相兼容。
+
+> **两条通道都是手动发布**（没有定时触发）。原因：`latest` 一旦自动推进，上游出问题
+> 就会把坏镜像立刻分发给所有使用者。现在的流程是：先看
+> [漂移检测](development.md#漂移检测)的报告与 issue，确认无关键漂移，再手动触发
+> **📦 构建并发布镜像**（`.github/workflows/build.yml`）。
 
 ---
 
-## 12.0.0 通道
-
-上游发新版时，`installStable_12.sh` 这个 URL 不变，所以 Dockerfile 不需要改；
-`dockerfile/12.0.0/VERSION` 也不需要手工同步——手动触发**「📦 12.0.0：构建并发布镜像」**即可，它会：
-
-1. 🔍 下载安装脚本，从横幅提取版本号（`| 您正在安装宝塔面板 12.0.0 稳定版`）
-2. ⚖️ 与 `dockerfile/12.0.0/VERSION` 比对：上游更新 → 按新版本发布；一致 → **不构建**
-   （横幅低于文件则告警并**绝不自动降级**；想无条件重建就勾「强制更新」）
-3. 🏗️ 双架构构建 → 三套发布前检查（20 项功能检查 / 挂载与降级场景 / 升级与降级路径）
-4. 🚀 全部通过才推送 `bugseeker/baota:<版本>`
-5. ✏️ 发布成功后回写 `dockerfile/12.0.0/VERSION`——文件永远对应已推送的版本，
-   构建失败时文件不动，下次运行自动重试
-
-也就是说：**触发只做一次探测** —— 上游有新版本才构建发布；已是最新则到此结束
-（想重建当前版本，勾选「🔧 强制更新」，它只跳过「已是最新」判断，不改版本来源）。
-探测失败（上游临时故障）时同样不构建，可稍后重新手动触发。
-
-> 版本号只从安装横幅提取。脚本其它位置也有版本号（例如内部 API 用的 9.3.9），不限定范围会误判。
-
-需要的仓库权限（Settings → Actions → General → Workflow permissions）：
-勾选 **Read and write permissions**（校准结果自动回写 `dockerfile/12.0.0/VERSION` 时需要）。
-
-## 13.0.0 通道（手动发布）
-
-13.0.0 由 **📦 13.0.0：构建并发布镜像**（`.github/workflows/13.0.0-build-push.yml`）手动触发跟进：
+## 发布流水线（一份，跑所有通道）
 
 ```
-手动触发
-  🔍 get_version API 取最新版本号，与 dockerfile/13.0.0/VERSION 比对
-  🏗️ 双架构构建（官方脚本安装宝塔）→ 三套发布前检查
-  🚀 发布 <版本> 与 latest 两个标签
-  ✏️ 把推送成功的版本号回写 dockerfile/13.0.0/VERSION，供下一次比对
+prep   读 channels.conf → 逐通道探测上游版本（banner / api）→ 与 VERSION 比对 → 生成矩阵
+  ├─ lint   静态检查（与版本无关，无条件跑）
+  ├─ build  通道 × 架构 矩阵：本地构建 → 三套发布前检查 → 通过后才按 digest 推送
+  ├─ publish 合并两架构 digest → 按标签策略打 repo:<版本>（标了 latest 的线再加 :latest）
+  └─ writeback 把已发布版本回写进该通道的 VERSION 文件
 ```
 
-与 12.0.0 通道的关键差异：`install_panel.sh` 是**引导脚本，自身不含版本号**
-（12.0.0 脚本有版本横幅可提取），所以版本号直接取自官方 `get_version` API，
-与 `dockerfile/13.0.0/VERSION` 比对后决定按哪个版本构建。
-`latest` 指向最近一次手动发布的版本——**发布节奏由维护者掌握**，这是刻意的设计：
-`latest` 一旦自动推进，上游出问题时坏镜像会立刻扩散给所有使用者。
-
-任何一步失败都会中断（例如上游临时改坏了安装脚本，构建阶段会直接失败），
-latest 不会指向坏镜像；API 版本低于仓库版本时（官方回滚）会告警并跳过，绝不自动降级。
-
-`dockerfile/13.0.0/VERSION` 在**发布成功之后**才回写，永远对应已推送的版本：
-构建失败时文件不动，可重新手动触发重试同一版本；回写推送失败会让该步骤变红
-（不吞错），下次比对仍会发现不一致并自愈。
-
----
-
-## 🔀 构建流水线
+一次探测只做一次构建：**上游有新版本才构建**；已是最新则只有 `lint` 会跑
+（想重建当前版本，手动触发时勾「🔧 强制更新」——它只跳过「已是最新」判断，
+不改版本来源）。探测失败时按各通道 VERSION 继续，绝不自动降级。
 
 ```
-        ┌─ amd64（ubuntu-latest）── 构建①(本地) → 三道验证 → 构建②按 digest 推送 ─┐
-读版本 ─┤                                                                         ├─ 合并 digest → :版本 + :latest
-        └─ arm64（ubuntu-24.04-arm）─ 构建①(本地) → 三道验证 → 构建②按 digest 推送 ─┘
+        ┌─ amd64（ubuntu-latest）── 构建①(本地) → 三套验证 → 构建②按 digest 推送 ─┐
+读版本 ─┤                                                                          ├─ 合并 digest → 打标签
+        └─ arm64（ubuntu-24.04-arm）─ 构建①(本地) → 三套验证 → 构建②按 digest 推送 ─┘
 ```
 
-每个架构**构建两次**：
-  ① 第一次 `--load` 到本地（`baota:candidate`），三套验证全过后才进行第二次；
-  ② 第二次 `push-by-digest=true` 按 digest 存入 registry，**不创建任何标签**。
-用户可见的标签只有 `:版本` 与 `:latest` —— DockerHub 上永远不会出现
-`<版本>-amd64` / `<版本>-arm64`（publish 直接用 digest 合并，不需要 arch 标签）。
+每个架构**构建两次**：① `--load` 到本地跑三套验证；② 验证全过后按
+`push-by-digest=true` 入库（不创建任何 arch 标签）。用户可见的标签只有
+`:版本` 与（标了 `latest` 那条线的）`:latest`，DockerHub 上永远不会出现 `<版本>-amd64`。
 
-两个架构各自跑在**原生** runner 上、同时进行，总耗时约等于较慢的那一个，而不是两者相加。
-用原生 runner 而非 QEMU 是必须的：官方安装脚本在 arm64 上要多编译一些组件，模拟下慢到不实用。
-
-任一架构的验证失败，该 job 就终止；manifest 合并依赖两个 job 都成功，
-所以坏镜像不会出现在多架构标签里。验证失败时第二次推送根本不会执行。
+两个架构各自跑在**原生** runner 上、同时进行。用原生 runner 而非 QEMU 是必须的：
+官方安装脚本在 arm64 上要多编译一些组件，模拟下慢到不实用。
 
 > ⚠️ `ubuntu-24.04-arm` 目前**只对公开仓库免费**，私有仓库使用该标签会直接失败。
-> 如果本仓库要转为私有，请删掉构建矩阵里的 arm64 那一项。
+> 本仓库转私有前请删掉构建矩阵里的 arm64 那一项。
 
 ### 为什么「先本地构建验证，再第二次按 digest 推送」
 
-buildx 一次调用里没法做到「推送发生在验证之后」，所以拆成两次：
-第一次只 `--load` 到本地并跑完三套验证（坏镜像根本不会被推送）；
-第二次推送**命中第一次刚写入的 GHA 缓存**（按架构分 scope），几乎不再重新编译，
-代价很小。第二次以 `push-by-digest` 形式入库（manifest 只按 digest 索引、无标签），
-publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不推送」和「零 arch 标签」。
-
-取舍：第二次是重建，缓存命中时字节与验证过的那份一致；只在缓存失效的罕见时刻
-可能与第一次不同（若两次构建间隙上游 `download.bt.cn`/apt 源变了，则按新内容发布）。
+buildx 一次调用里没法做到「推送发生在验证之后」，所以拆成两次：第一次只 `--load`
+到本地并跑完三套验证（坏镜像根本不会被推送）；第二次**命中第一次刚写入的 GHA 缓存**
+（按通道 + 架构分 scope），几乎不再重新编译，代价很小。第二次以 `push-by-digest`
+形式入库（manifest 只按 digest 索引、无标签），publish 再用 digest 合并成正式标签 ——
+同时拿到「坏镜像不推送」和「零 arch 标签」。
 
 ### 🔑 需要的 Secrets
 
@@ -109,56 +84,57 @@ publish 再用 digest 合并成正式标签 —— 同时拿到「坏镜像不�
 | `DOCKERHUB_USERNAME` | DockerHub 用户名 |
 | `DOCKERHUB_TOKEN` | DockerHub Access Token（不要用登录密码） |
 
+需要的仓库权限（Settings → Actions → General → Workflow permissions）：
+勾选 **Read and write permissions**（发布成功后要把版本号回写进 VERSION 文件）。
+
 ---
 
 ## 🔬 每日巡检：验证已发布镜像
 
-前面两个工作流验的是**「本地构建出来的候选镜像」**，作用是把坏镜像拦在推送之前。
-每日巡检（`.github/workflows/check.yml`）验的是**「DockerHub 上已经发布的镜像」**，
-作用是每天确认线上那套东西仍然健康 —— 上游脚本变更、镜像被重新推送、依赖漂移，
-都能在日常回归里第一时间发现，而不是等用户踩到。
-
-### 验什么、怎么验
+构建流水线验的是**「本地构建出来的候选镜像」**（把坏镜像拦在推送之前）；
+每日巡检（`.github/workflows/check.yml`）验的是**「DockerHub 上已发布的镜像」** ——
+上游脚本变更、镜像被重新推送、依赖漂移，都能在日常回归里第一时间发现，
+而不是等用户踩到。
 
 ```
-prep（读两个通道 VERSION）
-  ├─ verify-v12 （并行）→ 拉 bugseeker/baota:<12.0.0>  → 19 项回归 → 上传片段
-  └─ verify-v13（并行）→ 拉 bugseeker/baota:<13.0.0> → 19 项回归 → 上传片段
+prep（读 channels.conf + 各通道 VERSION）
+  └─ verify（矩阵：各通道并行）→ 拉 repo:<已发布版本> → 跑 published.sh → 上传片段
 collect（汇总）→ 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```
 
-- **版本号取自 `dockerfile/12.0.0/VERSION` 与 `dockerfile/13.0.0/VERSION`**（这两个文件由发布流水线在推送
-  成功后回写，永远对应已发布的标签），不是重新探测上游 —— 本工作流不做版本判断
-- 19 项回归复用 `.github/scripts/check/published.sh`，覆盖持久化全生命周期
-  （四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 /
-  PHP 扩展编译链路）
-- 两个通道**并行**跑，各自独立 job，在 Actions 里并排显示进度，墙钟时间约等于单通道
-- **只验 linux/amd64**：arm64 镜像要跑 QEMU 模拟，而本方案的核心是 overlay 持久化，
-  模拟环境下的结论不可信。arm64 的真实覆盖由上面两个工作流在原生 ARM runner 上负责
+- 版本号取自各通道的 VERSION 文件（由发布流水线在推送成功后回写，永远对应已发布标签），
+  不重新探测上游 —— 本工作流只回答「当前线上这套东西还好不好用」
+- 回归复用 `.github/scripts/check/published.sh`：持久化全生命周期（落盘 / 销毁重建 /
+  升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / PHP 扩展编译链路 /
+  面板里装的东西重建后仍在 / 不可变面板守卫）
+- 只验 **linux/amd64**：arm64 要跑 QEMU，而本方案的核心是 overlay 持久化，
+  模拟环境下的结论不可信 —— 宁可不测也不给假绿灯；arm64 的真实覆盖由构建流水线
+  在原生 ARM runner 上负责
 
 ### 产出
 
 - **`.github/reports/report.md`**：每次运行整体覆盖（不追加，体积恒定）
-- README 的「🩺 镜像验证报告」章节：由 `.github/scripts/report.py` 注入，
-  折叠在 `<details>` 里，点开即看
+- README 的「🩺 镜像验证报告」章节：由 `.github/scripts/report.py` 注入，折叠在
+  `<details>` 里，点开即看
 - ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前**已脱敏**
-- ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START -->` 与 `<!-- DAILY-VERIFY-REPORT:END -->`、
-  `<!-- DAILY-DRIFT-REPORT:START -->` 与 `<!-- DAILY-DRIFT-REPORT:END -->`
-  **之间由 CI 维护，不要手动修改**，下次运行会被覆盖
+- ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START/END -->` 与
+  `<!-- DAILY-DRIFT-REPORT:START/END -->` 之间由 CI 维护，**不要手改**，下次运行会被覆盖
 
-### 触发时机
+### 触发时机与判定
 
-- 🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：对**已发布**的镜像做回归验证。
-  两个通道均为手动发布，这里验的就是当前线上版本
-- 🖱️ 手动 `workflow_dispatch`：随时触发
-
-### 回写与判定
-
+- 🗓️ 每天 UTC 18:30（北京时间 02:30）；🖱️ 也可手动触发
 - **即使某通道验证失败也会回写报告**（`collect` 用 `if: always()`），把失败现场留在
-  报告里，最后一步才判红 —— 所以看到红的运行，报告里一定有具体是哪一项挂了
+  报告里，最后一步才判红 —— 看到红的运行，报告里一定有具体是哪一项挂了
 - 回写时先 `git rebase origin/main` 再生成文件：**rebase 必须在修改任何仓库文件之前**，
-  否则 `.github/reports/report.md` / `README.md` 处于已修改状态会让 rebase 中止，导致报告写不进仓库
-- 本工作流只由 `schedule` / `workflow_dispatch` 触发，回写不会触发任何构建
+  否则报告 / README 处于已修改状态会让 rebase 中止，报告就写不进仓库
+
+---
+
+## 🔭 漂移检测（只监测，不发布）
+
+见 [开发指南](development.md#漂移检测)：每天比对官方安装脚本的 sha256 与版本号，
+有变更时真的装一遍并检查「安装产生的新文件是否落在已知持久化位置之外」。
+检测到关键漂移会开 issue 并让工作流失败，**处理前每天都会提醒**。
 
 ---
 
@@ -167,4 +143,4 @@ collect（汇总）→ 生成 .github/reports/report.md → 注入 README → �
 本项目**没有**配置 Dependabot —— 工作流里的 Actions 版本由人工跟进（升级时直接改
 `uses: <action>@<版本>`）。想自动化的话，加一份 `.github/dependabot.yml`
 （`package-ecosystem: github-actions`、`schedule.interval: weekly`）即可；
-Dependabot 只开 PR、不会自动合并，合不合由你判断。
+Dependabot 只开 PR、不会自动合并。

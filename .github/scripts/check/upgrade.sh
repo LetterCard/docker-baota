@@ -45,9 +45,9 @@ VOLUME="baota-upgrade-data-$$"
 OLD_VERSION='0.0.1'
 FUTURE_VERSION='999.0.0'
 
-# 版本记录落在持久化层的 .baota 下，路径取自 shared/conf/defaults.env
+# 版本记录落在持久化层的 .baota 下，路径取自 image/conf/defaults.env
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
-[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
+[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 
 assert_no_degraded() {
     if inside test -e /run/baota/degraded-critical; then

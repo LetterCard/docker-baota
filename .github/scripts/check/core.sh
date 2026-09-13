@@ -8,11 +8,11 @@
 #  镜像先在本地构建并 --load，绝不推送；本脚本全部通过之后，workflow 才登录
 #  并推送。任一检查失败即非零退出，阻断发布。
 #
-#  两阶段共 20 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
+#  两阶段共 21 项，针对「本容器化方案 + 真机宝塔体验」定制，不是通用探活：
 #    A 全新数据卷：systemd / overlay 可写 / 关键路径（含 pyenv 模块）/
 #                  面板与任务进程 / 安全入口 / 版本号 / 首启凭据 / 写入落盘 /
 #                  自启 / 防火墙关闭 / SSH 与 bt 命令 / 健康检查判据 /
-#                  备份工具 / PHP 扩展编译工具链
+#                  备份工具 / PHP 扩展编译工具链 / 不可变面板守卫
 #    B 销毁容器后用同一个卷重建：数据不丢、不会二次初始化、面板自动恢复
 #
 #  本脚本只在 CI runner 上执行，放在 .github/ 下即可被 .dockerignore 整体排除，
@@ -33,21 +33,21 @@ ICON='🩺'
 # shellcheck disable=SC1090,SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# 目录与「根」全部取自 shared/conf/defaults.env —— 落盘路径由根派生，
+# 目录与「根」全部取自 image/conf/defaults.env —— 落盘路径由根派生，
 # 避免硬编码漂移
 PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
-[ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
+[ -n "${PERSIST_SYSTEM_DIRS}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_DIRS"; exit 1; }
 WWW_DATA_SUBDIRS=$(read_default WWW_DATA_SUBDIRS)
-[ -n "${WWW_DATA_SUBDIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 WWW_DATA_SUBDIRS"; exit 1; }
+[ -n "${WWW_DATA_SUBDIRS}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 WWW_DATA_SUBDIRS"; exit 1; }
 PANEL_STATE_SUBDIRS=$(read_default PANEL_STATE_SUBDIRS)
-[ -n "${PANEL_STATE_SUBDIRS}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_SUBDIRS"; exit 1; }
+[ -n "${PANEL_STATE_SUBDIRS}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PANEL_STATE_SUBDIRS"; exit 1; }
 # 三个「根」也读真源：落盘路径由根派生，避免硬编码漂移
 PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
 PANEL_STATE_ROOT=$(read_default PANEL_STATE_ROOT)
-[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
-[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
-[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 shared/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
+[ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
+[ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
+[ -n "${PANEL_STATE_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PANEL_STATE_ROOT"; exit 1; }
 
 # 面板运行状态（输出带颜色码，去掉后再判断）。
 # 面板与任务两个进程共用这一次调用的结果，不重复执行 bt status
@@ -118,7 +118,7 @@ report_panel_state_drift() {
     if [ "${#found[@]}" -gt 0 ]; then
         echo "::warning::面板在镜像层之外新建了顶层目录并写入（升级会被丢弃），请确认是否需持久化："
         printf '  %s\n' "${found[@]}"
-        echo "  需保留的话，请加进 shared/conf/defaults.env 的 PANEL_STATE_SUBDIRS"
+        echo "  需保留的话，请加进 image/conf/defaults.env 的 PANEL_STATE_SUBDIRS"
     else
         pass "面板未在镜像层之外新建越界状态（新建写入均落在镜像已有目录或 PANEL_STATE_SUBDIRS 内）"
     fi
@@ -161,12 +161,35 @@ for t in $PANEL_STATE_SUBDIRS; do
 done
 pass "系统层 upper 与业务/面板状态绑定源齐备"
 
-# 不可变面板的核心性质：面板代码目录不能被任何 bind / overlay 覆盖，
-# 否则换镜像就更新不了面板。纯挂载语义检查，不依赖宝塔任何内部结构
-if inside_sh "mount | grep -q ' on /www/server/panel '"; then
-    fail "面板代码目录被挂载覆盖了：/www/server/panel 应直接来自镜像层"
+# 不可变面板的核心性质：面板代码必须来自镜像、且写入不落持久化层。
+# /www/server 现在走 overlay（组件、cron 脚本、插件数据持久化），面板目录则被
+# init.sh 用镜像绑定盖回，所以这里查的不是「有没有挂载」，而是「写入去哪了」
+inside_sh "mount | grep -q ' on /www/server/panel '" \
+    || fail "/www/server/panel 未被镜像绑定覆盖：面板代码会落进持久化层"
+inside_sh 'echo probe > /www/server/panel/_code_probe'
+if inside test -e /data/system/www/server/panel/_code_probe; then
+    fail "面板代码写进了持久化层（/data/system/www/server/panel）：换镜像将无法更新面板"
 fi
-pass "面板代码未被持久化（直接来自镜像层）"
+inside_sh 'rm -f /www/server/panel/_code_probe'
+pass "面板代码来自镜像、不落持久化层（组件与插件数据则落在 data/system/www/server）"
+
+# 并发保护：同一份 data 不能被两个实例同时挂载（内核 EBUSY / 行为未定义）。
+# 第二实例必须被独占锁拦下并中止 —— 这是数据安全性质，要在推送前就拦住
+# （判据是「它退出了」，不依赖日志文案）
+CONTAINER_DUP="baota-healthcheck-dup-$$"
+docker rm -f "$CONTAINER_DUP" >/dev/null 2>&1 || true
+docker run -d --name "$CONTAINER_DUP" --privileged \
+    --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+    --tmpfs /run --tmpfs /run/lock --shm-size=512m \
+    --stop-signal=SIGRTMIN+3 \
+    -v "${VOLUME}:/data" "$IMAGE" >/dev/null
+sleep 10
+if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_DUP" 2> /dev/null || true)" = 'true' ]; then
+    docker rm -f "$CONTAINER_DUP" >/dev/null 2>&1 || true
+    fail "同一份 data 被第二个实例挂上了（独占锁失效，可能写坏数据）"
+fi
+docker rm -f "$CONTAINER_DUP" >/dev/null 2>&1 || true
+pass "并发保护生效：第二实例被独占锁拦下并中止"
 
 # /tmp 必须留在容器可写层：变成 tmpfs 会让上传、解压备份直接吃内存
 if inside_sh 'grep -q " /tmp " /proc/mounts'; then
@@ -201,7 +224,7 @@ pass "healthcheck 三段判据在正常状态下通过"
 step "A4) 校验宝塔关键文件（真机上的实际路径）"
 # 面板主程序单独用 glob 检查：bt7.init 用 ps|grep 匹配命令行里的面板名判断
 # 「是否已在运行」，探活命令里出现该字面量会被误判，所以统一写 BT-P*
-# （与 shared/build/panel.sh 一致）。glob 必须在容器内展开 —— 宿主上没有 /www
+# （与 image/build/panel.sh 一致）。glob 必须在容器内展开 —— 宿主上没有 /www
 inside_sh 'ls /www/server/panel/BT-P* >/dev/null 2>&1' \
     || fail "缺少面板主程序：/www/server/panel/BT-P*"
 for f in /www/server/panel/BT-Task \
@@ -299,8 +322,15 @@ inside_sh 'echo persist > /etc/_persist_marker'
 inside_sh 'echo persist > /www/server/panel/data/_persist_marker'
 inside_sh 'mkdir -p /var/spool/cron && echo persist > /var/spool/cron/_persist_marker'
 inside_sh 'echo persist > /www/wwwroot/_persist_marker'
+# 面板里装的东西：组件（PHP/nginx/MySQL…）、计划任务脚本、插件数据 ——
+# 都落在 /www/server 的 overlay upper 里，重建后必须还在（不用重装）
+inside_sh 'mkdir -p /www/server/php /www/server/cron /www/server/total/logs'
+inside_sh 'echo persist > /www/server/php/_persist_marker'
+inside_sh 'echo persist > /www/server/cron/_persist_marker'
+inside_sh 'echo persist > /www/server/total/logs/_persist_marker'
 # 落盘路径语义（容易搞混，写清楚再检查）：
 #   /etc /var               系统层 overlay，upper 在 /data/system/<dir>
+#   /www/server             系统层 overlay（组件 / cron 脚本 / 插件数据）
 #   /www/wwwroot            业务 bind，源 = /data/www/wwwroot
 #   /www/server/panel/data  面板状态 bind，源 = ${PANEL_STATE_ROOT}/data
 #   面板代码（/www/server/panel 本体）刻意不落盘：它属于镜像
@@ -308,7 +338,13 @@ inside test -f /data/system/etc/_persist_marker            || fail "/etc 写入�
 inside test -f "${PANEL_STATE_ROOT}/data/_persist_marker"  || fail "面板状态写入未落盘（应为 ${PANEL_STATE_ROOT}/data）"
 inside test -f /data/www/wwwroot/_persist_marker           || fail "/www/wwwroot 写入未落到绑定源 /data/www/wwwroot"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务目录未落盘"
-pass "写入落到 data/www/wwwroot、${PANEL_STATE_ROOT}/data 与 data/system/<dir>"
+inside test -f /data/system/www/server/php/_persist_marker \
+    || fail "面板里装的组件未落盘（应为 /data/system/www/server/php）"
+inside test -f /data/system/www/server/cron/_persist_marker \
+    || fail "计划任务脚本未落盘（应为 /data/system/www/server/cron）"
+inside test -f /data/system/www/server/total/logs/_persist_marker \
+    || fail "插件数据未落盘（应为 /data/system/www/server/total/logs）"
+pass "写入分别落到系统层、面板状态、业务目录与 /www/server（组件 / cron / 插件数据）"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
@@ -371,6 +407,10 @@ inside test -s "${BACKUP_PATH}" || fail "备份包为空：${BACKUP_PATH}"
 if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'www/backup/\(auto\|manual\|database\)/'"; then
     fail "备份包自包含：含有 www/backup 下的产物"
 fi
+# journald 日志体积大且零恢复价值，必须在排除清单里（否则备份包白胖一圈）
+if inside_sh "tar tzf ${BACKUP_PATH} | grep -q 'system/var/log/journal'"; then
+    fail "备份包含 journald 日志（应排除：system/var/log/journal）"
+fi
 _bk=$(basename "${BACKUP_PATH}")
 pass "备份工具可用，生成的备份包通过自校验（${_bk}）"
 
@@ -385,6 +425,43 @@ for _b in autoconf gcc make libtool; do
         || fail "镜像缺少扩展编译工具链：$_b（PHP 扩展将装不上，疑似瘦身误删）"
 done
 pass "扩展编译工具链齐备（autoconf/gcc/make/libtool），足以支撑 PHP 扩展安装"
+
+step "A15) 不可变面板守卫（解释器包装 + 镜像代码副本）"
+# 原理见 image/scripts/guard.sh 头部注释：面板代码的每一次执行都先过守卫，
+# 于是面板内「更新」写进来的新代码永远不会被执行，init_db 只由镜像版本代码执行，
+# 持久层的库不可能「比代码新」。这里验装配在位、副本是真硬链接、守卫行为正确。
+inside test -x /baota/shim || fail "缺少 /baota/shim（解释器包装）"
+inside test -x /baota/guard.sh || fail "缺少 /baota/guard.sh（执行入口守卫）"
+for _p in python python3; do
+    _target=$(inside readlink "/www/server/panel/pyenv/bin/${_p}" 2> /dev/null || true)
+    [ "${_target}" = '/baota/shim' ] \
+        || fail "pyenv/bin/${_p} 未指向 /baota/shim（当前：${_target:-无}），守卫不会生效"
+done
+inside test -x /www/server/panel/pyenv/bin/python-real \
+    || fail "缺少 /www/server/panel/pyenv/bin/python-real（真解释器）"
+inside test -s /baota/origin/class/common.py \
+    || fail "缺少镜像代码副本 /baota/origin/class/common.py"
+
+# 硬链接必须真的生效：副本与原文件同 inode。构建工具若把硬链接展开成两份，
+# 镜像体积会凭空翻倍 —— 这种回归必须在这里拦住，而不是等用户拉镜像时才发现
+_inode_panel=$(inside_sh 'stat -c %i /www/server/panel/class/common.py')
+_inode_mirror=$(inside_sh 'stat -c %i /baota/origin/class/common.py')
+[ -n "${_inode_panel}" ] && [ "${_inode_panel}" = "${_inode_mirror}" ] \
+    || fail "镜像代码副本不是硬链接（inode ${_inode_panel:-无} vs ${_inode_mirror:-无}），镜像体积会翻倍"
+
+# 行为断言：模拟「面板内更新」改写代码版本 + 往持久化的状态目录里写用户数据，
+# 然后随便跑一次 pyenv python —— 守卫应把代码换回镜像版本，但不能碰状态目录
+inside_sh "echo \"g.version = '99.99.99'\" > /www/server/panel/class/common.py"
+inside_sh 'echo user-data > /www/server/panel/data/_guard_probe'
+inside /www/server/panel/pyenv/bin/python3 -c 'pass' > /dev/null 2>&1 \
+    || fail "经包装器执行 python 失败（包装破坏了面板运行环境）"
+inside_sh "grep -q '${EXPECT_VERSION}' /www/server/panel/class/common.py" \
+    || fail "守卫未把被改写的面板代码换回镜像版本"
+# 排除项写错时（rsync 用 ./x、tar 用 /x 之类）恢复会把镜像里的初始数据盖回
+# 持久化目录，用户数据被静默回退 —— 这条断言专门盯它
+inside_sh 'grep -q user-data /www/server/panel/data/_guard_probe' \
+    || fail "守卫恢复了状态目录（排除项失效，用户数据会被镜像初始数据覆盖）"
+pass "守卫在位：包装生效、副本为硬链接、代码被换回 ${EXPECT_VERSION}、状态目录未被碰"
 
 # A 阶段末（容器已完整跑过一轮）做一次面板状态漂移报告
 report_panel_state_drift
@@ -411,7 +488,10 @@ inside test -f /data/system/etc/_persist_marker            || fail "/etc 数据�
 inside test -f /www/server/panel/data/_persist_marker      || fail "面板状态数据在重建后丢失"
 inside test -f /www/wwwroot/_persist_marker                || fail "站点数据在重建后丢失"
 inside test -f /data/system/var/spool/cron/_persist_marker || fail "/var 计划任务在重建后丢失"
-pass "系统配置、面板状态、业务数据、计划任务均已保留"
+inside test -f /www/server/php/_persist_marker             || fail "面板里装的组件在重建后丢失"
+inside test -f /www/server/cron/_persist_marker            || fail "计划任务脚本在重建后丢失"
+inside test -f /www/server/total/logs/_persist_marker      || fail "插件数据在重建后丢失"
+pass "系统配置、面板状态、业务数据、计划任务、组件与插件数据均已保留"
 
 SAFE_AFTER=$(inside_cat /www/server/panel/data/admin_path.pl)
 PORT_AFTER=$(inside_cat /www/server/panel/data/port.pl)

@@ -5,7 +5,7 @@
 - **`/data` 必须在 ext4 / btrfs / xfs 上**。SMB / NFS 网络共享、exFAT / NTFS 移动盘、
   macOS / Windows 的宿主机目录，都会让 overlay「挂载成功但只读」，之后所有写入静默失败
 - **`/data` 不能放在容器可写层里**。overlay 的 upperdir 不能位于 overlay 之上，
-  必须用 bind mount（混合模式的 `./system` 与 `./data` 同样是 bind）
+  必须用 bind mount（compose 里的 `./data:/data` 就是 bind）
 - **容器必须 `privileged`**。要 mount overlay、要跑 systemd，缺一不可
 
 启动日志里若出现「持久化层挂载成功但不可写」，立刻按第一条给 `/data` 换位置。
@@ -15,7 +15,7 @@
 
 | 不要 | 原因 |
 |---|---|
-| 在面板里点「更新」 | 写入落在容器可写层：restart 不消失、销毁重建后还原为镜像版本；升级请换镜像标签 |
+| 在面板里点「更新」 | 写入落在容器可写层，且**不会生效**：面板代码的每次执行都先过执行入口守卫，发现版本与镜像不一致就用镜像副本换回去（见[持久化原理](persistence.md#执行入口守卫不可变面板的兜底)）；升级请换镜像标签 |
 | 手动改、删 `data/system/.baota/` | 项目元数据目录（工作目录、锁、版本记录、启动历史），删了会自动重建，改它可能导致下次挂载异常或丢锁 |
 | 运行中直接拷贝 `data/` 当备份 | 数据库文件可能处于半写状态，恢复后表损坏 |
 | 用图形界面「压缩 / 复制」备份 `data/` | 丢 overlay 扩展属性，详见[备份与恢复](backup.md) |
@@ -57,7 +57,7 @@ docker compose logs --tail 100 baota    # 启动日志里的告警
 docker exec baota bt status             # 面板 + 任务进程
 ```
 
-若出现持久化降级，除日志外还会追加到 `data/system/.baota/boot-history.log`（混合模式在 `system/.baota/`），
+若出现持久化降级，除日志外还会追加到 `data/system/.baota/boot-history.log`，
 事后可以回答「从哪次启动开始不对的」。
 
 ## ♻️ 重置系统层（保留数据）
@@ -77,7 +77,7 @@ make reset-system CONFIRM=yes      # 必须显式确认，避免误操作
 | | 内容 |
 |---|---|
 | **会丢** | apt 装的软件、手工改过的 `/etc`、计划任务（`/var/spool/cron`）、root 家目录（含 `.ssh/authorized_keys`）、`/var/log` 历史日志 |
-| **不会丢** | 面板账号与配置、站点文件、数据库、备份、证书 —— 全在数据层 `/www` |
+| **不会丢** | 面板账号与配置、站点文件、数据库、备份、站点证书与伪静态、面板自身证书、面板设置 —— 全在数据层 `data/` |
 
 `data/system/.baota/` 元数据刻意保留：里面有镜像版本记录，删了会被判成「首次使用」，
 下次启动就不会再生成升级前快照了。
@@ -104,7 +104,7 @@ docker compose up -d
 | | 内容 |
 |---|---|
 | **会变** | 面板代码与默认配置（整体换成新镜像的那一份） |
-| **不会变** | `panel/data`（面板配置、数据库、端口、安全入口）、已装插件、站点、MySQL 数据、备份、证书 |
+| **不会变** | `panel/data`（面板配置、数据库、端口、安全入口）、`panel/plugin`（插件）、`panel/vhost`（站点配置与证书）、`panel/ssl`（面板证书）、`panel/config`（面板设置）、站点、MySQL 数据、备份 |
 
 换镜像前 entrypoint 会自动生成一份面板配置快照（落在 `data/www/backup/auto/`）；
 升级后若发现配置对不上，按[升级](upgrade.md)里的回滚步骤还原即可。

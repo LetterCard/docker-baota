@@ -5,7 +5,7 @@
 #  compose 里的 test 只留 [CMD, /baota/healthcheck.sh] 一行，判据全部收口到本
 #  脚本：逻辑可以直接执行与测试，改判据不用动 compose。
 #
-#  三段判据，任一失败即非零退出（unhealthy）：
+#  判据（任一失败即非零退出 → unhealthy）：
 #    ① 持久化降级标记  /run/baota/degraded-critical 由 init.sh 在
 #                      关键目录持久化失败 / 只读降级时写入 —— 写入会静默丢失，
 #                      是本方案最危险的失效模式，必须在容器状态里直接可见。
@@ -13,7 +13,9 @@
 #                      满盘时 InnoDB 写坏会丢库、面板写配置会失败，必须在
 #                      崩溃前暴露。水位是动态的，所以不写标记文件、每次现查，
 #                      interval 30s 自动刷新，腾出空间后即转回 healthy。
-#    ③ 面板端口可达    端口可能被用户改掉，从 port.pl 现读；
+#    ③ 守卫装配在位    pyenv/bin/python3 -> /baota/shim（不可变面板）
+#    ④ 面板版本一致    面板代码版本 == /baota/VERSION（dev 构建跳过）
+#    ⑤ 面板端口可达    端口可能被用户改掉，从 port.pl 现读；
 #                      面板开 HTTPS 也能探到，http 失败再试 https。
 #
 #  注意：判据里绝不能出现面板进程名 —— bt 脚本会 ps|grep 到自己，
@@ -32,14 +34,12 @@
 # → 容器永远 unhealthy，而且现象与「磁盘真的满了」完全无法区分，
 # 是最难排查的一类故障
 # ------------------------------------------------------------------------------
-if [ -f /baota/defaults.env ]; then
-    . /baota/defaults.env
+if [ ! -f /baota/defaults.env ]; then
+    echo '❌ [health] 缺少运行期配置真源 /baota/defaults.env，镜像不完整' >&2
+    exit 1
 fi
-
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
-PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-DISK_MIN_AVAIL_MB="${DISK_MIN_AVAIL_MB:-1024}"
-DISK_MAX_USED_PCT="${DISK_MAX_USED_PCT:-95}"
+# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
+. /baota/defaults.env
 
 # 阈值必须是正整数：用户填错（空值 / 带单位）时退回默认，
 # 否则下面的 -lt / -ge 会报「integer expression expected」并让探活整体失败
@@ -76,6 +76,33 @@ done
 
 # ------------------------------------------------------------------------------
 # ③ 面板端口可达（--max-time 5 防止面板挂起时拖满 compose 的 10s 超时）
+#
+# 先做两段「不可变面板」的判据（它们比端口更重要：面板跑着不是镜像版本，
+# 意味着有人点过「更新」而守卫没兜住 —— 那会让持久层的库比代码新）：
+#   ④ pyenv 解释器仍指向 /baota/shim（守卫装配在位；上游改 pyenv 布局会失效）
+#   ⑤ 面板代码版本 == 镜像版本（本地 dev 构建没有真版本号时跳过）
+# ------------------------------------------------------------------------------
+_shim=$(readlink /www/server/panel/pyenv/bin/python3 2> /dev/null || true)
+if [ "${_shim}" != '/baota/shim' ]; then
+    echo "❌ [health] pyenv/bin/python3 未指向 /baota/shim（当前：${_shim:-无}），执行入口守卫未生效" >&2
+    exit 1
+fi
+
+_img=$(tr -d '[:space:]' < /baota/VERSION 2> /dev/null || true)
+case "${_img}" in
+    [0-9]*.[0-9]*.[0-9]*)
+        _cur=$(sed -n "s/.*g\.version *= *'\([0-9][0-9.]*\)'.*/\1/p" \
+               /www/server/panel/class/common.py 2> /dev/null | head -n1)
+        if [ "${_cur}" != "${_img}" ]; then
+            echo "❌ [health] 面板代码版本 ${_cur:-未知} ≠ 镜像版本 ${_img}（重建容器即回到镜像版本）" >&2
+            exit 1
+        fi
+        ;;
+    *) : ;;   # dev / unknown：本地构建，无法比较，跳过
+esac
+
+# ------------------------------------------------------------------------------
+# ⑥ 面板端口可达（--max-time 5 防止面板挂起时拖满 compose 的 10s 超时）
 #
 #    判定语义：探活只回答「面板 HTTP 服务是否活着」—— 任何非 5xx 的响应
 #    （200/302/401/403/404…）都证明 BT-Panel 进程在正常处理请求，判活通过；

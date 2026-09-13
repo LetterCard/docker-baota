@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  发布前健康检查的公共样板（被 core.sh / mounts.sh / upgrade.sh source）
+#  发布前健康检查的公共样板（被 core.sh / degrade.sh / upgrade.sh source）
 #
 #  三套检查脚本各自盯一个互不相关的失效面（功能完整性 / 挂载正确性 / 版本演进），
 #  但下面这些「跟 docker 打交道 + 输出格式」的样板原本是三份逐字重复的实现，
@@ -24,7 +24,7 @@
 #  日志约定：✅ 通过项；失败走 ::error::（GitHub Actions 会渲染成红色注解）
 # ==============================================================================
 
-# 配置真源：与镜像共用 shared/conf/defaults.env，不在脚本里再写一份硬编码。
+# 配置真源：与镜像共用 image/conf/defaults.env，不在脚本里再写一份硬编码。
 # 两边一旦漂移，表现是「CI 测过的和线上跑的不是同一套目录」，必须在这里对齐。
 # 默认值里可能含嵌套引用（如 PANEL_STATE_ROOT="${PERSIST_DATA_ROOT}/panel"），
 # sed 取值不会展开，expand_vars 用间接展开补一层；否则拿到的是字面量
@@ -43,7 +43,7 @@ expand_vars() {
 }
 
 read_default() {
-    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" shared/conf/defaults.env)"
+    expand_vars "$(sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" image/conf/defaults.env)"
 }
 
 pass() { echo "  ✅ $*"; }
@@ -61,6 +61,7 @@ fail() {
 # 而三套脚本都开着 set -u，引用未定义变量会直接中断退出
 cleanup() {
     [ -n "${CONTAINER:-}" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    [ -n "${CONTAINER_DUP:-}" ] && docker rm -f "$CONTAINER_DUP" >/dev/null 2>&1 || true
     [ -n "${VOLUME:-}" ]    && docker volume rm "$VOLUME" >/dev/null 2>&1 || true
     [ -n "${VOL_RO:-}" ]    && docker volume rm "$VOL_RO" >/dev/null 2>&1 || true
     [ -n "${WORK_ROOT:-}" ] && rm -rf "$WORK_ROOT" 2>/dev/null || true
@@ -90,7 +91,7 @@ logs_match() {
 }
 
 # ---------------------------------------------------------------------------
-# IMAGE 由调用方脚本（core/mounts/upgrade）在 source 本文件前赋值，
+# IMAGE 由调用方脚本（core/degrade/upgrade）在 source 本文件前赋值，
 # 单独检查本文件时 shellcheck 看不到，属跨文件误报
 # shellcheck disable=SC2154
 # 启动参数必须与 docker-compose.yml 保持一致，否则测的不是生产配置：

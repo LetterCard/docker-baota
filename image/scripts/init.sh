@@ -22,27 +22,27 @@ set -eu
 
 # ------------------------------------------------------------------------------
 # 配置真源：/baota/defaults.env（镜像自有，不在任何持久化目录内）。
-# 文件内部一律写成 ${VAR:-默认值}，保证「已存在的环境变量优先」。
+# ★ 只在这里取配置，脚本里不再写默认值副本 —— 副本必然漂移，而漂移的表现
+#   是「构建期按旧值建目录 / 运行期按旧值算路径」，离原因很远
 # ------------------------------------------------------------------------------
-if [ -f /baota/defaults.env ]; then
-    . /baota/defaults.env
+if [ ! -f /baota/defaults.env ]; then
+    echo '❌ [init][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整，拒绝启动' >&2
+    exit 1
 fi
+# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
+. /baota/defaults.env
 
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
-PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
+# init.sh 自己的运行参数（不属于配置真源）
 STAGE2="${STAGE2:-/baota/entrypoint.sh}"
 
-# 业务数据与面板状态：逐个 bind 到 data 下。
-# 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层，
-# 因此只有下面列出的子目录才需要绑定。
-WWW_DATA_SUBDIRS="${WWW_DATA_SUBDIRS:-wwwroot backup server/data}"
-PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
-PANEL_STATE_SUBDIRS="${PANEL_STATE_SUBDIRS:-data plugin}"
+# 面板目录（不在 defaults.env，因为它由官方安装脚本固定，全项目同此约定）
+# 与它的临时钉桩：挂 /www/server 的 overlay 之前先 bind 到这里，
+# 挂完再 bind 回面板目录，面板代码因此始终来自镜像层、不落持久化层
+PANEL_DIR="${PANEL_DIR:-/www/server/panel}"
+PANEL_ORIGIN="${PANEL_ORIGIN:-/run/baota/panel}"
 
-# 这些挂载点一旦持久化失败就是静默丢数据，必须让 healthcheck 可见。
-# 写的是「容器内路径」，与传给 is_critical 的判断值一致
-CRITICAL_DIRS="${CRITICAL_DIRS:-/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data}"
+# 业务数据与面板状态：逐个 bind 到 data 下（清单见 defaults.env）
+# 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层
 
 # Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
 # 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回
@@ -52,12 +52,9 @@ DOCKER_FILES="hosts resolv.conf hostname"
 # 可写性探测文件名（同时用于 lower 与 upper 两侧）
 PROBE=.persist-writable-probe
 
-# overlay 要求 workdir 与 upperdir 位于同一文件系统（内核硬性要求），
-# 所以 work 放在对应持久化层内、且必须与 upper 同盘。
-#
-# 各 overlay 的 workdir 形如 <STATE_DIR>/<目录>.work。内核挂载后会**在它里面再建一层
-# work**（即 <目录>.work/work）—— 那层是内核行为，省不掉；能省的只有外面那层容器目录，
-# 所以这里不再多套一层 work/，直接挂在 .baota 下（少一层、少一次重复命名）
+# overlay 要求 workdir 与 upperdir 同盘（内核硬性要求）：work 放在持久化层内的
+# .baota/<目录>.work。内核会在它里面再建一层 work（省不掉），详情见
+# docs/persistence.md「挂载原理」
 SYS_WORK_ROOT="${PERSIST_SYSTEM_ROOT}/.baota"
 DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
 DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
@@ -226,6 +223,9 @@ mount_persist() {
 #    /www/server/data          <- data/www/server/data      （MySQL）
 #    /www/server/panel/data    <- data/panel/data     （面板配置 / SQLite）
 #    /www/server/panel/plugin  <- data/panel/plugin   （插件）
+#    /www/server/panel/vhost   <- data/panel/vhost    （站点配置 / 证书 / 伪静态）
+#    /www/server/panel/ssl     <- data/panel/ssl      （面板自身 HTTPS 证书）
+#    /www/server/panel/config  <- data/panel/config   （面板设置）
 #  其余部分（/www/server/panel 的代码、pyenv、启动器）保持镜像层原样：
 #  不持久化、换镜像即整体更新 —— 这就是「不可变面板」。
 #
@@ -328,8 +328,24 @@ main() {
     done
 
     # ---- 2. 系统层 overlay 持久化 ----
-    #     面板（/www）不走 overlay：代码由镜像层提供，下一步只 bind 子目录
+    #     /www/server 也在这一层（组件、计划任务脚本、插件数据都在它下面），
+    #     但面板代码必须先钉在 /run 上、挂完 overlay 再 bind 回去 —— 见下面
     _failed=0
+
+    # 面板代码来自镜像层、不落持久化层：先把镜像里的面板目录 bind 到 /run，
+    # 等 /www/server 的 overlay 挂上后再 bind 回去（顺序反了装的就是镜像里那份
+    # 被 overlay 合并后的视图，面板内更新会写进持久化层，换镜像就升不了面板）
+    if [ -d "${PANEL_DIR}" ] && mkdir -p "${PANEL_ORIGIN}" 2> /dev/null; then
+        if mount -o bind "${PANEL_DIR}" "${PANEL_ORIGIN}" 2> /dev/null; then
+            log "面板代码已钉在 ${PANEL_ORIGIN}（挂 overlay 后 bind 回 ${PANEL_DIR}）"
+        else
+            warn "无法把 ${PANEL_DIR} bind 到 ${PANEL_ORIGIN}，本次面板代码会落进持久化层"
+            PANEL_ORIGIN=''
+        fi
+    else
+        PANEL_ORIGIN=''
+    fi
+
     for _dir in ${PERSIST_SYSTEM_DIRS}; do
         if ! mount_persist "${_dir}"; then
             _failed=1
@@ -338,6 +354,17 @@ main() {
             fi
         fi
     done
+
+    # 把面板代码 bind 回镜像那份：/www/server 其余内容（组件、cron 脚本、
+    # 插件数据）留在 overlay 的 upper 里持久化，面板目录本身则始终来自镜像
+    if [ -n "${PANEL_ORIGIN}" ]; then
+        if mount -o bind "${PANEL_ORIGIN}" "${PANEL_DIR}" 2> /dev/null; then
+            log "面板代码已 bind 回镜像层：${PANEL_DIR}（不落持久化层）"
+        else
+            warn "面板代码 bind 回 ${PANEL_DIR} 失败：面板代码可能落进持久化层"
+            mark_critical "${PANEL_DIR}: 面板代码未隔离出持久化层"
+        fi
+    fi
 
     # ---- 3. 业务数据与面板状态（逐子目录 bind）----
     mount_www_layer

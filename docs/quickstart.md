@@ -3,20 +3,19 @@
 ## 🐂 飞牛 NAS（fnOS）
 
 1. 打开「Docker」→「项目」→「新建项目」
-2. 项目名填 `baota`，把 `dockerfile/docker-compose.yml` 整段粘贴进去
+2. 项目名填 `baota`，把 `docker-compose.yml` 整段粘贴进去
 3. 把 `image:` 改成你自己的镜像名
 4. 点「立即构建」
 5. 查看首次登录信息：「容器」→ `baota` →「日志」，或命令行 `docker compose logs -f baota`
 
-数据会存放在 `dockerfile/docker-compose.yml` 同级的 `data/` 目录里，可以直接用飞牛的「文件管理」查看和备份。
+数据会存放在 `docker-compose.yml` 同级的 `data/` 目录里，可以直接用飞牛的「文件管理」查看和备份。
 `data/www/` 是站点、数据库与备份，`data/panel/` 是面板自己的配置与插件（你日常要管理的都在这两处）；
 `data/system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，一般不用翻）。
-混合挂载模式下系统层会落在 `data/` 之外的独立 `system/` 目录里。详见[持久化原理](persistence.md)。
 
 ## 🐧 其它 Linux 服务器
 
 ```bash
-cd dockerfile
+cd baota-docker          # 仓库根目录（docker-compose.yml 就在这里）
 # 改好 docker-compose.yml 里的 image 后
 docker compose up -d
 docker compose logs -f baota
@@ -76,7 +75,7 @@ fnOS 的 Web 管理端口是 **5666 / 5667**，且「设置 → 安全性」默�
 | `PANEL_SAFE_PATH` | 随机 8 位，见面板地址 |
 | `ROOT_PASSWORD` | 随机 12 位，见首次启动日志 |
 
-想自己指定就在 `dockerfile/docker-compose.yml` 的 `environment` 里取消注释填写。
+想自己指定就在 `docker-compose.yml` 的 `environment` 里取消注释填写。
 注意这个文件是要提交到 Git 的，口令写在这里等于公开；既要固定又要保密，
 请改用同目录的 `.env` 文件：
 
@@ -106,6 +105,7 @@ docker exec baota passwd root   # 改 root 口令
 ## 已知限制
 
 - **面板版本由镜像决定，不可变。** 面板代码来自镜像层、不持久化。注意：在面板里
-  点「更新」的写入是能成功的（落在容器可写层），restart 不会消失，但销毁重建后
-  即还原为镜像版本 —— 请勿依赖它。升级 / 回退面板请换镜像标签再
-  `docker compose up -d`（见[升级与迁移](upgrade.md)）。
+  点「更新」虽然会显示成功（文件写进了容器可写层），但**不会生效**：面板代码的每次
+  执行都先过执行入口守卫，发现版本与镜像不一致就用镜像副本换回去（见
+  [持久化原理](persistence.md#执行入口守卫不可变面板的兜底)）。升级 / 回退面板请换
+  镜像标签再 `docker compose up -d`（见[升级与迁移](upgrade.md)）。

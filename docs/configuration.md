@@ -1,7 +1,7 @@
 # ⚙️ 编排配置详解
 
-以 `dockerfile/docker-compose.yml` 为准，逐项说明每个配置项的用途、默认值与改法。
-该编排文件为两通道通用（沿用原 12.0.0 通道内容，仅 `image` 标签按通道不同）。
+以 `docker-compose.yml` 为准，逐项说明每个配置项的用途、默认值与改法。
+该编排文件对所有线通用，只有 `image` 标签（选哪条线、哪个版本）需要按需改。
 
 ---
 
@@ -11,7 +11,7 @@
 |---|---|---|---|
 | `name`（顶层） | `baota` | compose 项目名，决定命令作用范围与默认资源前缀 | 随意改，只要 `docker compose` 命令在本目录执行即可 |
 | 服务名（`services.baota`） | `baota` | `docker compose logs / exec` 后面跟的名字 | 改名后这些命令里的服务名同步改；与 `container_name` 互不影响 |
-| `image` | `bugseeker/baota:12.0.0` | 镜像与宝塔版本。**标签即版本号，12.0.0 通道没有 latest** | 升级见[升级与迁移](upgrade.md)；换成自己的镜像仓库同理 |
+| `image` | `bugseeker/baota:12.0.0` | 镜像与宝塔版本。**标签即版本号**：稳定线只发精确版本、最新正式线另有 `latest` | 升级见[升级与迁移](upgrade.md)；换线见[发布流程](release.md) |
 | `container_name` | `baota` | 容器名，`docker exec baota ...` 用的是它 | 改名后全文所有 `docker exec baota` 都要跟着改 |
 | `hostname` | `baota` | 容器内主机名，面板「终端」与日志里会显示 | 随意，无功能影响 |
 | `restart` | `unless-stopped` | 异常退出或 Docker 重启时自动拉起；手工 `docker stop` 后保持停止 | 想完全手动控制改成 `no`；想连手工停止也拉起改成 `always` |
@@ -67,9 +67,9 @@
 | `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc usr var root opt home srv 的 overlay 上层） |
 | `WWW_DATA_SUBDIRS` | `wwwroot backup server/data` | 业务子目录（相对 `/www`），逐个 bind 到 `data/www/<子目录>` |
 | `PANEL_STATE_ROOT` | `/data/panel` | 面板状态根目录 |
-| `PANEL_STATE_SUBDIRS` | `data plugin` | 面板状态子目录（相对 `/www/server/panel`），逐个 bind 到 `data/panel/<子目录>` |
+| `PANEL_STATE_SUBDIRS` | `data plugin vhost ssl config` | 面板状态子目录（相对 `/www/server/panel`），逐个 bind 到 `data/panel/<子目录>`：`data` 配置与 SQLite、`plugin` 插件、`vhost` 站点配置与证书、`ssl` 面板证书、`config` 面板设置 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（面板代码不在这里，它属于镜像） |
-| `CRITICAL_DIRS` | `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录。写的是**容器内挂载点路径**（`www` 不再整体挂载，写顶层目录名会永远对不上） |
+| `CRITICAL_DIRS` | `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data /www/server/panel/vhost /www/server/panel/ssl /www/server/panel/config` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录。写的是**容器内挂载点路径**（`www` 不再整体挂载，写顶层目录名会永远对不上） |
 | `DISK_MIN_AVAIL_MB` | `1024` | 健康检查的磁盘告警线：数据层或系统层可用空间低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 同上：已用百分比达到此值即 unhealthy |
 | `AUTO_BACKUP_KEEP` | `3` | 升级 / 降级前自动快照的保留份数，`0` 关闭 |
@@ -78,9 +78,9 @@
 > 想提前预警就调大，例如 `DISK_MIN_AVAIL_MB: 10240`（10GB）。
 > 改这两个值不需要重建镜像，重建容器即可生效。
 
-> 数据层与系统层可以挂到同一个宿主机目录（单挂 `./data:/data`，容器内数据层根就是
-> `/data`、系统层根在 `/data/system`），也可以各挂各的（混合模式，见下）。
-> 两种方式的容器内路径完全一致，备份 / 迁移命令无需区分。
+> 只支持一种挂载方式：单挂 `./data:/data`（容器内数据层根是 `/data`、系统层根在
+> `/data/system`）。历史上还支持过「两层各挂一个目录」的混合模式，已随单目录
+> 架构定案移除 —— 少一套要维护、要测试的布局。
 
 ## 持久化与数据目录
 
@@ -94,33 +94,16 @@
 compose 文件所在目录）或绝对路径。唯一硬要求：它必须落在 ext4 / btrfs / xfs 上
 （飞牛存储池就是，直接可用）。原理详见[持久化原理](persistence.md)。
 
-宿主机的目录结构（与容器内路径一一对应）：
-
-```
-data/                         （./data:/data，host 侧一目录）
-├── www/                      ← 业务数据：逐子目录 bind（宿主机可直接 SMB 读写）
-│   ├── wwwroot/                  ← 站点 data/www/wwwroot ↔ /www/wwwroot
-│   ├── backup/                   ← 备份 data/www/backup ↔ /www/backup
-│   └── server/data/              ← MySQL data/www/server/data ↔ /www/server/data
-├── panel/                    ← 面板状态：逐子目录 bind
-│   ├── data/                     ← 面板配置 / SQLite ↔ /www/server/panel/data
-│   └── plugin/                   ← 插件            ↔ /www/server/panel/plugin
-├── system/                   ← 系统层（overlay upper）
-│   ├── etc usr var root opt home srv   ← 各目录 overlay upper
-│   └── .baota/                   ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
-└── .baota/                   ← 数据层状态（并发锁）
-```
-
-`data/system/.baota/` 是项目元数据目录（隐藏），备份时用一条
-`--exclude='.baota'` 全部排除（`baota-backup` 已自动排除）；`data/.baota/`
-是数据层状态（并发锁），同样被排除：
+宿主机目录与容器内路径一一对应，完整结构见
+[持久化原理](persistence.md#data-的目录模型与容器内路径一一对应)。这里只列出
+配置时需要知道的元数据目录（隐藏、备份时自动排除）：
 
 | 文件/目录 | 用途 |
 |---|---|
-| `<目录>.work/work` | overlay 内部工作目录，每次启动清理重建，只有几十 KB |
-| `lock` | 持久化层独占锁。同一份数据不允许两个容器同时挂载，锁由内核持有、容器死亡自动释放 |
-| `image-version` | 上次启动时的镜像版本，用于检测升级 / 降级并触发自动快照 |
-| `boot-history.log` | 持久化降级的启动历史，只在出问题时才追加 |
+| `data/system/.baota/<目录>.work/work` | overlay 内部工作目录，每次启动清理重建，只有几十 KB |
+| `data/system/.baota/lock`、`data/.baota/lock` | 持久化层独占锁。同一份数据不允许两个容器同时挂载，锁由内核持有、容器死亡自动释放 |
+| `data/system/.baota/image-version` | 上次启动时的镜像版本，用于检测升级 / 降级并触发自动快照 |
+| `data/system/.baota/boot-history.log` | 持久化降级的启动历史，只在出问题时才追加 |
 
 ## 自动快照（升级前）
 
@@ -131,20 +114,9 @@ data/                         （./data:/data，host 侧一目录）
 |---|---|---|
 | `AUTO_BACKUP_KEEP` | `3` | 快照保留份数，`0` 关闭快照 |
 
-**为什么只快照这一个目录**（实测确证，见[持久化原理](persistence.md#换镜像后会发生什么)）：
-
-站点 `/www/wwwroot`、MySQL 数据 `/www/server/data`、备份 `/www/backup` 都是
-**bind 目录**（源在 `data/www/` 下），换镜像根本不经过它们，动不到。
-会变的是面板代码与默认配置（来自镜像层），换镜像自动换成新版。于是升级后唯一
-「对不上」的地方就是 **新版面板代码 + 旧版面板数据库**（SQLite，升级时可能做
-schema 迁移）。快照它，升级失败就能回到「旧代码 + 旧库」的原始组合。
-
-| 目录 | 换镜像时 | 需要快照吗 |
-|---|---|---|
-| `/www/server/panel/` 代码 | 来自新镜像 lower，自动更新 | 不需要（换回旧镜像即可） |
-| `/www/server/panel/data/` | 保留旧版（upper），**被新版代码读取** | **需要** ← 唯一风险点 |
-| `/www/wwwroot` | 镜像里为空，lower 更新不碰它 | 不需要 |
-| `/www/server/data` | 镜像里为空（装 MySQL 才有），不碰 | 不需要 |
+**为什么只快照这一个目录**：站点 / MySQL / 备份都是 bind 目录，换镜像动不到；
+唯一「对不上」的是「新版面板代码 + 旧版面板数据库」——快照它就能回到旧组合。
+完整推导见[持久化原理](persistence.md#换镜像后会发生什么)。
 | `/www/backup` | 只存运行期产物，不碰 | 绝对不能（会自包含） |
 
 > 补充：上面说的「MySQL 数据不碰」有一个例外 —— 如果新镜像跨了 MySQL 大版本
@@ -194,7 +166,7 @@ Docker 默认**不给容器设任何资源上限**。MySQL、php-fpm 内存一�
 
 | 配置项 | 默认值 | 用途 | 如何修改 |
 |---|---|---|---|
-| `healthcheck.test` | `[CMD, /baota/healthcheck.sh]`，三段判据收口在镜像内脚本里：持久化降级标记（critical）、`PERSIST_DATA_ROOT` 与 `PERSIST_SYSTEM_ROOT` 的磁盘水位（任一可用 < `DISK_MIN_AVAIL_MB` 或已用 ≥ `DISK_MAX_USED_PCT`）、面板端口可达（现读 `port.pl`，http 失败回退 https）。两个持久化根的路径与阈值都从 `/baota/defaults.env` 现读，改了不会失效 | 供 `docker compose ps` 与编排工具判断容器是否就绪；磁盘将满、持久化降级这类「还没崩但快了」的状态也会以 unhealthy 直接暴露在 Status 列 | 一般不用改。要调判据直接编辑镜像里的 `/baota/healthcheck.sh`（可单独执行测试）。**探活命令里绝不能出现面板进程名**，否则会被 bt 脚本里「ps 配合 grep」的判定误认为「面板已在运行」而跳过启动 |
+| `healthcheck.test` | `[CMD, /baota/healthcheck.sh]`，判据收口在镜像内脚本里：持久化降级标记（critical）、两个持久化根的磁盘水位（任一可用 < `DISK_MIN_AVAIL_MB` 或已用 ≥ `DISK_MAX_USED_PCT`）、执行入口守卫装配（`pyenv/bin/python3` → `/baota/shim`）、面板代码版本 == 镜像版本、面板端口可达（现读 `port.pl`，http 失败回退 https）。路径与阈值都从 `/baota/defaults.env` 现读，改了不会失效 | 供 `docker compose ps` 与编排工具判断容器是否就绪；磁盘将满、持久化降级、面板被改动过这类「还没崩但不对」的状态都会以 unhealthy 直接暴露在 Status 列 | 一般不用改。要调判据直接编辑镜像里的 `/baota/healthcheck.sh`（可单独执行测试）。**探活命令里绝不能出现面板进程名**，否则会被 bt 脚本里「ps 配合 grep」的判定误认为「面板已在运行」而跳过启动 |
 | `interval` | `30s` | 检查间隔 | 想更快发现问题可调小，代价是多一点开销 |
 | `timeout` | `10s` | 单次检查超时 | 机器很慢时可调大 |
 | `retries` | `5` | 连续失败几次才标记 unhealthy | 配合 `interval`，约 2.5 分钟后判定 |

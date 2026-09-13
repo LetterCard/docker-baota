@@ -10,8 +10,8 @@
 
 # 本项目的解释器约定（方言由各文件自己决定，rc 里不写 shell= 指令——
 # 实测 rc 级 shell=bash 会盖过「不被识别的 shebang」，让 busybox 脚本按 bash 检查）：
-#   init-mounts.sh  → busybox sh（POSIX，文件内有 shellcheck shell=sh 指令，
-#                      因为 #!/busybox sh 这个 shebang shellcheck 不认识）
+#   init.sh        → busybox sh（POSIX，文件内有 shellcheck shell=sh 指令，
+#                    因为 #!/busybox sh 这个 shebang shellcheck 不认识）
 #   healthcheck.sh  → /bin/sh（POSIX，shebang 可被识别）
 #   其余            → bash
 

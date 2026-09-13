@@ -16,8 +16,10 @@
 #    /baota/healthcheck.sh     健康检查入口
 #    /baota/backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 #    /baota/defaults.env       运行期配置真源
-#    /baota/init.sh     阶段 0
+#    /baota/init.sh            阶段 0
 #    /baota/entrypoint.sh      阶段 1
+#    /baota/guard.sh     执行入口守卫（不可变面板）
+#    /baota/shim     面板 pyenv 解释器的包装
 #    /etc/systemd/system/btpanel.service
 #
 #  日志约定：[build] 普通信息，[build][WARN] 告警，[build][ERROR] 错误。
@@ -30,20 +32,18 @@ set -euxo pipefail
 # 是持久化目录，还原备份时旧副本会反过来屏蔽新镜像）。
 BAOTA_DIR=/baota
 
-# ---- 配置真源：/baota/defaults.env（构建期已由 Dockerfile COPY 到位）----
-# 构建期同样从这里取值，不再自己抄一份默认值。
-# 之前这里的兜底默认带 www，而真源不含 www —— 结果构建期在镜像里建出了
-# /data/system/www 空目录（混合挂载模式下用户会看到 system/www，且容易误以为
-# 站点数据在那）。这正是 defaults.env 头注释警告的「四处各写一份，改一处漏一处」。
-if [ -f "${BAOTA_DIR}/defaults.env" ]; then
-    . "${BAOTA_DIR}/defaults.env"
-fi
+# 面板安装路径（官方安装脚本固定在 /www/server/panel，全项目同此约定）
+PANEL_DIR=/www/server/panel
 
-# ---- 入参兜底：仅在 defaults.env 缺失时生效，值与真源保持一致 ----
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
-PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
-PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
+# ---- 配置真源：/baota/defaults.env（构建期已由 Dockerfile COPY 到位）----
+# 构建期也从这里取值，不再抄一份默认值：历史上就是「真源改了、兜底没改」导致
+# 镜像里凭空建出 data/system/www 空目录（用户会以为站点数据在那）
+if [ ! -f "${BAOTA_DIR}/defaults.env" ]; then
+    echo '❌ [build][ERROR] 缺少运行期配置真源 /baota/defaults.env，构建中止' >&2
+    exit 1
+fi
+# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
+. "${BAOTA_DIR}/defaults.env"
 
 log()  { echo "🔨 [build] $*"; }
 warn() { echo "⚠️ [build][WARN] $*" >&2; }
@@ -55,7 +55,7 @@ warn() { echo "⚠️ [build][WARN] $*" >&2; }
 #  不需要禁用更新、不需要保存启动器副本、也不需要 reset-panel 兜底
 # ==============================================================================
 setup_script_perms() {
-    log '1/4 设置运行期脚本权限'
+    log '1/5 设置运行期脚本权限'
 
     chmod 0755 "${BAOTA_DIR}/healthcheck.sh"
 }
@@ -64,13 +64,13 @@ setup_script_perms() {
 #  2. 开机自启与 systemd 复位
 # ==============================================================================
 setup_systemd() {
-    log '2/4 开机自启与 systemd 复位'
+    log '2/5 开机自启与 systemd 复位'
 
     chmod 0644 /etc/systemd/system/btpanel.service
 
     # 官方脚本在 Debian 上用 update-rc.d 注册 SysV 服务。systemd-sysv-generator
     # 本可据此自动生成 bt.service，但这里改用自建 unit，把启动参数显式固化下来
-    # （细节见 shared/conf/btpanel.service）。清掉 rc?.d 链接，
+    # （细节见 image/conf/btpanel.service）。清掉 rc?.d 链接，
     # 避免两套机制重复拉起面板。
     rm -f /etc/rc*.d/[SK][0-9]*bt
     systemctl enable btpanel ssh cron rsyslog
@@ -97,7 +97,7 @@ setup_systemd() {
 #  3. 安装运行期脚本、版本信息与持久化目录骨架
 # ==============================================================================
 install_runtime_files() {
-    log '3/4 安装运行期脚本、版本信息与持久化目录骨架'
+    log '3/5 安装运行期脚本、版本信息与持久化目录骨架'
 
     chmod 0755 "${BAOTA_DIR}/init.sh" "${BAOTA_DIR}/entrypoint.sh"
 
@@ -125,13 +125,69 @@ install_runtime_files() {
 }
 
 # ==============================================================================
-#  4. 移除构建期脚本
+#  4. 执行入口守卫：包装 pyenv 解释器 + 生成镜像代码副本
+#
+#  背景与原理见 image/scripts/guard.sh 的头部注释，这里只做装配：
+#    1) pyenv/bin/python-real = 真解释器；python / python3 = 指向
+#       /baota/shim 的符号链接（面板的每一次 python 执行都会先过守卫）
+#    2) /baota/origin = 面板目录的硬链接副本（cp -al）：内容在镜像层里
+#       只存一份（不增加拉取体积），运行期对面板目录的写入被 overlay copy-up
+#       隔离，副本始终保持镜像状态，作为「换回镜像版本」的来源
+#
+#  装配失败不阻断构建：上游若改掉 pyenv 布局，守卫只是失效，面板仍按上游默认
+#  行为运行；这种情况由发布门禁 core.sh 的守卫检查（A15）拦下，不会静默上线
+# ==============================================================================
+setup_guard() {
+    log '4/5 装配执行入口守卫（解释器包装 + 镜像代码副本）'
+
+    chmod 0755 "${BAOTA_DIR}/guard.sh" "${BAOTA_DIR}/shim"
+
+    if [ ! -x "${PANEL_DIR}/pyenv/bin/python3" ]; then
+        warn "未找到 ${PANEL_DIR}/pyenv/bin/python3，跳过守卫装配（面板按上游默认行为运行）"
+        return 0
+    fi
+
+    # 真解释器：解析 python3 的最终目标。必须在包装之前解析，否则会自我引用
+    local real
+    real=$(readlink -f "${PANEL_DIR}/pyenv/bin/python3" 2> /dev/null || true)
+    if [ -z "${real}" ] || [ ! -x "${real}" ]; then
+        warn "无法解析 pyenv 真解释器（${PANEL_DIR}/pyenv/bin/python3），跳过守卫装配"
+        return 0
+    fi
+    case "${real}" in
+        *shim)
+            warn "pyenv 解释器已指向 shim（重复装配），跳过守卫装配"
+            return 0
+            ;;
+    esac
+    ln -sfn "${real}" "${PANEL_DIR}/pyenv/bin/python-real"
+    ln -sfn "${BAOTA_DIR}/shim" "${PANEL_DIR}/pyenv/bin/python"
+    ln -sfn "${BAOTA_DIR}/shim" "${PANEL_DIR}/pyenv/bin/python3"
+
+    # 镜像代码副本。必须在解释器包装完成之后生成：副本里包含包装后的布局，
+    # 守卫恢复后 pyenv 依然是「python → wrapper」的形态
+    rm -rf "${BAOTA_DIR}/origin"
+    cp -al "${PANEL_DIR}" "${BAOTA_DIR}/origin"
+
+    # 自检（失败只告警：坏镜像由发布门禁拦下，不在构建期制造假成功）
+    test -x "${PANEL_DIR}/pyenv/bin/python-real" \
+        || warn 'python-real 缺失，守卫将在解释器回退路径下工作'
+    test -s "${BAOTA_DIR}/origin/class/common.py" \
+        || warn "镜像代码副本不完整：${BAOTA_DIR}/origin/class/common.py 缺失"
+    [ "$(readlink "${PANEL_DIR}/pyenv/bin/python3")" = "${BAOTA_DIR}/shim" ] \
+        || warn 'pyenv/bin/python3 未指向 shim，守卫不会生效'
+
+    log "守卫已装配（镜像版本 $(cat "${BAOTA_DIR}/VERSION" 2> /dev/null || echo unknown)）"
+}
+
+# ==============================================================================
+#  5. 移除构建期脚本
 #
 #  三个阶段脚本只在构建期有用，删掉以免出现在运行期镜像里。
 #  镜像体积不会因此减小（分层特性：只新增 whiteout），这里求的是运行期干净。
 # ==============================================================================
 drop_build_scripts() {
-    log '4/4 移除构建期脚本'
+    log '5/5 移除构建期脚本'
 
     rm -rf /opt/baota/build
 }
@@ -143,6 +199,7 @@ main() {
     setup_script_perms
     setup_systemd
     install_runtime_files
+    setup_guard
     drop_build_scripts
 }
 

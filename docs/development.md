@@ -13,19 +13,18 @@ baota-docker/
 │   ├── README.md              文档索引
 │   ├── quickstart.md          快速开始、端口、首次登录凭据
 │   ├── persistence.md         持久化原理、候选方案、硬约束
-│   ├── alternatives.md        方案选型：overlay vs bind mount
 │   ├── configuration.md       compose 逐项配置详解
 │   ├── backup.md              备份与恢复
 │   ├── upgrade.md             镜像升级、回滚、跨机器迁移
 │   ├── operations.md          运维手册
 │   ├── faq.md                 常见问题
 │   ├── development.md         本文件
-│   └── release.md             两个发布通道与 CI 工作流
+│   ├── release.md             通道声明表、发布流水线、每日巡检
+│   └── history.md             旧版本变更记录（从 CHANGELOG 归档）
 │
 ├── skills/                    AI 编程助手的技能包
-│   ├── README.md              各工具目录的用途说明
-│   ├── codebuddy/             CodeBuddy 的 skill
-│   └── trae/                  Trae 的 skill
+│   ├── README.md              用途说明（只维护一份，按工具放入各自目录即可）
+│   └── baota-docker/          通用 skill（Codex / CodeBuddy / Trae 共用同一份）
 │
 ├── shared/                    两个通道共用
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
@@ -39,33 +38,92 @@ baota-docker/
 │       ├── init.sh     阶段 0：并发锁 + overlay 持久化
 │       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
+│       ├── guard.sh           执行入口守卫（版本不一致就换回 /baota/origin 副本）
+│       ├── shim               pyenv 解释器包装（每次执行都先过守卫）
 │       └── backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 │
-├── dockerfile/docker-compose.yml              共享编排文件（两通道通用）
-├── dockerfile/12.0.0/                         12.0.0 通道：Dockerfile / VERSION
-├── dockerfile/13.0.0/                        13.0.0 通道：Dockerfile / VERSION
+├── image/Dockerfile                      唯一的一份 Dockerfile（通道差异由 build-arg 传入）
+├── image/channels.conf                   ★ 通道声明表（12/13 的脚本地址成对排列）
+├── docker-compose.yml              编排文件（只挂一个 data 目录）
+├── image/versions/12/VERSION                  各线「已发布」版本（发布流水线回写）
+├── image/versions/13/VERSION
 └── .github/
     ├── reports/                 CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
     ├── scripts/
     │   ├── report.py       把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
     │   ├── check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
     │   ├── drift/           漂移检测脚本（目录漂移）
-    │   └── lint/            配置真源一致性检查（make lint 调用：defaults.env vs 各脚本兜底）
-    └── workflows/                 两个通道的构建发布 + 每日巡检 + 漂移检测工作流
+    │   └── lint/            配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
+    └── workflows/
+        ├── build.yml        构建发布（一份流水线跑所有通道，矩阵从 channels.conf 生成）
+        ├── check.yml        每日巡检已发布镜像（矩阵：各通道并行）
+        └── drift.yml        漂移检测（只监测，不发布）
 ```
 
 ### 关键约定
 
-- **构建上下文是仓库根**：`docker build -f dockerfile/12.0.0/Dockerfile .`
+- **构建上下文是仓库根，Dockerfile 只有一份**：`docker build -f image/Dockerfile .`
+  通道参数（安装脚本地址 / 基础镜像 / 版本）从 `image/channels.conf` 读
 - **运行期脚本一律放 `/baota`**。它不属于任何持久化目录，永远跟随当前镜像。
   旧版放 `/opt/baota`，而 `/opt` 是持久化目录——还原备份时旧脚本副本会反过来屏蔽新镜像
+- **面板代码的执行入口只有一个**：pyenv 解释器。`image/build/services.sh` 的
+  `setup_guard` 把 `pyenv/bin/{python,python3}` 指向 `/baota/shim`、
+  真解释器挪到 `python-real`，并生成 `/baota/origin` 硬链接副本。
+  改这块前先读 `image/scripts/guard.sh` 的头部注释：包装必须 fail-open、
+  恢复必须「只覆盖不删除」、执行真解释器必须用 **venv 内的路径**（用解析后的
+  `/usr/bin/python3.x` 会丢 venv）
 - **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` /
-  `CRITICAL_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `shared/conf/defaults.env`，
+  `CRITICAL_DIRS` / `AUTO_BACKUP_KEEP` 的唯一真源是 `image/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
   `check/` 下的三套检查脚本也从该文件解析，不再硬编码一份
-- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]`
+- **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]` / `[guard]`
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。
   改告警文案不会影响 CI 门禁
+
+### 注释与文档规范
+
+这套规范的目的只有一个：**同一段道理只写一遍**。重复写的地方必然漂移
+（历史上出现过「文档说证书不会丢、代码里没持久化」「`BY_DESIGN` 早就不存在
+但文档还在写」这类问题）。
+
+**文件头注释**（所有脚本/工作流/配置，统一四段，总长控制在 20 行内）：
+
+```
+# 一句话：这个文件是什么（做哪一件事）
+#
+# 为什么：非显然的取舍/设计理由 —— 超过三行的推导写进 docs/，这里留一行指针
+#
+# 红线：改这个文件必须遵守的不变式（没有就省略）
+#
+# 相关：docs/xxx.md#锚点
+```
+
+**正文注释**只写「为什么」，不写「是什么」（代码本身说明是什么）；踩过的坑
+要写清楚**症状 + 原因**（这是回归防线，例如「`exec 9> f 2>/dev/null` 会把整个
+脚本的 stderr 永久重定向」）。
+
+**文档分工**（一个主题只有一处详解）：
+
+| 位置 | 放什么 |
+|---|---|
+| `README.md` | 入口：是什么、怎么跑、三条不变式摘要、发布通道表；细节一律给链接 |
+| `docs/persistence.md` | 持久化的唯一详解（目录模型、守卫、方案选型、硬约束） |
+| `docs/configuration.md` | compose / 环境变量逐项说明 |
+| 其它 `docs/*.md` | 各自专题（备份 / 升级 / 运维 / 排障 / 发布 / 开发） |
+| `skills/baota-docker/` | 给 AI 助手的索引与红线，只引用 docs，不复述正文 |
+| `CHANGELOG.md` | 用户可见变更（只留最近 1 个版本）；更早的进 `docs/history.md` |
+
+**术语表**（统一叫法，避免同义混用）：
+
+| 术语 | 含义 |
+|---|---|
+| 线 / 通道 | 一条跟进上游的发布流水线；标识形如 `12_version`，显示名 `12.x`（见 `image/channels.conf`） |
+| 系统层 | `/data/system` 下以 overlay 承接的目录（`etc usr var root opt home srv`、`www/server`） |
+| 业务层 | `/data/www` 下 bind 直通的用户数据（站点 / 备份 / MySQL / 回收站） |
+| 面板状态 | `/data/panel` 下 bind 直通的面板自身状态（`data plugin vhost ssl config`） |
+| 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
+| 守卫 / 垫片 | `guard.sh`（执行入口守卫）与 `shim`（pyenv 解释器包装） |
+| 镜像副本 | `/baota/origin`：构建期生成的硬链接副本，守卫用它把代码换回镜像版本 |
 
 ## 漂移检测
 
@@ -93,26 +151,32 @@ baota-docker/
 
 维护要点（改上游相关代码时同步）：
 
-- 目录集合有两份，都在 `.github/scripts/drift/install.sh`：`KNOWNS`（持久化覆盖，
-  与 defaults.env 的 `PERSIST_SYSTEM_DIRS` 对应）与 `BY_DESIGN`（按设计不持久化，
-  目前只有 `www` —— 面板代码与自带组件，换镜像即重建）。新增持久化目录时同步
-  `KNOWNS`；新出现「刻意不持久化」的顶层目录时加进 `BY_DESIGN`，否则门禁会变成常亮的红灯
+- 目录集合只有一份：`.github/scripts/drift/install.sh` 的 `KNOWNS`，对应
+  `defaults.env` 的 `PERSIST_SYSTEM_DIRS`（现在含 `www/server`）。新增系统层持久化
+  目录时同步它
+- `/www` 刻意**不**计入 `KNOWNS`：它按子路径分别处理（`www/server` overlay、业务目录与
+  面板状态 bind、站点日志 `/www/wwwlogs` 按设计不持久化），装前装后对比时仍然按
+  「未覆盖」报警，由人确认新出现的子路径该不该持久化 —— 这是有意的常亮项，不是假红
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
-- 两通道面板源码包可用 `bash .github/scripts/drift/versions.sh [stable|release]` 真装后抓取分析
+- 要摸清上游把数据写到哪：看每日漂移检测的报告；需要更细的现场时按
+  `.github/scripts/drift/install.sh` 的方式在一次性容器里真装一遍再比对
 
 ## 面板版本策略
 
 **面板版本由镜像决定，不可变。**
 
-项目的核心保证只有一个：**销毁容器重建后，建站数据、面板配置、插件与系统环境
-（`/etc` `/usr` `/var`…）全部还在**（已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、
-面板口令与数据库不变）。唯一例外是面板里装的组件（PHP / nginx / MySQL…）——
-它们在容器可写层，重建后要重装，见[持久化原理](persistence.md)。
+项目的核心保证只有一个：**销毁容器重建后，建站数据、面板配置、插件、面板里装的组件
+（PHP / nginx / MySQL…）与系统环境（`/etc` `/usr` `/var`…）全部还在**，不需要重装
+任何东西（已对 12.0.0 / 13.0.0 端到端实测：面板口令与数据库不变）；组件与插件数据
+的持久化由 `/www/server` 这层 overlay 承担，见[持久化原理](persistence.md)。
 
-面板代码来自镜像层、不持久化，所以：
+面板代码来自镜像层、不持久化，且**面板内更新不会生效**：
 
-- 面板内更新的写入落在容器可写层，销毁重建后即还原为镜像版本（不部署只读
-  拦截，避免重启「禁用更新补丁」那套对抗上游的跟踪）；
+- 面板代码的每一次执行都先过执行入口守卫（`image/scripts/guard.sh`），
+  发现代码版本与镜像不一致就用镜像里的硬链接副本换回去 —— 不做只读挂载、
+  也不跟踪上游脚本名与执行路径，因此不存在「禁用更新补丁」那套维护；
+- 由此得到的性质：面板的 `init_db` 永远由镜像版本代码执行，持久层的库不可能
+  「比代码新」（否则会出现「库被新版迁移、代码又回退」的降级组合）；
   升级 / 回退面板 = 换镜像标签，不需要 `reset-panel`；
 - Python 运行环境：由官方安装脚本决定，本项目不再干预（已移除 12.0.0 通道的
   构建期 py3.13 预升 `UPGRADE_PY313`）。13.0.0 出厂即 3.13.14；
@@ -132,7 +196,9 @@ baota-docker/
 
 ```bash
 make build CHANNEL=12.0.0        # 等价于：
-# docker build -f dockerfile/12.0.0/Dockerfile -t baota:dev .
+# （make build 会自己从 channels.conf 取参数，等价于：）
+# docker build -f image/Dockerfile \
+#   --build-arg INSTALL_URL=<见 channels.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
 
 make up CHANNEL=12.0.0           # 起容器
 make logs CHANNEL=12.0.0         # 看日志
@@ -162,7 +228,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 
 ## 🧩 架构支持
 
-**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（20 项功能检查 +
+**amd64 与 arm64 都已发布**，两者都跑通了完整的发布前检查（功能检查 +
 挂载与降级场景 + 升级与降级路径，含容器重建后的持久化验证）。
 拉取时 Docker 会自动选择匹配的架构，无需指定。
 
@@ -204,31 +270,31 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 发布前共三套检查，覆盖不同的失效面：
 
-### ① `check/core.sh` —— 功能检查，两阶段共 20 项（A0–A14 + B0–B4）
+### ① `check/core.sh` —— 功能检查（A0–A15 + B0–B4）
 
-**A 阶段（全新数据卷，A0–A14）**
+**A 阶段（全新数据卷，A0–A15）**
 systemd 就绪 / overlay 挂载数与可写性 / `/tmp` 未被 tmpfs 化 /
 生产 healthcheck 脚本 / 关键文件路径 / pyenv 模块 /
 面板与任务双进程 / 安全入口 / 版本号 / 首启随机凭据 / 写入落盘 / 开机自启 /
-防火墙关闭 / SSH 与 bt 命令 / 备份工具 /
-A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make / libtool，不装 PHP）
+**并发锁（同卷第二实例必须被拦下）** / 防火墙关闭 / SSH 与 bt 命令 / 备份工具 /
+A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make / libtool，不装 PHP）/
+A15 不可变面板守卫（解释器包装 + 硬链接镜像副本 + 改写代码后能否换回镜像版本）
 
 > A14 只做工具链的零网络存在性断言，不临时安装 PHP；真正的
 > 「装 PHP + 编译扩展」端到端测试在日巡检 `published.sh` 里跑
 > （在已发布的纯净镜像上真编译并加载最小扩展）。
 
+> A15 是「面板内更新不生效、库不可能比代码新」的守卫：把 `class/common.py` 的版本
+> 改写成假版本，再随便跑一次 pyenv python，断言代码被换回镜像版本。
+
 **B 阶段（销毁容器后用同一个卷重建）**
 数据不丢 / 不会二次初始化 / 无持久化降级记录 / 面板自动恢复运行
 
-### ② `check/mounts.sh` —— 挂载方式与降级场景
+### ② `check/degrade.sh` —— 挂载方式与降级场景
 
 功能检查全程只用「命名卷 + 单挂」一种挂载方式，这套补上它测不到的两类场景：
 
-**A 阶段（混合挂载：`./data:/data` + `./system:/data/system`）**
-两层目录在宿主机上各归各位 / 系统层无多余的 `www` 目录（构建期漂移回归）/
-写入落点正确 / 重建后不丢数据
-
-**B 阶段（只读持久化根）**
+**唯一场景（只读持久化根）**
 必须写 `degraded-critical`、健康检查必须判 unhealthy ——
 「挂载成功但写入静默丢失」是本方案最危险的失效模式，这条用例盯住它
 
@@ -243,12 +309,20 @@ A14 PHP 扩展编译工具链（零网络存在性断言：autoconf / gcc / make
 **降级分支（记录改成更高版本）** 识别为降级 / 生成快照 /
 **不阻断启动**（出故障时能起来比什么都重要）
 
+### ④ 每日巡检 `check/published.sh` —— 已发布镜像
+
+只做三件**只有线上镜像才需要**的事：拉取镜像、留一段脱敏后的首启日志、
+在真镜像上跑一次 PHP 扩展「安装 + 编译 + 加载」（要联网装 php-dev，且不能
+污染推送前的候选镜像）。其余场景**复用上面三套门禁脚本** ——
+同一件事只留一份断言，避免两处漂移（历史上 published 里的面板状态路径、
+overlay 期望数都曾与真实布局不一致，产出假红）。
+
 ## ➕ 改代码时的注意事项
 
-- `shared/scripts/init.sh` 由 **busybox sh** 执行，只能用 POSIX 语法。
+- `image/scripts/init.sh` 由 **busybox sh** 执行，只能用 POSIX 语法。
   函数内的「局部变量」统一用下划线前缀（`_dir` / `_upper` / `_work`）标示 ——
   busybox sh 的 `local` 不可靠，且不加前缀会覆盖调用方的循环变量
-- `shared/conf/defaults.env` 同时被 busybox sh 与 bash source，同样只能用 POSIX 语法
+- `image/conf/defaults.env` 同时被 busybox sh 与 bash source，同样只能用 POSIX 语法
 - 构建期脚本里**不能出现 `BT-Panel` 字面量**：`bt7.init` 用
   `ps aux | grep -E '(runserver|BT-Panel)'` 判断面板是否已在运行，
   匹配到 PID 1 就会误判 "already running" 而跳过启动。用 glob（`BT-P*`）绕开

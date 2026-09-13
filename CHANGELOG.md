@@ -3,102 +3,97 @@
 本项目用 [语义化版本](https://semver.org/lang/zh-CN/) 的思路记录变更。
 镜像版本跟随宝塔上游，与本文件无关；这里记录的是**本项目自身**的变化。
 
+> **维护约定**：本文件只保留「未发布」与最近 1 个已发布版本；
+> 更早的记录归档在 [docs/history.md](docs/history.md)（注意那里的目录名是当时的布局）。
+
 ---
 
 ## [未发布]
 
-### ♻️ 架构变更：不可变面板（immutable panel）
+### 🛡️ 不可变面板：执行入口守卫（面板内更新不生效，库不可能「比代码新」）
 
-持久化模型改为「面板代码不可变」：`/www/server/panel` 不再进持久化层，直接来自镜像层，
-换镜像即整体更新。业务数据与面板状态改为逐子目录 bind：
+面板代码不进持久化层，但容器可写层是可写的：在面板里点「更新」会把新代码写进容器层，
+而更新的最后一步必然重启面板（`init.sh` 的 `panel_start` → `$pythonV script/init_db.py init_db`），
+`init_db` 会用**当时磁盘上的代码**升级持久层的 SQLite —— 于是可能出现「库被新版代码迁移过、
+代码后来回退成镜像版本」的降级组合（宝塔不保证降级可用，已实测复现）。
 
-- 业务：`/www/wwwroot`、`/www/backup`、`/www/server/data` → `data/www/<子目录>`
-- 面板状态：`/www/server/panel/data`、`plugin` → `data/panel/<子目录>`
-- 系统层 `/etc /usr /var /root /opt /home /srv` 仍是 overlay upper（不变）
+新机制**不拦截写入，只拦截执行**（`image/scripts/guard.sh` + `shim`）：
 
-**升级面板 = 换镜像标签**。面板内「更新」的写入落在容器可写层：restart 不会
-消失、销毁重建后即还原为镜像版本，请勿依赖面板内更新。
+- 构建期（`image/build/services.sh` 的 `setup_guard`）：生成面板目录的**硬链接副本**
+  `/baota/origin`（内容只存一份，不增加拉取体积）；`pyenv/bin/python-real` 保留真解释器，
+  `pyenv/bin/{python,python3}` 指向 `/baota/shim`；
+- 运行期：面板代码的每一次执行都先过守卫 —— 代码版本与镜像一致就直接放行（常态零开销、
+  零写入）；不一致/读不到就用副本换回镜像版本（rsync，缺则 tar 回退），**新代码从未被执行**。
 
-### 🧹 随之移除的补丁（不再需要）
+于是：面板内点「更新」UI 仍显示成功但永不生效；`init_db` 永远由镜像版本代码执行，
+**持久层的库不可能「比代码新」**；面板被更新写到一半也会在下次启动前换回镜像版本。
+三条铁律：fail-open、恢复只覆盖不删除、exec 真解释器用 **venv 内路径**（用解析后的
+`/usr/bin/python3.x` 会丢 venv）。守卫装在 pyenv 解释器这一层而不是 `/etc/init.d/bt`：
+上游的 shell 升级脚本会重写后者（实测其内容），而更新包不含 `pyenv`。
 
-- `save_panel_launcher` / `refresh_panel_launcher`：启动器不再被 copy-up 锁进持久化层
-- `audit_panel_version`：面板版本恒等于镜像版本，无需每次启动读宝塔内部版本
-- `audit_persist_coverage`（含 `baseline-dirs.txt`）：持久化边界改为显式声明，
-  运行期不再巡检上游的数据落点
-- `make reset-panel`：代码不持久化，没有 upper 可重置
-- stable 通道构建期 py3.13 预升（`UPGRADE_PY313`）：面板用什么 Python 由官方安装
-  脚本决定，不再依赖宝塔内部的升级脚本
-- 日志体积防线（`journald` 上限 + `logrotate` 轮转）：应用层日志的轮转与清理由宝塔面板
-  内置机制负责，不再内置 journald 上限或 logrotate（`shared/conf/log/` 配置源与
-  `setup_log_limits` 一并移除，发布门禁 `core.sh` 中对应检查项也已移除）
+面板代码本身也做了隔离：`/www/server` 整层走 overlay 时，`init.sh` 在挂载前先把面板目录
+bind 到 `/run`、挂完再 bind 回来 —— 代码始终来自镜像、不落持久化层。
 
-### ⚠️ 行为变更
+### 💾 持久化补齐：面板状态、面板里装的东西、回收站
 
-- **升级面板 = 换镜像标签**；面板内「更新」的写入落在容器可写层、销毁重建后
-  还原为镜像版本（此前文档写为「写入被拦截」，实际从未实现只读拦截，本版澄清）
-- **备份包结构变化**：面板配置从 `system/panel/server/panel/data` 变为
-  `panel/data`。旧备份解开后需把 `system/panel/server/panel/data`
-  手动搬到 `panel/data` 才能被新版识别（详见 docs/upgrade.md）
-- 新增环境变量 `WWW_DATA_SUBDIRS` / `PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS`；
-  移除 `PASSTHROUGH_DIRS` / `PERSIST_DATA_DIRS` / `PANEL_UPPER_DIR`
-- **镜像不再预装 PHP**：改为预装完整编译工具链 + LNMP 各类 dev 库
-  （实测代价约 +160MB），PHP 及其扩展由用户在面板里运行期安装，镜像保持「纯净面板」
+- 面板状态新增 `vhost`（站点配置 / **SSL 证书** / 伪静态 / 反代 / 重定向）、
+  `ssl`（面板自身证书）、`config`（面板设置）：`PANEL_STATE_SUBDIRS` 默认变成
+  `data plugin vhost ssl config`，并纳入 `CRITICAL_DIRS`
+- **`/www/server` 整层 overlay**（upper 在 `data/system/www/server`）：面板里装的组件
+  （PHP / nginx / MySQL / redis…）、插件运行数据（`total` / `btwaf`…）、计划任务脚本
+  （`/www/server/cron`）在销毁重建、换镜像后都还在，**不用重装**；不按组件列清单
+- `/www/Recycle_bin`（面板回收站）纳入业务持久化；`panel-static`、`enterprise_backup`
+  在配置注释里明确为「按设计不持久化」
+- 健康检查新增两段判据：`pyenv/bin/python3` → `/baota/shim`（守卫在位）、
+  面板代码版本 == 镜像版本（不一致即 unhealthy）
 
-### 🐛 修复
+### 🧹 工程收敛：一份 Dockerfile、一份流水线、一张通道声明表
 
-- **PHP 扩展安装失败（Cannot find autoconf）**：面板里给 PHP 7.2 / 8.0 装扩展
-  （igbinary / zstd / redis 等）时，`phpize` 需要 `autoconf` 生成 configure 脚本，
-  而镜像基础层只装了运维工具、没有编译工具链——宝塔的扩展脚本会自带库依赖
-  （libzstd-dev 等）但不补工具链，于是全部扩展报
-  `Cannot find autoconf` 失败。**已把 `base.sh` 的依赖清单换成宝塔官方镜像
-  btpanel/btpanel 的那一套**（60+ 包：编译工具链 + LNMP 所需的各类 dev 库，
-  实测代价约 +160MB）——自己挑包必然漏，采用官方清单可一次性消除这类
-  「漏依赖」隐形 BUG。包名已验证在 Debian 12 下全部有效。
-  12.0.0 与 13.0.0 两个通道都受影响（与 py3.13 无关，属基础层问题）。
-  同时新增发布前检查项 **A14「PHP 扩展编译工具链」** 防止回归（18 → 19 项）
+- **通道声明表** [image/channels.conf](image/channels.conf)：各线的安装脚本地址、
+  探测方式（`banner`/`api`）、标签策略、基础镜像都写在一张表里，成对排列；
+  **线标识按面板主线命名**（`line` = `12_version` / `13_version`）—— 它是流水线矩阵、
+  产物名、缓存 scope、版本文件查找的统一键，一旦定下就不再改名：14/15 出来时是
+  「加一行 `14_version`」，不是给旧行改名。版本记录文件同步改成按线命名
+  （`image/versions/12/VERSION`），不再出现「目录叫 12.0.0、内容是 12.1.3」的错位
+- 构建（`build.yml`）、每日巡检（`check.yml`）、漂移检测（`drift.yml`）都**从表生成矩阵**，
+  删除两份通道 Dockerfile 与两份 build-push 工作流；`drift.yml` 重写为表驱动
+  （基线结构变成 `{lines:{<线标识>:{sha,version}}}`，旧基线已迁移）
+- **目录重构**：`shared/` 与 `dockerfile/` 合并为 `image/`（Dockerfile / channels.conf /
+  versions / build / conf / scripts），编排文件提到仓库根：
+  ```
+  docker-compose.yml  Makefile  README.md  CHANGELOG.md  LICENSE
+  image/   docs/   skills/   .github/
+  ```
+  影响：compose 现在在仓库根，`./data` 也随之落在仓库根；此前 `cd dockerfile` 部署的用户
+  把 `dockerfile/data` 移到根的 `data/`（或改用绝对路径）即可，数据本身不动
+- **配置单一真源**：各脚本里的 `${VAR:-默认值}` 兜底副本全部删除，只从
+  `image/conf/defaults.env` 取值（缺失即明确报错；`guard.sh` fail-open 跳过）；
+  `make lint` 的配置检查改成「断言不存在副本」
+- **删掉旧的混合挂载支持**（`./data` + `./system` 两个挂载点）：`mounts.sh` 只保留
+  「只读持久化根必须被识别为降级」，`Makefile` 与配置文档同步收窄为单目录 `data`
+- **漂移检测精化**：`/www` 不再恒为红灯，改为按子路径比对，只有**新出现且未声明**的
+  `/www` 子目录才报关键漂移
+- **文档与 skill 去重**：`alternatives.md` 并入 `docs/persistence.md`；README 只留摘要 +
+  指针；skill 做成**工具无关的一份**（`skills/baota-docker/`，Codex / CodeBuddy / Trae
+  共用，附安装说明），删除重复的 architecture 参考与手工同步的 trae 副本；
+  新增「注释与文档规范 + 术语表」（`docs/development.md`）
+- `CHANGELOG.md` 只保留「未发布 + 最近 1 个已发布版本」，更早的记录归档到
+  [docs/history.md](docs/history.md)
 
-- **A14 检查恒定失败（误报，阻断发布）**：新检查写成
-  `inside command -v autoconf`，而 `inside` 是 `docker exec`——它只能执行
-  磁盘上的可执行文件，`command` 是 shell 内建、磁盘上没有，运行时直接报
-  `exec: "command": executable file not found in $PATH`（退出码 127）。
-  与 autoconf 装没装无关：镜像里工具链齐全也会失败，A14 必然红❌，
-  core 整套检查随之失败。**改为 `inside_sh 'command -v autoconf ...'`**
-  （走容器内的 sh）；实测同一写法对已安装命令返回 0、对缺失命令返回非零，
-  判定仍然有效
+### 🧩 其它
 
-- **A14 从「真编译 PHP 扩展」退回「零网络工具链护栏」**：发布前检查只断言
-  `autoconf / gcc / make / libtool` 存在（不临时安装 PHP），真正的
-  「装 PHP + 编译扩展」端到端测试移到日巡检 `published.sh`、在已发布的纯净镜像上跑，
-  避免污染推送前的候选镜像
-- **日巡检假红**：`published.sh` 里与实际布局不一致的断言已修正 —— 面板状态路径
-  `/data/panel-state` → `/data/panel`、overlay 期望数（面板 `/www` 已不走 overlay）、
-  备份包成员名 `panel-state/data` → `panel/data`
+- **检测脚本按「本项目真实需要」重排**：`published.sh` 不再复刻 core / degrade /
+  upgrade 已覆盖的场景（落盘、重建、版本护栏、只读降级、备份结构、守卫），
+  只做三件只有线上镜像才需要的事 —— 拉取、留一段脱敏首启日志、在真镜像上跑
+  PHP 扩展「安装 + 编译 + 加载」；其余一律复用三套门禁，**同一件事只留一份断言**
+  （两处各写一份，历史上漂移出过假红）
+- 并发锁从日巡检挪进 `core.sh`（同卷第二实例必须被拦下，是数据安全性质，要在推送前拦住）；
+  `mounts.sh` 只剩「只读持久化根必须被识别为降级」一项，正名 `degrade.sh`；
+  删除只服务于已放弃的「跟踪上游升级脚本」工作流的 `drift/versions.sh`
+- 门禁扩展：`core.sh` 新增 A15（守卫）、A2/A9/B2 扩展到新布局（面板代码不落持久化层、
+  组件 / cron 脚本 / 插件数据落盘且重建后仍在）；`published.sh` 同步新增对应断言
 
-### ✨ 新增
-
-- **基础镜像可配置（BASE_IMAGE）**：两个 Dockerfile 的 `ARG BASE_IMAGE=debian:12`
-  保持为唯一真源；构建发布工作流新增可选输入 `base_image`（留空则不传该
-  build-arg，避免常量抄两份）。探路 Debian 13（trixie，宝塔官方镜像所用）时
-  填 `debian:13` 即可，无需改代码（切换前须同步 drift.yml 的 BASE_IMAGE 并跑完整回归）
-
-### 📝 澄清
-
-- **「面板内更新会被只读拦截」从未实现，相关表述已全部更正**（约 15 处）：
-  `/www/server/panel` 没有部署任何只读机制，面板内「更新」的写入会成功落在
-  容器可写层 —— restart 不消失，销毁重建后即还原为镜像版本。升级 / 回退请换
-  镜像标签；刻意不做只读拦截，那等于重启已移除的「禁用更新补丁」那套对抗上游的跟踪
-
-### ⚡ 优化
-
-- **`base.sh` 剔除诊断类冗余包**：`traceroute` / `dos2unix` / `p7zip-full` / `cpio`
-  不再预装（`net-tools` / `dnsutils` 因宝塔网络模块可能调用予以保留）
-- **移除镜像瘦身（`slim.sh` / `strip_elf`）**：实测镜像反而从 400~500 MB 涨到
-  700 MB 以上 —— 被 strip 的文件绝大多数来自 `debian:12` 基础层，overlay 的
-  copy-up 会在本层再存一份副本、下层原文件不会消失（实测：仅修改一个
-  200 KB 的基础层文件，该层就多出 200 kB），净效果是变大。`slim.sh` 已删除，
-  `base.sh` / `panel.sh` 里的调用一并移除。
-  `base.sh` 中 dpkg 的 `path-exclude`（排除文档 / 手册 / 非 en 翻译）是安装时
-  就不写入、不产生副本，属于有效瘦身，予以保留
+---
 
 ## [3.0.0] — 2026-09-07 · 不对抗上游：移除更新禁用补丁，持久化成为唯一核心保证
 
@@ -107,225 +102,26 @@
 - **构建发布工作流支持「强制更新」**：stable / release 两个通道的手动触发页
   新增 `force_update` 开关（默认关）。勾选后跳过「已是最新 / 已一致」判断，
   无条件走完整构建发布并回写 VERSION —— 上游没变但需要重新出镜像时，
-  不用再手动改 VERSION 文件。版本仍以探测结果为准（stable 探测失败回退
-  VERSION 当前值；release 探测失败直接报错取消），不引入「探测与构建
+  不用再手动改 VERSION 文件。版本仍以探测结果为准，不引入「探测与构建
   版本不一致」的风险
 
 ### ⚠️ 行为变更
 
 - **不再禁止面板内更新**：整体移除「禁用面板更新」补丁——`shared/scripts/patch-panel.sh`
   删除（含 8 个升级入口的 stub 与 `verify` 断言）、两个 Dockerfile 的
-  `COPY` 与 `DISABLE_PANEL_UPDATE`、构建期调用、发布前检查中的补丁断言（19 → 18 项）。
-  面板版本由使用者自己决定，本项目只保证「销毁容器重建后数据不丢」——
-  已对 12.0.0 / 13.0.0 端到端实测（8/8 数据保留、面板口令与数据库不变）。
-  想回到镜像自带版本：`make reset-panel CONFIRM=yes`（配置、账号、站点、数据库全保留）；
-  `audit_panel_version` 相应由「污染告警」改为信息提示
-- **py3.13 官方升级通道随之放开**：stable 12.0.0（出厂 py3.7.16）可直接执行
-  `bash /www/server/panel/script/upgrade_py313_bundle.sh`（官方文档 2026-08-05 公告的升级命令）；
-  release 13.0.0 出厂即 py3.13.14，无需操作。此前把 `upgrade_py313*` 一并 stub
-  属于误屏蔽（经解包分析：三个脚本零面板版本标记，与已豁免的 gevent/flask 同类）
+  `COPY` 与 `DISABLE_PANEL_UPDATE`、构建期调用、发布前检查中的补丁断言。
+  面板版本由使用者自己决定，本项目只保证「销毁容器重建后数据不丢」
+  （已对 12.0.0 / 13.0.0 端到端实测：8/8 数据保留、面板口令与数据库不变）
+- **py3.13 官方升级通道随之放开**：stable 12.0.0（出厂 py3.7.16）可直接执行官方升级命令；
+  release 13.0.0 出厂即 py3.13.14。此前把 `upgrade_py313*` 一并 stub 属于误屏蔽
 - **漂移检测收敛为单一职责**：只检测「目录漂移」（数据落点），移除升级入口漂移、
-  隐藏入口扫描与代码级更新旁路（`KNOWN_BYPASS`）检测；
-  `install.sh` 重写、工作流与 `baseline.json` 同步移除 targets 字段。
-  跟踪上游脚本清单与代码内执行路径永远跟不完，且并不影响数据安全
+  隐藏入口扫描与代码级更新旁路检测 —— 跟踪上游脚本清单与代码内执行路径永远跟不完，
+  且并不影响数据安全
 
 ### 🐛 修复
 
-- 漂移检测报告章节编号：新增「代码级更新旁路检测」一节时漏改「自动更新标记」的
-  markdown 标题，导致 `drift.md` 出现两个「### 3.」（脚本与现存报告均已修正，
-  下次 CI 回写保持正确编号）
+- 漂移检测报告章节编号错乱（新增一节时漏改后续标题，导致 `drift.md` 出现两个「### 3.」）
 
 ### 📝 文档
 
-- skills 参考（codebuddy / trae 的 SKILL.md 与 architecture.md）同步漂移检测的
-  三类检测项与代码级更新旁路说明
-
-## [2.0.0] — 2026-09-04 · 三层分离布局（业务直通 + 面板/系统 overlay）+ 结构与可维护性重构
-
-### ⚠️ 布局：一个 data，三层分清楚（全新部署请从空 data/ 开始）
-
-```
-data/                        （./data:/data）
-├── www/                      业务数据 —— 三个直通目录，宿主机可 SMB 直改
-│   ├── wwwroot/       ↔ /www/wwwroot（站点）
-│   ├── backup/        ↔ /www/backup
-│   └── server/data/   ↔ /www/server/data（MySQL）
-├── system/                   系统层
-│   ├── panel/         /www 面板 overlay upper（server/panel、wwwlogs 增量）
-│   ├── etc usr var root opt home srv
-│   └── .baota/
-└── .baota/
-```
-
-- `/www` 仍是 overlay（面板随镜像升级），upper 收敛到 `data/system/panel`
-- 站点 / 备份 / MySQL 改为 bind 直通（源在 `data/www`，upper 之外），
-  宿主直接改有内核保证
-- 容器内路径不变（`/www/wwwroot`、`/www/server/panel`…）
-
-> ⚠️ 旧布局（data/www 整棵 overlay 或早先的 data/wwwroot 直通）与本版不兼容，
-> 升级前请用旧版 `baota-backup` 打完整备份再按 docs/upgrade.md 恢复。
-
-### ✨ 新增
-
-- **代码级更新旁路检测**（`install.sh` 新增第 3 节，`versions.sh` 同步）。
-  宝塔面板代码里存在绕过 `script/` stub、现拉 `/install/update*.sh` 直接执行的更新路径
-  （12.0.0 / 13.0.0 真装实测各 3 处，经 `task.py` / `class/system.py` / `class/jobs.py`）。
-  漂移检测现按 `KNOWN_BYPASS` 基线全量扫描：新增签名即关键漂移（CRIT=1），
-  已知旁路消失则提示复核文档；特征为「执行习语 + 官方更新路径」双条件，
-  依赖库 / 软件安装等合法 `curl|bash` 不误报（实测误报 0）
-- **docs/development.md 新增「禁用面板更新的防御边界」**：三层防御的分工与性质
-  （阻断 / 阻断 / 仅检测）、3 条已知代码级旁路的触发条件、可选的网络层拦截配方
-  （HTTP 路径精准匹配，不误伤插件市场；HTTPS 旁路靠版本一致性检测兜底）
-- **README / docs/quickstart.md 补边界说明与「已知限制」**：版本一致性告警是检测
-  而非阻断，处理方式为 `make reset-panel`
-- **`baota-backup` 备份工具**（`shared/scripts/backup.sh`，软链到
-  `/usr/local/bin/baota-backup`）。在容器里 `docker exec baota baota-backup` 即可，
-  替你绕开手工 tar 的三个坑：
-  - 自动排除 `.baota` / `www/backup/auto` / `www/backup/manual` / `www/backup/database`，
-    不再因漏掉 exclude 导致备份体积逐次翻倍
-  - 自动加 `--xattrs`，保住 overlay 的目录替换标记（手工 tar 默认会丢）
-  - 生成后自动自校验，并拒绝自包含的包
-  - 附带 `--list`（体积分布）、`--verify`、`--stdout`、`--keep` 子命令
-  - 容器运行中且能连上 MySQL 时，自动附加一份 `--single-transaction` 一致性转储
-- **启动报告归档**：持久化降级记录追加到 `data/system/.baota/boot-history.log`
-  （原来只写在 tmpfs 的 `/run`，重启就没了，事后无从追溯）
-- **配置真源新增 `CRITICAL_DIRS`**：关键目录列表不再是代码里的硬编码
-- **`baota-backup --rsync <目录>` 增量同步**：`data/` 大了以后全量打包很慢，
-  增量模式之后只传变化部分。用 `-aAX` 保留权限、ACL 与扩展属性，
-  与全量打包的 `--xattrs` 等价；带 `--delete`，因此加了三重防误删护栏
-  （拒绝目标是 `/`、持久化层自身、或不像本工具产物的非空目录）
-- **`make reset-system CONFIRM=yes`**：重置系统层（`etc usr var root opt home srv`）
-  回到当前镜像的状态，数据层（面板 / 站点 / 数据库 / 备份）完全不受影响。
-  这是分层设计最大的红利，也是应对「系统层被搞坏 / upper 膨胀」的终极手段
-- **挂载与降级场景的 CI 门禁**（`.github/scripts/check/mounts.sh`，
-  `make health-mounts`）：补上原 19 项没覆盖的两类场景 ——
-  混合挂载（两层分开 bind）能否正常工作，以及持久化根被挂成只读时
-  是否真的写了 `degraded-critical` 并判 unhealthy
-- **磁盘水位阈值可配置**：`DISK_MIN_AVAIL_MB`（默认 1024）与
-  `DISK_MAX_USED_PCT`（默认 95）进入 `defaults.env`，
-  几 TB 的大盘上可以把告警线调大（例如 10240 = 10GB）
-- **`make reset-panel CONFIRM=yes`**：面板代码被「面板内更新」污染后的一键修复
-  （此前 `audit_panel_version` 只告警、没有修复手段）。只重置面板代码，
-  保留 `panel/data`（配置与数据库）与 `panel/pyenv`（可选 `RESET_PYENV=yes` 一并重置）；
-  已装插件需从软件商店重装。原理：容器停止后删掉持久化层里被改动的文件，
-  下次启动 overlay 视图自动回落到镜像版本，效果等于「从未改过」
-- **静态检查入 CI**：新增独立的 `lint` job，强制安装 shellcheck 后跑 `make lint`，
-  两个通道的构建都以它为前置。此前本地没装 shellcheck 时会静默跳过，
-  这道检查实际上长期没人真正跑过
-- **升级 / 降级路径的 CI 门禁**（`.github/scripts/check/upgrade.sh`，
-  `make health-upgrade`，三套检查合并为 `make health-all`）：版本护栏、升级前快照、
-  面板启动器刷新**只在镜像版本变化时执行**，原有检查全走不到那个分支 ——
-  等于长期零覆盖。通过改写持久化层里的版本记录触发两条分支，
-  断言：识别为升级 / 降级、快照生成**且内容完整**、启动器被刷新、
-  版本记录回写、降级不阻断启动
-- `docs/` 专题文档（9 篇）、`skills/` AI 助手技能包（CodeBuddy + Trae 预留）、
-  `Makefile`、`.editorconfig`、`.shellcheckrc`、`LICENSE`、本文件
-- **每日上游漂移检测**（`.github/workflows/drift.yml` + `.github/scripts/drift/`）：
-  在一次性容器里原样执行官方安装脚本，比对「装前 / 装后」的顶层目录新增量，
-  拦两类会破坏本项目的上游变更 —— 目录漂移（写入落到已知持久化目录集合之外 =
-  静默丢数据）与升级入口漂移（`patch-panel.sh` 的目标被上游改名 / 删除 / 新增，
-  面板会绕过禁用逻辑自行升级）。两级节奏控制成本：probe 每天取版本与脚本 sha256
-  对基线比对，有变更才真装一遍；报告回写 `drift.md`，
-  关键漂移开 issue 并持续失败提醒。  检测用的目录集合与升级入口清单必须分别与
-  `init-mounts.sh` / `patch-panel.sh` 保持一致
-- **面板自更新禁用的效果断言**（`shared/scripts/patch-panel.sh` 的 `verify_update_disabled`）：
-  此前「替换升级脚本 + 删 autoUpdate.pl」之后没有任何东西确认它真的生效。新增自检——
-  只对已知的面板自身升级入口检查是否已被替换为禁用 stub、并确认 autoUpdate.pl 已删除，
-  只读不写。它**只覆盖「面板自身版本更新」通道，不检查也不阻断**软件商店的插件 / 依赖
-  更新（gevent / flask / 防火墙、nginx / php 等走另一套机制），故不影响插件或依赖更新。
-  `disable_update` 末尾自动调用（构建期 `<- services.sh` 与每次启动 `<- entrypoint.sh` 都跑，
-  失败即拦下发布 / 启动），也可单独以 `patch-panel.sh verify` 调用。升级入口清单抽成
-  文件级 `UPDATE_TARGETS` 一处维护、与禁用逻辑共用，避免两份清单漂移
-- **`make lint` 自动定位 pip 安装的 shellcheck**：macOS 系统 Python 的 `--user`
-  安装位置在 `~/Library/Python/<版本>/bin`、不在默认 PATH，此前会静默跳过。
-  Makefile 找到就自动加进 PATH，找不到才跳过（安装与排查见 docs/development.md「本地构建」）
-
-### 🐛 修复
-
-- **`BAOTA_STATE` 用错 `PERSIST_ROOT`**：它原本在加载 `defaults.env` **之前**计算，
-  用户通过 compose 改了 `PERSIST_ROOT` 时，镜像版本记录会写到错误位置，
-  版本护栏失效。改为先加载配置真源
-- **函数名与变量遮蔽**：`init-mounts.sh`（busybox sh，`local` 不可靠）里
-  `migrate_old_layout` / `mount_persist` 的 `dir=`、`mount_passthrough` 的 `target=`
-  会覆盖调用方 `for dir in $PERSIST_DIRS` 的循环变量。统一改为下划线前缀
-  `_dir` / `_upper` / `_work` / `_target`
-- **workdir 命名与注释自相矛盾**：注释说「每次启动用唯一名字，避免多实例互删」，
-  但代码每次都会 `rm -rf` 历史 workdir。既然清理与挂载都在 flock 独占锁保护下，
-  改用固定名 `<dir>.work`，让注释与实现一致
-- **构建脚本步骤编号错误**：`30-services.sh` 里写 `2/4`，实际是五个步骤中的第二步
-- **文档与实现不一致**：README 提到「是否连 MySQL 数据目录与站点一起打包、以及体积上限」
-  可在自动快照里配置，但该配置项并不存在
-- **`healthcheck.sh` 硬编码持久化根路径**：它写死了 `/data/www` 与 `/data/system`，
-  用户一旦覆盖 `PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT`，这两个路径不存在
-  → 被判成磁盘异常 → **容器永远 unhealthy**，而且现象与「磁盘真的满了」无法区分。
-  改为从 `/baota/defaults.env` 现读，并给两个阈值加非数字兜底
-- **构建期目录列表漂移**：`services.sh` 的兜底默认值带 `www`，而真源不含 `www`，
-  导致镜像里被建出空的 `/data/system/www`（混合挂载模式下用户能看到，
-  容易误以为是站点目录）。改为直接加载配置真源 ——
-  这正是 `defaults.env` 头注释警告的「四处各写一份，改一处漏一处」
-- **`backup.sh --stdout` 产物与全量模式不一致**：数据层成员写死 `www`、
-  且不附加 `MANIFEST.txt` 与数据库转储，产出的包过不了自己的 `--verify`。
-  改为与全量打包共用成员收集与排除项
-- **`backup.sh` 日志污染标准输出**：`--stdout` 模式下日志走 stdout 会混进 tar 流、
-  让备份包在解压时才发现损坏；`--quiet` 模式下进度信息也会干扰脚本取路径。
-  两处都改为走 stderr
-- **顶层目录基线的排除列表不一致**：构建期未排除 `/data`，与运行期
-  `audit_new_top_dirs` 的列表不一致。两边对齐（构建期也排除 `/data`）
-- **并发锁只保护系统层**：混合挂载模式下「数据层共享、系统层各自独立」时锁不到。
-  数据层补一把锁（系统层 fd 9、数据层 fd 8），两把锁都会被 exec 继承
-- **面板禁用更新漏掉隐藏入口 `local_fix.sh`**：对 12.0.0 / 13.0.0 真装实测后发现，
-  `script/local_fix.sh` 名字不带 upgrade/update 前缀，却会下载 `update6.sh` 把面板
-  「升级至最新版」，且 `class/system.py` 的「修复」会触发它。原 `UPDATE_TARGETS` / `TARGETS`
-  只按已知文件名列举，既没收录它、也被文件名模式（`upgrade*`/`update*`）漏掉 —— 面板可绕过
-  禁用逻辑自行升级，破坏「版本由镜像决定」。已将其纳入禁用目标，并新增两层内容兜底：
-  `verify_update_disabled` 与漂移检测都增加对 script/ 全量文件的升级触发特征扫描
-  （`HIDDEN_SIGNALS`：`update6.sh` / 将面板升级 / 升级至最新 / upgrade_panel），
-  专门抓名字不带 upgrade/update 前缀的隐藏入口，避免再被文件名模式漏掉
-- **新增两通道面板源码包分析脚本** `.github/scripts/drift/versions.sh`
-  （`[stable|release]` 可选参数），用项目自己的安装法在一次性容器里真装，抓取
-  `panel/script/` 全量清单、升级脚本内容与自更新机制引用，用于核对升级入口清单是否完整
-
-### ⚡ 优化
-
-- **升级前快照改用 `cp -a`**：原来 `tar czf` 每次换镜像都要付一次完整压缩的 CPU 时间，
-  而面板数据里主要是 SQLite 与二进制，gzip 收益很低。`cp -a` 更快，
-  且天然保留扩展属性（不必维护 `--xattrs-include` 白名单），回滚时反向复制即可。
-  快照形态从 `.tgz` 变为**目录**，旧版遗留的 `.tgz` 会被同一套保留策略一起清理
-- **排除项单一真源**：`baota-backup` 的排除列表抽成 `EXCLUDES` 数组，
-  tar 与 rsync 各自从它派生参数，不再两条路径各维护一份
-- **镜像瘦身**：构建期配置 dpkg 排除 `/usr/share/{doc,man,info}`
-  （保留 `copyright` 与 locale），减小镜像体积与系统层 upper 的增量
-
-### ♻️ 重构
-
-- **目录结构**：文档从 README 拆到 `docs/`，构建脚本按执行顺序重命名为
-  `base.sh` / `panel.sh` / `services.sh`
-- **消除配置漂移**：`PERSIST_ROOT` / `PERSIST_DIRS` 从 Dockerfile 的 `ENV` 移除，
-  唯一真源是 `shared/conf/defaults.env`（运行期三份脚本 + CI 健康检查都从它取值）
-- **CI 门禁**：检查脚本从 `defaults.env` 解析目录清单，不再硬编码一份；
-  新增直通挂载校验、备份工具校验、重建后降级记录校验（共 19 项）
-- **代码规范**：统一 4 空格缩进、日志前缀（`[build]` / `[init]` / `[entrypoint]` /
-  `[patch]` / `[backup]`）、函数命名（`check_*` / `audit_*` / `setup_*` / `refresh_*`）、
-  变量全部加引号、函数内变量全部 `local`
-- **发布改为手动**：stable / release 两个工作流移除定时触发。release 会推进
-  `latest`，每天自动发布意味着上游一出问题坏镜像会立刻扩散给所有 `latest` 用户；
-  改为手动后，发布前必然先看漂移检测的报告与 issue。
-  巡检工作流与脚本随之更名 `verify-published` → `published.sh`，
-  与 `check` / `drift` 命名家族对齐
-- **文档重命名与锚点修复**：`getting-started` → `quickstart`、`backup-restore` → `backup`、
-  `persistence-alternatives` → `alternatives`（与全仓单词式文件名一致）；
-  README 重写为「原理 / 用法 / 对比」的完整版并加目录；
-  6 个被链接的标题去 emoji（GitHub 剥 emoji 生成锚点，此前 8 处链接断链）、
-  2 处指向不存在标题的死链改指、修复 development.md 的未闭合围栏、
-  术语表更正残留的旧布局描述；compose 清理「逐项说明见 X」类交叉引用注释
-
----
-
-## [1.0.0] — 2026-09-03 · 首个可用版本
-
-- overlay 分层持久化 + 三个直通挂载
-- 版本护栏与升级前自动快照
-- 面板内更新禁用补丁
-- 日志体积防线（journald 上限 + logrotate copytruncate）
-- 双通道（stable / release）双架构（amd64 / arm64）自动发布
-- 17 项发布前健康检查，含容器重建后的持久化验证
+- skills 参考同步漂移检测的检测项与代码级更新旁路说明

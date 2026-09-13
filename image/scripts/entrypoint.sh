@@ -21,20 +21,15 @@ set -euo pipefail
 
 # ------------------------------------------------------------------------------
 # 配置真源：/baota/defaults.env（与 init.sh 共用同一份）。
-# 必须最先加载 —— 下面所有路径常量都依赖它，加载晚了会取到 Dockerfile 的
-# 默认值，用户在 compose 里改的 PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 就失效了。
+# ★ 只在这里取配置：脚本里不再写默认值副本（副本会漂移，改真源的人不会想到
+#   还要改另外几个文件）。真源缺失说明镜像不完整，直接拒绝启动
 # ------------------------------------------------------------------------------
-if [ -f /baota/defaults.env ]; then
-    . /baota/defaults.env
+if [ ! -f /baota/defaults.env ]; then
+    echo '❌ [entrypoint][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整，拒绝启动' >&2
+    exit 1
 fi
-
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
-PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
-# 与 init.sh 一致：面板状态根由数据根派生。defaults.env 缺失时兜底，
-# 也让 shellcheck 能追踪到赋值（本文件只是读它，真源仍是 defaults.env）
-PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
-AUTO_BACKUP_KEEP="${AUTO_BACKUP_KEEP:-3}"
+# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
+. /baota/defaults.env
 
 PANEL_DIR=/www/server/panel
 PANEL_PY=${PANEL_DIR}/pyenv/bin/python

@@ -1,47 +1,27 @@
-name: 🔬 日巡检：已发布镜像回归
+name: 🔬 已发布镜像回归
 
 # ==============================================================================
-#  🔬 从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写 .github/reports/report.md
+#  🔬 每天从 DockerHub 拉取「已发布」的镜像 → 起容器 → 跑回归 → 回写报告
 #
-#  与另两个工作流（12.0.0 / 13.0.0 构建发布）的分工：
-#    那两个  验的是「本地构建出来的候选镜像」，作用是把坏镜像拦在推送之前，
-#            只在探测到新版本时才构建
-#    本工作流 验的是「DockerHub 上已经发布的镜像」，作用是每天确认线上镜像
-#            仍然健康 —— 上游脚本变更、镜像被重新推送、依赖漂移，都能在
-#            日常回归里第一时间发现，而不是等用户踩到
+#  与构建工作流（.github/workflows/build.yml）的分工：
+#    构建工作流 验的是「本地构建出来的候选镜像」，把坏镜像拦在推送之前
+#    本工作流   验的是「DockerHub 上已发布的镜像」，每天确认线上镜像仍然健康
+#               （上游脚本变更、镜像被重新推送、依赖漂移都能第一时间发现）
 #
-#  验的是哪个镜像
-#    版本号取自仓库里的 dockerfile/12.0.0/VERSION 与 dockerfile/13.0.0/VERSION（这两个文件由
-#    发布流水线在推送成功后回写，永远对应「已发布」的标签），不是重新探测
-#    上游 —— 本工作流不做版本判断，只验「当前线上这套东西还好不好用」
+#  验哪些镜像：通道与版本都从 image/channels.conf 与各通道 VERSION 文件读，
+#  不做上游探测 —— 本工作流只回答「当前线上这套东西还好不好用」。
+#  新增通道 = 改 channels.conf，这里不用动（矩阵从表里生成）。
 #
-#  验什么
-#    .github/scripts/check/published.sh：19 项，覆盖持久化
-#    全生命周期（四层落盘 / 销毁重建 / 升级降级快照 / 并发锁 / 只读降级 /
-#    备份包结构 / 首启凭据 / PHP 扩展编译链路），外加一段脱敏后的首次启动日志
+#  验什么：三件只有线上镜像才需要的事（拉取 / 脱敏首启日志 / PHP 扩展真编译），
+#  外加**复用发布前三套门禁**（core / degrade / upgrade）—— 持久化、重建、
+#  并发锁、只读降级、备份、版本护栏、守卫等全部由那三套覆盖，
+#  同一件事只维护一份断言（见 .github/scripts/check/published.sh 头部注释）
 #
-#  产出
-#    .github/reports/report.md，每次运行整体覆盖（不追加，体积恒定）
-#    ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前已脱敏
+#  架构：只验 linux/amd64（GitHub-hosted runner 原生架构）。arm64 要跑 QEMU，
+#  而本方案的核心是 overlay 持久化，模拟环境下的结论不可信 —— 宁可不测也不给
+#  假绿灯；arm64 的真实覆盖由构建工作流在原生 ARM runner 上负责。
 #
-#  架构
-#    只验 linux/amd64（GitHub-hosted runner 的原生架构）。arm64 镜像要跑
-#    QEMU 模拟，而本方案的核心是 overlay 持久化 —— 模拟环境下的结论不可信，
-#    宁可不测也不给假绿灯。arm64 的真实覆盖由 12.0.0 / 13.0.0 两个工作流
-#    在原生 ARM runner 上的构建期健康检查负责
-#
-#  并行与进度
-#    prep 读取两个通道版本后，verify-v12 / verify-v13 两个 job 并行
-#    跑（互不依赖），在 Actions UI 里并排显示、各自可见进度，墙钟时间约为
-#    单通道耗时；collect 在两者都结束后汇总并回写 .github/reports/report.md
-#
-#  触发时机
-#    🗓️ 每天 UTC 18:30（北京时间凌晨 2:30）：排在 13.0.0 每日 17:00 之后、
-#       12.0.0 每周一 02:00 之后，保证两个通道当天新发布的镜像都能被验到
-#    🖱️ 手动：随时触发
-#
-#  注意：本工作流只由 schedule / workflow_dispatch 触发，回写 .github/reports/report.md
-#        不会触发任何构建（另两个工作流同样不监听 push）
+#  触发：每天 UTC 18:30（北京时间 02:30）与手动触发。本工作流只写报告，不构建。
 # ==============================================================================
 
 on:
@@ -58,90 +38,80 @@ env:
   IMAGE_NAME: baota
   REPORT: .github/reports/report.md
   HC: .github/scripts/check
+  CHANNELS: image/channels.conf
 
 jobs:
-  # ── 1) 读取两个通道的已发布版本，作为后续 job 的输入 ──────────────────────
+  # ── 1) 从通道声明表生成「要验的通道」矩阵 ──────────────────────────────────
   prep:
-    name: 🔖 读取已发布版本
+    name: 🔖 读取通道与已发布版本
     runs-on: ubuntu-latest
     outputs:
-      v12: ${{ steps.set.outputs.v12 }}
-      v13: ${{ steps.set.outputs.v13 }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
 
-      - name: 🔖 解析 VERSION
-        id: set
+      - name: 🔖 解析通道表与 VERSION 文件
+        id: plan
         run: |
           set -euo pipefail
-          V12=$(tr -d '[:space:]' < dockerfile/12.0.0/VERSION)
-          V13=$(tr -d '[:space:]' < dockerfile/13.0.0/VERSION)
-          for v in "${V12}" "${V13}"; do
-            [ -n "${v}" ] || { echo "::error::VERSION 文件为空"; exit 1; }
-          done
-          echo "v12=${V12}" >> "$GITHUB_OUTPUT"
-          echo "v13=${V13}" >> "$GITHUB_OUTPUT"
-          echo "12.0.0 ${V12} / 13.0.0 ${V13}"
+          matrix='[]'
+          while read -r line channel vfile url probe tag base; do
+            [ -n "${line:-}" ] || continue
+            [ -f "${vfile}" ] || { echo "::error::缺少版本文件 ${vfile}"; exit 1; }
+            ver=$(tr -d '[:space:]' < "${vfile}")
+            [ -n "${ver}" ] || { echo "::error::${vfile} 为空"; exit 1; }
+            matrix=$(jq -c --arg line "${line}" --arg channel "${channel}" --arg version "${ver}" \
+              '. + [{line:$line, channel:$channel, version:$version}]' <<< "${matrix}")
+            echo "${line} ${channel} 已发布版本 ${ver}"
+          done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
+          echo "matrix=$(jq -c . <<< "${matrix}")" >> "$GITHUB_OUTPUT"
 
-  # ── 2) 两个通道并行验证（互不依赖，UI 并排、各自可见进度） ────────────────
-  verify-v12:
-    name: 📦 验证12.0.0_version
+  # ── 2) 每个通道并行验证（互不依赖，UI 并排、各自可见进度） ──────────────────
+  verify:
+    name: 📦 验证 ${{ matrix.channel }}
     needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prep.outputs.matrix) }}
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 运行回归验证（${{ needs.prep.outputs.v12 }}）
+      - name: 🔬 运行回归验证（${{ matrix.channel }} / ${{ matrix.version }}）
+        id: verify
+        continue-on-error: true
         run: |
           bash "${HC}/published.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.v12 }}" \
-            "${{ needs.prep.outputs.v12 }}" \
-            /tmp/report-v12.md
+            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}" \
+            "${{ matrix.version }}" \
+            "/tmp/report-${{ matrix.line }}.md"
+
+      - name: 📄 记录结果
+        if: always()
+        run: |
+          printf '%s\n' '${{ steps.verify.outcome }}' > "/tmp/outcome-${{ matrix.line }}.txt"
+          echo "${{ matrix.channel }} 结果：${{ steps.verify.outcome }}"
 
       - name: 📤 上传报告片段
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: report-v12
-          path: /tmp/report-v12.md
+          name: report-${{ matrix.line }}
+          path: |
+            /tmp/report-${{ matrix.line }}.md
+            /tmp/outcome-${{ matrix.line }}.txt
           if-no-files-found: warn
           retention-days: 7
 
-  verify-v13:
-    name: 📦 验证13.0.0_version
-    needs: prep
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: 📥 检出代码
-        uses: actions/checkout@v7.0.1
-
-      - name: 🔬 运行回归验证（${{ needs.prep.outputs.v13 }}）
-        run: |
-          bash "${HC}/published.sh" \
-            "${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.prep.outputs.v13 }}" \
-            "${{ needs.prep.outputs.v13 }}" \
-            /tmp/report-v13.md
-
-      - name: 📤 上传报告片段
-        if: always()
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: report-v13
-          path: /tmp/report-v13.md
-          if-no-files-found: warn
-          retention-days: 7
-
-  # ── 3) 汇总两个通道结果、生成并回写 .github/reports/report.md ──────────────
+  # ── 3) 汇总各通道结果、生成并回写 .github/reports/report.md ────────────────
   #  if: always() —— 即使某通道验证失败，也要把失败现场写进报告
   collect:
     name: 📝 汇总并回写报告
-    needs: [prep, verify-v12, verify-v13]
+    needs: [prep, verify]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -151,10 +121,8 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
         with:
-          # 显式检出 main：下面 rebase 之后是 `git push origin HEAD:main`，
-          # 而 HEAD 落在哪个分支取决于触发时选的分支（workflow_dispatch 可以
-          # 选非 main）。不锁定的情况下，在分支上手动触发会把该分支的提交
-          # 一并重放并推到 main
+          # 显式检出 main：下面 rebase 后是 `git push origin HEAD:main`，
+          # 而 HEAD 落在哪个分支取决于触发时选的分支
           ref: main
           fetch-depth: 0
 
@@ -164,8 +132,7 @@ jobs:
           path: /tmp/reports
 
       # rebase 必须在「生成 / 修改任何仓库文件」之前执行：此时 working tree 干净。
-      # 否则 .github/reports/report.md / README.md 已处于 modified，git rebase 会因 dirty tree 中止，
-      # 导致回写步骤整体失败、报告写不进仓库。
+      # 否则报告 / README 已处于 modified，git rebase 会因 dirty tree 中止
       - name: 🔄 同步 main（rebase）
         run: |
           set -euo pipefail
@@ -177,17 +144,6 @@ jobs:
       - name: 📝 生成报告
         run: |
           set -euo pipefail
-
-          V12="${{ needs.prep.outputs.v12 }}"
-          V13="${{ needs.prep.outputs.v13 }}"
-          [ -n "${V12}" ] && [ -n "${V13}" ] \
-            || { echo "::error::prep 未产出版本号，跳过报告生成"; exit 1; }
-
-          S_ICON=$([ "${{ needs.verify-v12.result }}" = 'success' ] && echo '✅' || echo '❌')
-          R_ICON=$([ "${{ needs.verify-v13.result }}" = 'success' ] && echo '✅' || echo '❌')
-          S_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${V12}"
-          R_TAG="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${V13}"
-
           {
             echo '# 📊 已发布镜像每日验证报告'
             echo
@@ -195,29 +151,38 @@ jobs:
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
-            echo "- 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）"
+            echo '- 验证平台：linux/amd64（GitHub-hosted runner；arm64 镜像不在本报告覆盖范围内）'
             echo "- 验证脚本：\`${HC}/published.sh\`"
             echo
             echo '## 概要'
             echo
             echo '| 通道 | 镜像 | 结果 |'
             echo '|---|---|---|'
-            echo "| 🐂 12.0.0 | \`${S_TAG}\` | ${S_ICON} |"
-            echo "| 📦 13.0.0 | \`${R_TAG}\` | ${R_ICON} |"
+            while read -r line channel vfile url probe tag base; do
+              [ -n "${line:-}" ] || continue
+              ver=$(tr -d '[:space:]' < "${vfile}")
+              outcome=$(cat "/tmp/reports/report-${line}/outcome-${line}.txt" 2> /dev/null || echo 'missing')
+              case "${outcome}" in
+                success) icon='✅' ;;
+                missing) icon='⚠️' ;;
+                *)       icon='❌' ;;
+              esac
+              echo "| ${channel}（${line}） | \`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${ver}\` | ${icon} |"
+            done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
             echo
             echo '---'
             echo
-            echo '## 🐂 12.0.0'
-            echo
-            cat /tmp/reports/report-v12/report-v12.md 2>/dev/null \
-              || echo '_（12.0.0验证未产出报告，见构建日志）_'
-            echo
-            echo '---'
-            echo
-            echo '## 📦 13.0.0'
-            echo
-            cat /tmp/reports/report-v13/report-v13.md 2>/dev/null \
-              || echo '_（13.0.0验证未产出报告，见构建日志）_'
+            while read -r line channel vfile url probe tag base; do
+              [ -n "${line:-}" ] || continue
+              ver=$(tr -d '[:space:]' < "${vfile}")
+              echo "## ${channel}（${line}，${ver}）"
+              echo
+              cat "/tmp/reports/report-${line}/report-${line}.md" 2> /dev/null \
+                || echo '_（该通道未产出报告，见构建日志）_'
+              echo
+              echo '---'
+              echo
+            done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
           } > "${{ env.REPORT }}"
 
           echo '--- 报告已生成（前 30 行）---'
@@ -226,10 +191,7 @@ jobs:
       - name: ✏️ 回写报告与 README
         run: |
           set -euo pipefail
-
-          # rebase 已在上一独立步骤完成（working tree 干净时执行），这里只注入并提交
           python3 .github/scripts/report.py "${{ env.REPORT }}"
-
           git add "${{ env.REPORT }}" README.md
 
           echo '--- 待提交变更 ---'
@@ -242,27 +204,18 @@ jobs:
           fi
           git commit -m "docs: 更新每日镜像验证报告 $(date -u '+%F')"
           git push origin HEAD:main
-          echo "已回写 ${{ env.REPORT }} 与 README.md"
-
-      - name: 📋 输出摘要
-        if: always()
-        run: |
-          {
-            echo '### 🔬 已发布镜像回归验证'
-            echo
-            echo "| 通道 | 结果 |"
-            echo '|---|---|'
-            echo "| 12.0.0 ${{ needs.prep.outputs.v12 }} | ${{ needs.verify-v12.result }} |"
-            echo "| 13.0.0 ${{ needs.prep.outputs.v13 }} | ${{ needs.verify-v13.result }} |"
-            echo
-            echo '完整报告见 `.github/reports/report.md`'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🚦 判定
         run: |
-          if [ "${{ needs.verify-v12.result }}" != 'success' ] \
-             || [ "${{ needs.verify-v13.result }}" != 'success' ]; then
-            echo "::error::镜像回归验证未全部通过，详见 ${{ env.REPORT }}"
-            exit 1
-          fi
-          echo '✅ 两个通道的已发布镜像均通过回归验证'
+          set -euo pipefail
+          failed=0
+          while read -r line channel vfile url probe tag base; do
+            [ -n "${line:-}" ] || continue
+            outcome=$(cat "/tmp/reports/report-${line}/outcome-${line}.txt" 2> /dev/null || echo 'missing')
+            if [ "${outcome}" != 'success' ]; then
+              echo "::error::${channel} 回归验证未通过（${outcome}），详见 ${{ env.REPORT }}"
+              failed=1
+            fi
+          done < <(grep -vE '^[[:space:]]*(#|$)' "${CHANNELS}")
+          [ "${failed}" -eq 0 ] || exit 1
+          echo '✅ 各通道的已发布镜像均通过回归验证'

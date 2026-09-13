@@ -14,7 +14,7 @@ docker exec baota /baota/healthcheck.sh; echo "退出码=$?"
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
-| `degraded-critical` 存在 | `CRITICAL_DIRS` 里的目录持久化失败或只读降级（默认 `/etc` `/usr` `/var` `/www/wwwroot` `/www/server/data` `/www/server/panel/data`） | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
+| `degraded-critical` 存在 | `CRITICAL_DIRS` 里的目录持久化失败或只读降级（默认 `/etc` `/usr` `/var` `/www/wwwroot` `/www/server/data` 与 `/www/server/panel/{data,vhost,ssl,config}`） | 看 `docker compose logs baota` 里 `[init][WARN]` 的具体原因 |
 | `degraded` 存在 | 非关键目录未持久化 | 同上，功能受损但不丢核心数据 |
 | 磁盘可用 <1GB 或 ≥95% | 数据盘将满 | 清理 `data/www/backup` 里的旧备份；`baota-backup --list` 看分布（站点日志 `/www/wwwlogs` 不持久化、不占 `data/`） |
 | 面板端口无响应 | 面板未启动 / 端口被改 | `docker exec baota bt status`；检查 compose 端口映射与 `port.pl` 是否一致 |
@@ -113,18 +113,34 @@ cat data/system/.baota/boot-history.log
 
 这个文件只在启动降级时才追加，最多保留 200 行。
 
+### 在面板里点过「更新」，面板版本会变吗
+
+不会。面板内更新的写入落在容器可写层，但面板代码的每次执行都会先过执行入口守卫
+（`/baota/guard.sh`，日志前缀 `[guard]`）：发现代码版本 ≠ 镜像版本就用
+`/baota/origin` 副本换回去，`init_db` 永远由镜像版本代码执行。
+排查相关问题时：
+
+```bash
+docker exec baota ls -l /www/server/panel/pyenv/bin/python /www/server/panel/pyenv/bin/python3
+# 两者都应指向 /baota/shim
+docker logs baota 2>&1 | grep guard        # 看到“已恢复：x -> 镜像版本”即守卫工作正常
+```
+
+若这里指向的不是 `shim`，说明守卫没装配上（上游改了 pyenv 布局）——
+发布门禁 `core.sh` 的 A15 会在构建阶段拦住这种情况。
+
 ## CI 发布被拦住
 
 发布门禁共三套，任一失败即终止：
-- `run.sh core`：20 项功能检查（全新卷 + 同卷重建）
-- `run.sh mounts`：混合挂载 + 只读降级场景
+- `run.sh core`：功能检查（全新卷 + 同卷重建）
+- `run.sh degrade`：只读持久化根必须被识别为降级
 - `run.sh upgrade`：升级 / 降级路径（改写 `.baota/image-version` 触发）
 
 失败时会打印容器日志尾部 150 行，先 `[init]` 的 WARN，再看 `[entrypoint]`。
 
 新增检查项时注意：**不要靠 grep 中文告警文案判断**，读 `/run/baota/degraded*` 标记文件。
 `PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `WWW_DATA_SUBDIRS` /
-`PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS` / `CRITICAL_DIRS` 等一律从 `shared/conf/defaults.env`
+`PANEL_STATE_ROOT` / `PANEL_STATE_SUBDIRS` / `CRITICAL_DIRS` 等一律从 `image/conf/defaults.env`
 解析，不要在检查脚本里硬编码（`.github/scripts/lint/config.sh` 会核对各脚本的兜底副本）。
 
 ### 每日巡检：.github/reports/report.md 没更新
@@ -145,7 +161,7 @@ cat data/system/.baota/boot-history.log
 ```bash
 brew install shellcheck                        # 有 brew 时
 python3 -m pip install --user shellcheck-py    # 没有 brew 时（装完确认在 PATH 里）
-shellcheck -x -S warning shared/build/*.sh shared/scripts/*.sh .github/scripts/check/*.sh
+shellcheck -x -S warning image/build/*.sh image/scripts/*.sh .github/scripts/check/*.sh
 ```
 
 典型：SC2034「变量未使用」——循环计数器用不到就写成 `_`（`for _ in $(seq 1 60)`）。

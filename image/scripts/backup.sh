@@ -2,37 +2,21 @@
 # ==============================================================================
 #  📦 baota-backup —— 持久化数据的备份 / 校验工具（在容器内执行）
 #
-#  构建期装到 /baota/backup.sh，并软链到 /usr/local/bin/baota-backup。
-#  宿主机用法：docker exec baota baota-backup [选项]
+#  装到 /baota/backup.sh 并软链到 /usr/local/bin/baota-backup；
+#  宿主机用法：docker exec baota baota-backup [选项]（--help 看全部选项）
 #
-#  为什么要有它：
-#    手工 tar 有三个很容易踩的坑，本脚本替你绕开 ——
-#      1. 漏掉 --exclude='www/backup/auto'，上一次的升级快照被打包进本次备份，
-#         体积逐次翻倍（实测 10M 数据 + 60M 快照：不排除 70M，排除后 10M）
-#      2. 漏掉 --xattrs，overlay 的「目录被整体替换」标记
-#         （trusted.overlay.opaque）丢失，恢复后该目录会与镜像内容合并，
-#         而不是保持你替换后的样子
-#      3. 备份落在 www/backup 下却没排除自身，下一次备份把它又装进去
+#  为什么要有它：手工 tar 有三个容易踩的坑 —— 升级快照被打进备份导致体积逐次
+#  翻倍、漏 --xattrs 丢掉 overlay 的 opaque 标记、备份包把自己装进去。
+#  本工具把这些（以及 MySQL 热转储、自校验、保留策略）都固定下来。
+#  取舍与恢复步骤见 docs/backup.md
 #
 #  用法：
-#    baota-backup                 在 /www/backup/manual（宿主 data/www/backup/manual）生成一份全量备份
-#    baota-backup --list          只打印各持久化目录的体积分布，不打包
-#    baota-backup --verify <包>    校验备份包是否完整
-#    baota-backup --stdout        把 tar 流写到标准输出（供宿主机重定向落盘）
-#    baota-backup --rsync <目录>   增量同步到另一个目录（首次全量，之后只传变化）
-#    baota-backup --keep 5        生成后只保留最近 5 份（默认 0 = 不清理）
-#    baota-backup --help
-#
-#  与面板自带备份的分工：
-#    面板备份   = 站点文件 + 数据库，不含面板配置与系统环境，适合日常救急
-#    本工具     = 整份 data/，含面板配置与系统环境，适合升级 / 迁移前的全量快照
-#
-#  全量打包 与 --rsync 怎么选：
-#    全量打包  每次产出一份自包含的 tgz，可离线归档；data 大了会慢
-#    --rsync   同步到另一个位置，之后每次只传变化部分，快得多；
-#              代价是目标里始终只有「最新一份」—— 它是镜像同步，不是版本化备份。
-#              要留历史请用 NAS / 云盘快照，或定期把同步目标整体归档
-#    两者都保留扩展属性（-aAX / --xattrs），恢复效果等价
+#     baota-backup                  生成一份全量备份到 /www/backup/manual
+#     baota-backup --list           只看各持久化目录的体积分布与磁盘水位
+#     baota-backup --verify <包>     校验备份包完整性
+#     baota-backup --stdout         把 tar 流写到标准输出（宿主机重定向落盘）
+#     baota-backup --rsync <目录>    增量同步到另一目录（镜像语义，只留最新一份）
+#     baota-backup --keep 5         生成后只保留最近 5 份（默认不清理）
 #
 #  日志约定：[backup] 普通信息，[backup][WARN] 告警，[backup][ERROR] 错误
 # ==============================================================================
@@ -41,14 +25,12 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 # 配置真源：与 init.sh / entrypoint.sh 共用同一份
 # ------------------------------------------------------------------------------
-if [ -f /baota/defaults.env ]; then
-    . /baota/defaults.env
+if [ ! -f /baota/defaults.env ]; then
+    echo '❌ [backup][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整' >&2
+    exit 1
 fi
-
-PERSIST_DATA_ROOT="${PERSIST_DATA_ROOT:-/data}"
-PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_ROOT:-/data/system}"
-PANEL_STATE_ROOT="${PANEL_STATE_ROOT:-${PERSIST_DATA_ROOT}/panel}"
-PERSIST_SYSTEM_DIRS="${PERSIST_SYSTEM_DIRS:-etc usr var root opt home srv}"
+# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
+. /baota/defaults.env
 
 # 备份产物目录。写成「数据层根/www/backup/manual」而不是容器内的
 # /www/backup/manual —— 开启直通时两者经 bind 指向同一份数据，但只有前者能

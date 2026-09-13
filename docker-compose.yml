@@ -1,5 +1,5 @@
 # ==============================================================================
-#  🐳 宝塔 Linux 面板（stable 通道：稳定线 12.x）—— 容器编排
+#  🐳 宝塔 Linux 面板（默认 12.x 稳定线；换线见 README「发布通道」）—— 容器编排
 #     已按飞牛 NAS / fnOS 适配；非飞牛的 x86_64 Linux 服务器可直接用本文件。
 #
 #  🐂 飞牛部署：Docker → 项目 → 新建项目 → 项目名 baota → 粘贴本文件
@@ -99,12 +99,24 @@ services:
     #     ├─ wwwroot/           ↔ 容器 /www/wwwroot（站点）
     #     ├─ backup/            ↔ 容器 /www/backup
     #     └─ server/data/       ↔ 容器 /www/server/data（MySQL）
+    #   data/panel/             面板状态（逐子目录 bind）
+    #     ├─ data/              ↔ 容器 /www/server/panel/data（面板配置与 SQLite）
+    #     ├─ plugin/            ↔ 容器 /www/server/panel/plugin（插件）
+    #     ├─ vhost/             ↔ 容器 /www/server/panel/vhost（站点配置 / 证书 / 伪静态）
+    #     ├─ ssl/               ↔ 容器 /www/server/panel/ssl（面板自身 HTTPS 证书）
+    #     └─ config/            ↔ 容器 /www/server/panel/config（面板设置）
     #   data/system/            系统层
     #     ├─ etc usr var root opt home srv  各目录 overlay upper
+    #     ├─ www/server/        /www/server 的 overlay upper（面板里装的组件、
+    #     │                     计划任务脚本、插件数据如 total/btwaf）
     #     └─ .baota/            系统层元数据：并发锁、overlay workdir、
     #                           镜像版本记录、启动历史（boot-history.log）
-    #   注意：面板代码 /www/server/panel 与站点日志 /www/wwwlogs 都不持久化
-    #   （前者随镜像升级；后者如需长期保留请在面板里修改站点日志目录）
+    #   注意：面板代码 /www/server/panel 与站点日志 /www/wwwlogs 都不持久化。
+    #   面板代码由 init.sh 用镜像绑定盖回（写入不落持久化层），
+    #   面板里装的组件/插件数据/计划任务脚本则在 data/system/www/server 里持久化，
+    #   销毁重建后不需要重新安装。
+    #   面板代码随镜像升级，且**面板内点「更新」不会生效**（执行入口守卫会把被
+    #   改写的代码换回镜像版本）；站点日志如需长期保留，请在面板里改日志目录
     #   data/.baota/            数据层状态（并发锁，隐藏；workdir 只在系统层）
     #
     #   唯一要求：data 必须在 ext4 / btrfs / xfs 上（飞牛存储池就是，直接可用）。
@@ -132,12 +144,14 @@ services:
       # - "20-21:20-21"
       # - "39000-40000:39000-40000"
 
-    # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，三段：
+    # 健康检查判据收口在镜像内的 /baota/healthcheck.sh，五段：
     #   1) /run/baota/degraded-critical 不存在 —— etc/var/www 任一持久化失败
     #      或只读降级时由 init.sh 写入，让失效在 compose ps 里直接可见；
     #   2) /data 与 /data/system 磁盘水位 —— 任一可用 < 1GB 或已用 ≥ 95% 即 unhealthy，
     #      满盘前在 docker ps / 飞牛 UI 上就能看到，而不是等 MySQL 崩；
-    #   3) 面板端口可访问 —— 端口可能被用户改掉，从 port.pl 现读，http 失败再试 https。
+    #   3) pyenv/bin/python3 指向 /baota/shim —— 执行入口守卫在位；
+    #   4) 面板代码版本 == 镜像版本 —— 面板被人点过「更新」而守卫没兜住时立刻可见；
+    #   5) 面板端口可访问 —— 端口可能被用户改掉，从 port.pl 现读，http 失败再试 https。
     # 判据要调整就改脚本（可单独执行测试），compose 这边不用动。
     # 注意：探活命令里绝不能出现面板进程名，否则会被 bt 脚本的 ps|grep 误判成
     # 「面板已在运行」而跳过启动。
@@ -154,4 +168,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-

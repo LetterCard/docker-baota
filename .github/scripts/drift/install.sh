@@ -16,7 +16,7 @@
 #
 #  入参（环境变量）：
 #    INSTALL_URL    官方安装脚本地址（必填）
-#    BASE_IMAGE     基础镜像（默认 debian:12，与 dockerfile/12.0.0/Dockerfile 的默认值一致）
+#    BASE_IMAGE     基础镜像（默认 debian:12，与 image/Dockerfile 的默认值一致）
 #    OUT_MD         markdown 报告输出路径（默认 drift.md）
 #    CRIT_FILE      关键标记输出路径，内容 1 表示存在关键漂移
 #
@@ -30,10 +30,14 @@ BASE_IMAGE="${BASE_IMAGE:-debian:12}"
 OUT_MD="${OUT_MD:-drift.md}"
 CRIT_FILE="${CRIT_FILE:-drift-critical}"
 
-# 已知 overlay 持久化目录集合（真源是 shared/conf/defaults.env 的
-# PERSIST_SYSTEM_DIRS）。这里刻意不含 www：面板 /www 已改为按子目录 bind，
-# 不再整层 overlay —— 把 www 算进来，会让写到 /www/server/php、/www/server/mysql
-# 的内容被误判成「已被持久化覆盖」，把真正的静默丢数据判成绿
+# 已知 overlay 持久化目录集合（真源是 image/conf/defaults.env 的
+# PERSIST_SYSTEM_DIRS）。★ 这里刻意不含 www：比对是按**顶层目录**统计的，
+# 而 /www 是按子路径分别处理的 ——
+#   /www/server            → overlay 持久化（组件 / cron 脚本 / 插件数据）
+#   /www/wwwroot /www/backup /www/server/data → bind 持久化
+#   /www/wwwlogs           → 按设计不持久化（站点日志）
+# 把 www 算进 KNOWNS 会把「新出现的 /www 子路径」一并放过，所以保留 /www 的
+# 告警，由人确认新子路径该不该持久化
 KNOWNS='etc usr var root opt home srv'
 
 INSTALL_LOG=/tmp/btpanel-install.log
@@ -66,6 +70,17 @@ for d in /*; do
 done
 EOS
 }
+
+# /www 是按子路径分别处理的（server 走 overlay、wwwroot/backup/server/data 等走
+# bind、wwwlogs 按设计不持久化），顶层文件数没法表达这件事 —— 单独看它的子目录
+www_subdirs() {
+    docker exec "$CNAME" bash -c \
+        'find /www -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null | sort' || true
+}
+
+# /www 下我们**声明过**的子路径（策略清单，稳定且短；它表达「我们决定怎么放」，
+# 不是「跟踪上游往哪写」）。新出现的子路径会按关键漂移报出来由人确认
+WWW_POLICY='server wwwroot backup wwwlogs Recycle_bin'
 
 : > "$OUT_MD"
 echo 0 > "$CRIT_FILE"
@@ -105,9 +120,10 @@ log '前置软件包已就绪'
 # ------------------------------------------------------------------------------
 #  1. 目录漂移检测
 # ------------------------------------------------------------------------------
+WWW_BEFORE=$(www_subdirs)
 BEFORE=$(snapshot)
 
-log '执行官方安装脚本（参数与 shared/build/panel.sh 保持一致）'
+log '执行官方安装脚本（参数与 image/build/panel.sh 保持一致）'
 docker exec "$CNAME" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
     || die "下载安装脚本失败：${INSTALL_URL}"
 
@@ -142,9 +158,37 @@ for d in $DIRS; do
     [ "$delta" -gt 0 ] || continue
     if in_knowns "$d"; then
         printf '| `/%s` | %s | %s | %s | ✅ 已被持久化覆盖 |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
+    elif [ "$d" = 'www' ]; then
+        # /www 的子路径各有归属，顶层计数没有意义，交给下面的子目录比对
+        printf '| `/%s` | %s | %s | %s | ℹ️ 按子路径处理（见下表） |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
     else
         printf '| `/%s` | %s | %s | %s | ❌ **未覆盖，会静默丢数据** |\n' "$d" "$b" "$a" "$delta" >> "$OUT_MD"
         warn "未覆盖的写入目录：/${d}（新增 ${delta} 个文件）"
+        CRIT=1
+    fi
+done
+
+# /www 的子目录漂移：新出现的子路径如果不在声明清单里，按关键漂移报出来
+WWW_AFTER=$(www_subdirs)
+{
+    echo
+    echo '| `/www` 子目录 | 状态 |'
+    echo '|---|---|'
+} >> "$OUT_MD"
+for sub in $WWW_AFTER; do
+    case " $(printf '%s' "$WWW_BEFORE" | tr '\n' ' ') " in
+        *" ${sub} "*) continue ;;   # 装之前就有：上游行为没变
+    esac
+    policy_hit=0
+    # shellcheck disable=SC2086
+    for p in $WWW_POLICY; do
+        [ "$p" = "$sub" ] && policy_hit=1
+    done
+    if [ "$policy_hit" = 1 ]; then
+        printf '| `www/%s` | ✅ 已在声明清单内 |\n' "$sub" >> "$OUT_MD"
+    else
+        printf '| `www/%s` | ❌ **新出现且未声明，需人工确认怎么持久化** |\n' "$sub" >> "$OUT_MD"
+        warn "未声明的 /www 子目录：/www/${sub}"
         CRIT=1
     fi
 done
