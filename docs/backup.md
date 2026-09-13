@@ -137,7 +137,8 @@ docker exec baota baota-backup --rsync /backup
 
 ```
 /backup/
-├── data/            ← 整份 data 卷：业务 www/（wwwroot / backup / server/data）
+├── data/            ← 整份 data 卷：业务 www/（wwwroot / backup / server/data /
+│                      vmail 邮局 / dk_project 面板 Docker 项目）
 │                      + 面板状态 panel/ + 系统层 system/<dir>/
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```

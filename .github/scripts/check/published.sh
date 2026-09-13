@@ -134,32 +134,41 @@ zend_module_entry myext_module_entry = {
     STANDARD_MODULE_PROPERTIES
 };
 
-#ifdef COMPILE_DL_MYEXT
+/* get_module 无条件导出：动态加载只认这个符号。写成 #ifdef COMPILE_DL_MYEXT
+   的话，一旦该宏没被定义（phpize 对扩展名宏的处理随 PHP 版本而异），编译照过、
+   加载却报 "Invalid library (maybe not a PHP library)" —— 这正是假红的来源 */
 ZEND_GET_MODULE(myext)
-#endif
 C
 
     if ! docker cp "$_build" "$C:/tmp/myext_check" >/dev/null 2>&1; then
         _rc=1; _msg="无法拷贝扩展源码进容器"
     else
+        # 分步执行、分步报错：失败时报告里直接写出是 phpize / configure / make /
+        # 产出 / 加载 哪一环挂了（笼统一句「链路未通过」的排查成本太高）
         _out=$(docker exec "$C" sh -c "
-            cd /tmp/myext_check && \
-            '$_phpize' >/dev/null 2>&1 && \
-            ./configure --with-php-config='$_phpcfg' >/dev/null 2>&1 && \
-            make -j\"\$(nproc)\" >/dev/null 2>&1 && \
-            test -f modules/myext.so && \
-            '$_php' -d extension=\$PWD/modules/myext.so -m | grep -iq myext
+            cd /tmp/myext_check || exit 9
+            '$_phpize' > /tmp/myext-phpize.log 2>&1 \
+                || { echo 'phpize 失败'; tail -n 10 /tmp/myext-phpize.log; exit 1; }
+            ./configure --with-php-config='$_phpcfg' > /tmp/myext-configure.log 2>&1 \
+                || { echo 'configure 失败'; tail -n 10 /tmp/myext-configure.log; exit 1; }
+            make -j\"\$(nproc)\" > /tmp/myext-make.log 2>&1 \
+                || { echo 'make 失败'; tail -n 10 /tmp/myext-make.log; exit 1; }
+            test -f modules/myext.so || { echo '未产出 modules/myext.so'; exit 1; }
+            '$_php' -d extension=\"\$PWD/modules/myext.so\" -m 2> /tmp/myext-load.log | grep -iq myext \
+                || { echo '加载 myext 失败'; tail -n 5 /tmp/myext-load.log; exit 1; }
         " 2>&1)
         _rc=$?
-        [ "$_rc" -ne 0 ] && _msg="phpize→编译→加载最小扩展未通过（疑似工具链 / php-config 回归）"
+        [ "$_rc" -ne 0 ] && _msg="phpize→configure→make→加载 未通过"
     fi
     inside rm -rf /tmp/myext_check >/dev/null 2>&1 || true
     rm -rf "$_build"
 
     if [ "$_rc" -eq 0 ]; then
-        ok "PHP 扩展安装 + 编译链路可用（phpize→configure→make→加载最小扩展 myext 成功）"
+        ok "PHP 扩展安装 + 编译链路可用（phpize→configure→make→加载 myext 成功）"
     else
-        bad "PHP 扩展安装 + 编译链路失败：${_msg}"
+        # 首行进报告（其余多行输出留在 CI 日志里）
+        _b=$(printf '%s' "${_out}" | head -n 1)
+        bad "PHP 扩展安装 + 编译链路失败：${_msg}${_b:+（${_b}）}"
         [ -n "$_out" ] && warn "编译输出：${_out}"
     fi
 }

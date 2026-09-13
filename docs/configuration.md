@@ -65,11 +65,11 @@
 |---|---|---|
 | `PERSIST_DATA_ROOT` | `/data` | 数据层根目录（面板 / 站点 / 数据库 / 备份） |
 | `PERSIST_SYSTEM_ROOT` | `/data/system` | 系统层根目录（etc usr var root opt home srv 的 overlay 上层） |
-| `WWW_DATA_SUBDIRS` | `wwwroot backup server/data` | 业务子目录（相对 `/www`），逐个 bind 到 `data/www/<子目录>` |
+| `WWW_DATA_SUBDIRS` | `wwwroot backup server/data vmail dk_project` | 业务子目录（相对 `/www`），逐个 bind 到 `data/www/<子目录>`：站点 / 备份 / MySQL / 邮局 / 面板 Docker 模块的项目目录 |
 | `PANEL_STATE_ROOT` | `/data/panel` | 面板状态根目录 |
 | `PANEL_STATE_SUBDIRS` | `data plugin vhost ssl config` | 面板状态子目录（相对 `/www/server/panel`），逐个 bind 到 `data/panel/<子目录>`：`data` 配置与 SQLite、`plugin` 插件、`vhost` 站点配置与证书、`ssl` 面板证书、`config` 面板设置 |
-| `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv` | 系统层需要 overlay 持久化的顶层目录（面板代码不在这里，它属于镜像） |
-| `CRITICAL_DIRS` | `/etc /usr /var /www/wwwroot /www/server/data /www/server/panel/data /www/server/panel/vhost /www/server/panel/ssl /www/server/panel/config` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录。写的是**容器内挂载点路径**（`www` 不再整体挂载，写顶层目录名会永远对不上） |
+| `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv www/server` | 系统层需要 overlay 持久化的顶层目录（含 `/www/server`：面板里装的组件、计划任务脚本、插件数据；面板代码不在这里，它属于镜像） |
+| `CRITICAL_DIRS` | `/etc /usr /var /www/server /www/wwwroot /www/server/data /www/server/panel/data /www/server/panel/vhost /www/server/panel/ssl /www/server/panel/config` | 一旦持久化失败就写 `degraded-critical`、让容器 unhealthy 的目录。写的是**容器内挂载点路径**（`www` 不再整体挂载，写顶层目录名会永远对不上） |
 | `DISK_MIN_AVAIL_MB` | `1024` | 健康检查的磁盘告警线：数据层或系统层可用空间低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 同上：已用百分比达到此值即 unhealthy |
 | `AUTO_BACKUP_KEEP` | `3` | 升级 / 降级前自动快照的保留份数，`0` 关闭 |

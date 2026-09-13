@@ -1,4 +1,4 @@
-name: 🔭 官方源：变更与漂移检测
+name: 🔭 监测：变更与漂移检测
 
 # ==============================================================================
 #  只监测、不发布。目的：上游更新后第一时间发现会破坏持久化的变更 ——
@@ -97,6 +97,7 @@ jobs:
 
             lines=$(jq -c --arg line "${line}" --arg channel "${channel}" \
               --arg url "${url}" --arg sha "${sha}" --arg ver "${recorded}" \
+              --arg state "${state}" \
               '. + [{line:$line, channel:$channel, url:$url, sha:$sha, version:$ver, state:$state}]' \
               <<< "${lines}")
             summary="${summary}| ${channel} | \`${line}\` | ${recorded} | ${state} | \`${sha:0:12}\` |"$'\n'
@@ -162,8 +163,10 @@ jobs:
             echo
             echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
-            printf '%s' "${SUMMARY}"
-            echo
+            # SUMMARY 由 step output 传回，末尾换行会被 GitHub 吃掉：
+            # 只 printf '%s' 再 echo 会让表格与下面的 --- 粘成一行（表格失效），
+            # 所以这里显式补一个空行
+            printf '%s\n\n' "${SUMMARY}"
             if [ "${analyzed}" = 'success' ]; then
               while IFS= read -r item; do
                 line=$(jq -r '.line' <<< "${item}")
@@ -223,8 +226,7 @@ jobs:
             echo
             echo '| 通道 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
-            printf '%s' "${SUMMARY}"
-            echo
+            printf '%s\n\n' "${SUMMARY}"
             echo '完整报告见 `.github/reports/drift.md`（也已内嵌进 README「漂移检测报告」章节）。'
             echo '处理后请关闭本 issue；未处理前本工作流会持续失败以作提醒。'
           } > /tmp/body.md

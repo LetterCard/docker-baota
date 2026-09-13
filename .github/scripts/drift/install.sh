@@ -30,16 +30,6 @@ BASE_IMAGE="${BASE_IMAGE:-debian:12}"
 OUT_MD="${OUT_MD:-drift.md}"
 CRIT_FILE="${CRIT_FILE:-drift-critical}"
 
-# 已知 overlay 持久化目录集合（真源是 image/conf/defaults.env 的
-# PERSIST_SYSTEM_DIRS）。★ 这里刻意不含 www：比对是按**顶层目录**统计的，
-# 而 /www 是按子路径分别处理的 ——
-#   /www/server            → overlay 持久化（组件 / cron 脚本 / 插件数据）
-#   /www/wwwroot /www/backup /www/server/data → bind 持久化
-#   /www/wwwlogs           → 按设计不持久化（站点日志）
-# 把 www 算进 KNOWNS 会把「新出现的 /www 子路径」一并放过，所以保留 /www 的
-# 告警，由人确认新子路径该不该持久化
-KNOWNS='etc usr var root opt home srv'
-
 INSTALL_LOG=/tmp/btpanel-install.log
 
 CNAME="bt-drift-$$"
@@ -78,9 +68,40 @@ www_subdirs() {
         'find /www -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null | sort' || true
 }
 
-# /www 下我们**声明过**的子路径（策略清单，稳定且短；它表达「我们决定怎么放」，
-# 不是「跟踪上游往哪写」）。新出现的子路径会按关键漂移报出来由人确认
-WWW_POLICY='server wwwroot backup wwwlogs Recycle_bin'
+# ------------------------------------------------------------------------------
+#  声明清单**从真源派生**，不在这里另抄一份：抄一份必然与
+#  image/conf/defaults.env 漂移（那边加了数据目录、这边还在用旧清单，表现是
+#  「新的数据目录每次都被报成关键漂移」，或者反过来漏报）。
+#
+#    KNOWNS       顶层目录 = PERSIST_SYSTEM_DIRS 里不含 / 的项。
+#                 ★ 刻意不含 www：比对是按**顶层目录**统计的，而 /www 是按
+#                 子路径分别处理（server 走 overlay、其余见下），把 www 算进
+#                 KNOWNS 会把「新出现的 /www 子路径」一并放过
+#    WWW_PERSIST  /www 的一级子目录 = PERSIST_SYSTEM_DIRS 的 www/* + WWW_DATA_SUBDIRS
+#    WWW_VOLATILE 按设计不持久化的 /www 子路径（我们自己的决定，派生不出来）：
+#                 站点日志与回收站、PHP session。回收站是「删除后的暂存区」，
+#                 与容器同生共死（重建即空）；它的列表由面板扫目录得到、不是数据库
+#                 记录，所以不会留下「有记录没文件」的错位。上游 13 的落点是
+#                 /www/.Recycle_bin，裸 Recycle_bin 是历史名，一并列出
+# ------------------------------------------------------------------------------
+DEFAULTS_ENV="${DEFAULTS_ENV:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/image/conf/defaults.env}"
+read_default() { sed -n "s/^$1=\"\${$1:-\(.*\)}\"$/\1/p" "$DEFAULTS_ENV" | head -n 1; }
+
+PERSIST_SYSTEM_DIRS=$(read_default PERSIST_SYSTEM_DIRS)
+WWW_DATA_SUBDIRS=$(read_default WWW_DATA_SUBDIRS)
+[ -n "$PERSIST_SYSTEM_DIRS" ] && [ -n "$WWW_DATA_SUBDIRS" ] \
+    || die "无法从 ${DEFAULTS_ENV} 解析 PERSIST_SYSTEM_DIRS / WWW_DATA_SUBDIRS"
+
+# shellcheck disable=SC2086
+KNOWNS=$(printf '%s\n' $PERSIST_SYSTEM_DIRS | grep -v / | tr '\n' ' ')
+# shellcheck disable=SC2086
+WWW_PERSIST=$(
+    {
+        printf '%s\n' $PERSIST_SYSTEM_DIRS | grep '^www/'
+        printf '%s\n' $WWW_DATA_SUBDIRS
+    } | sed -e 's#^www/##' -e 's#/.*##' | sort -u | tr '\n' ' '
+)
+WWW_VOLATILE='wwwlogs .Recycle_bin Recycle_bin php_session'
 
 : > "$OUT_MD"
 echo 0 > "$CRIT_FILE"
@@ -179,13 +200,17 @@ for sub in $WWW_AFTER; do
     case " $(printf '%s' "$WWW_BEFORE" | tr '\n' ' ') " in
         *" ${sub} "*) continue ;;   # 装之前就有：上游行为没变
     esac
-    policy_hit=0
+    state=''
     # shellcheck disable=SC2086
-    for p in $WWW_POLICY; do
-        [ "$p" = "$sub" ] && policy_hit=1
+    for p in $WWW_PERSIST; do
+        [ "$p" = "$sub" ] && state='✅ 已在声明清单内（持久化）'
     done
-    if [ "$policy_hit" = 1 ]; then
-        printf '| `www/%s` | ✅ 已在声明清单内 |\n' "$sub" >> "$OUT_MD"
+    # shellcheck disable=SC2086
+    for p in $WWW_VOLATILE; do
+        [ "$p" = "$sub" ] && state='⚪ 按设计不持久化（重建即清空）'
+    done
+    if [ -n "$state" ]; then
+        printf '| `www/%s` | %s |\n' "$sub" "$state" >> "$OUT_MD"
     else
         printf '| `www/%s` | ❌ **新出现且未声明，需人工确认怎么持久化** |\n' "$sub" >> "$OUT_MD"
         warn "未声明的 /www 子目录：/www/${sub}"

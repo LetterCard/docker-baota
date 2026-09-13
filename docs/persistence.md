@@ -34,7 +34,9 @@ data/                        （./data:/data）
 ├── www/                      业务数据 —— bind 目录，宿主机可直接读写
 │   ├── wwwroot/       ↔ 容器 /www/wwwroot     （站点）
 │   ├── backup/        ↔ 容器 /www/backup      （备份）
-│   └── server/data/   ↔ 容器 /www/server/data （MySQL）
+│   ├── server/data/   ↔ 容器 /www/server/data （MySQL）
+│   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库）
+│   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录）
 ├── panel/              面板状态 —— bind 目录
 │   ├── data/          ↔ 容器 /www/server/panel/data   （面板配置 / SQLite 库）
 │   ├── plugin/        ↔ 容器 /www/server/panel/plugin （已安装的插件）
@@ -59,11 +61,15 @@ data/                        （./data:/data）
 
 | | 例子 | 处理方式 |
 |---|---|---|
-| 面板代码 / 默认配置 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志只随容器活着 |
+| 面板代码 / 可再生的东西 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志）、`/www/.Recycle_bin`（回收站）、`/www/php_session`（PHP session） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志 / 回收站 / session 重建即空 |
 | 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在 `data/system/www/server`），装什么都能留住，不用按组件列清单 |
 | 插件数据 / 计划任务脚本 | `/www/server/total`、`/www/server/btwaf`、`/www/server/cron` | **同上**：都在 `/www/server` 之下，自动跟着持久化 |
 | 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin`（插件）、`panel/vhost`（站点配置与证书）、`panel/ssl`（面板证书）、`panel/config`（面板设置） | **bind 直通**：必须保留，否则等于重装面板 / 站点证书丢失 |
-| 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup` | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
+| 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup`、`/www/vmail`（邮局）、`/www/dk_project`（面板 Docker 模块） | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
+
+判断一个 `/www` 子路径属于哪一类只看一句话：**丢了要骂人的是数据**（站点、备份、
+数据库、邮件、Docker 项目 → 加进 `WWW_DATA_SUBDIRS`）；**重新生成就好的是缓存**
+（日志、回收站、session → 不持久化）。加一个目录只是往那份清单加一个词。
 
 所以：
 
@@ -101,6 +107,8 @@ data/                        （./data:/data）
 /www/wwwroot     ←bind→    源 = data/www/wwwroot
 /www/backup      ←bind→    源 = data/www/backup
 /www/server/data ←bind→    源 = data/www/server/data
+/www/vmail       ←bind→    源 = data/www/vmail（邮局）
+/www/dk_project  ←bind→    源 = data/www/dk_project（面板 Docker 模块的项目目录）
 /www/server/panel/data   ←bind→  源 = data/panel/data
 /www/server/panel/plugin ←bind→  源 = data/panel/plugin
 /www/server/panel/vhost  ←bind→  源 = data/panel/vhost

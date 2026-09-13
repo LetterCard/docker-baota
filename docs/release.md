@@ -35,7 +35,7 @@ line         channel  version                    install                        
 > **两条通道都是手动发布**（没有定时触发）。原因：`latest` 一旦自动推进，上游出问题
 > 就会把坏镜像立刻分发给所有使用者。现在的流程是：先看
 > [漂移检测](development.md#漂移检测)的报告与 issue，确认无关键漂移，再手动触发
-> **📦 构建并发布镜像**（`.github/workflows/build.yml`）。
+> **📦 发布：构建并发布镜像**（`.github/workflows/build.yml`）。
 
 ---
 

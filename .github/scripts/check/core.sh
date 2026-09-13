@@ -510,5 +510,21 @@ assert_processes_up "$(panel_status)"
 inside systemctl is-active btpanel >/dev/null 2>&1 || fail "重建后 btpanel 未 active"
 pass "面板与任务进程随容器自动恢复"
 
+step "B5) 校验优雅停机（SIGRTMIN+3 → systemd 依次停服）"
+# 生产里的停机路径是 docker stop / compose down：把 SIGRTMIN+3 发给 PID 1，
+# systemd 依次停掉服务，在 compose 的 90s 宽限期内退出。这条路径此前没有任何
+# 门禁覆盖 —— 所有重建测试用的都是 docker rm -f（硬杀）。它真出问题时的表现是
+# 「宽限期内停不下来 → 被 SIGKILL（退出码 137）→ MySQL/InnoDB 被硬杀」，
+# 属于丢数据风险，值得在这一层拦住（判据只看退出码与耗时，不看日志文案）
+_stop_start=$(date +%s)
+docker stop -t 90 "$CONTAINER" >/dev/null 2>&1 || true
+_stop_elapsed=$(( $(date +%s) - _stop_start ))
+_stop_exit=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER" 2>/dev/null || echo '?')
+[ "${_stop_exit}" != '137' ] \
+    || fail "优雅停机被 SIGKILL（退出码 137）：systemd 未在 90s 宽限期内停服（耗时 ${_stop_elapsed}s）"
+[ "${_stop_elapsed}" -le 90 ] \
+    || fail "优雅停机耗时 ${_stop_elapsed}s，超过 compose 的 stop_grace_period=90s"
+pass "优雅停机正常：${_stop_elapsed}s 内退出（未触发宽限期 SIGKILL；退出码 ${_stop_exit}）"
+
 echo
 echo "发布前健康检查全部通过（宝塔 ${EXPECT_VERSION}，含容器重建后的持久化验证）"

@@ -17,10 +17,12 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 
 ```
 /data（宿主机 data/，bind mount）
- ├── www/          ← 业务数据：三个直通目录（源在 overlay upper 外，宿主可直改）
+ ├── www/          ← 业务数据：直通目录（源在 overlay upper 外，宿主可直改）
  │    ├── wwwroot/        站点 data/www/wwwroot  ↔ 容器 /www/wwwroot
  │    ├── backup/         备份 data/www/backup   ↔ 容器 /www/backup
- │    └── server/data/    MySQL data/www/server/data ↔ /www/server/data
+ │    ├── server/data/    MySQL data/www/server/data ↔ /www/server/data
+ │    ├── vmail/          邮局 data/www/vmail     ↔ /www/vmail
+ │    └── dk_project/     面板 Docker 项目 dk_project ↔ /www/dk_project
  ├── panel/        ← 面板状态：逐子目录 bind（data、plugin、vhost、ssl、config）
  │    ├── data/          面板配置 / SQLite  ↔ /www/server/panel/data
  │    ├── plugin/        插件            ↔ /www/server/panel/plugin

@@ -2,7 +2,7 @@
 #  仓库根构建上下文排除清单
 #
 #  构建上下文是仓库根（docker build -f image/Dockerfile .），
-#  用 -f 指定各自的 Dockerfile。shared/ 下的构建脚本、运行期脚本与 systemd unit
+#  用 -f 指定各自的 Dockerfile。image/ 下的构建脚本、运行期脚本与 systemd unit
 #  都是镜像的一部分，必须留在上下文中。
 #
 #  作用：减小上下文体积；防止把 CI / 文档 / 本地专用的东西打进生产镜像。
