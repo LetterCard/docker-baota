@@ -87,6 +87,76 @@ is_critical() {
     esac
 }
 
+# ------------------------------------------------------------------------------
+# 挂载汇总成目录树（替代逐条打印的冗长日志）
+#   · 只读 /proc/mounts 为真值来源，不改任何挂载行为
+#   · 失败路径的告警仍由各 mount 函数 inline 打印，这里只渲染成功态
+#   · 面板代码（bind 自 /run 钉桩）单独一行提示「来自镜像层、不落持久化」
+# ------------------------------------------------------------------------------
+_emit_group() {
+    _hdr="$1"; _items="$2"; _cont="$3"; _seeded="${4:-}"
+    echo "${_hdr}"
+    _i=0
+    _total=$(set -- ${_items}; echo $#)
+    [ "${_total}" -eq 0 ] && return 0
+    for _it in ${_items}; do
+        _i=$((_i + 1))
+        _mark=''
+        case " ${_seeded} " in *" ${_it} "*) _mark=' (首次初始化)';; esac
+        if [ "${_i}" -eq "${_total}" ]; then
+            echo "${_cont}└── ${_it}${_mark}"
+        else
+            echo "${_cont}├── ${_it}${_mark}"
+        fi
+    done
+}
+
+print_mount_tree() {
+    _sys='' _www='' _panel='' _pinned=0
+    _seeded_list=''
+    if [ -f "${RUNTIME_DIR}/.seeded" ]; then
+        _seeded_list=$(cat "${RUNTIME_DIR}/.seeded" 2> /dev/null | tr '\n' ' ')
+    fi
+    # _dev _mp _fstype _opts …：overlay 看 upperdir，bind 看源路径
+    while read -r _dev _mp _fstype _opts _f _p; do
+        case "${_fstype}" in
+            overlay)
+                _up=''
+                _ifs="${IFS}"
+                IFS=,
+                for _o in ${_opts}; do
+                    case "${_o}" in upperdir=*) _up="${_o#upperdir=}";; esac
+                done
+                IFS="${_ifs}"
+                case "${_up}" in
+                    "${PERSIST_SYSTEM_ROOT}/"*) _sys="${_sys} ${_up#${PERSIST_SYSTEM_ROOT}/}";;
+                esac
+                ;;
+            *)
+                case "${_dev}" in
+                    "${PANEL_PIN_DIR}") _pinned=1;;
+                    "${PERSIST_DATA_ROOT}/www/"*)
+                        case "${_mp}" in
+                            /www/server/panel/*) _panel="${_panel} ${_mp#/www/server/panel/}";;
+                            *) _www="${_www} ${_mp#/www/}";;
+                        esac
+                        ;;
+                esac
+                ;;
+        esac
+    done < /proc/mounts
+
+    echo "💾 持久化层挂载"
+    _emit_group "├─ 系统层  ${PERSIST_SYSTEM_ROOT}" "${_sys}" "│   "
+    _emit_group "├─ 数据层  ${PERSIST_DATA_ROOT}/www" "${_www}" "│   "
+    _emit_group "└─ 面板状态  ${PERSIST_DATA_ROOT}/www/server/panel" "${_panel}" "    " "${_seeded_list}"
+    if [ "${_pinned}" -eq 1 ]; then
+        echo "📦 面板代码：来自镜像层 ${PANEL_DIR}（不落持久化层）"
+    else
+        warn "面板代码未能隔离出持久化层，面板内「更新」可能污染持久化"
+    fi
+}
+
 # ==============================================================================
 #  0. 并发互斥锁（flock）
 #  ★ 持锁必须是「独立后台进程」，不能用 exec 8<>lock + flock -n 8 的 fd 方式：
@@ -193,7 +263,6 @@ mount_persist() {
     # 挂载成功 ≠ 可写（virtiofs / NFS / 9p 会降级只读），实测写入
     if ( exec 2> /dev/null; : > "${_lower}/${PROBE}" ) && [ -e "${_upper}/${PROBE}" ]; then
         rm -f "${_lower}/${PROBE}"
-        log "持久化已挂载 /${_dir} <- ${_upper}"
         return 0
     fi
 
@@ -228,7 +297,6 @@ bind_subdir() {
         return 1
     fi
     if mount -o bind "${_source}" "${_target}" 2> /dev/null; then
-        log "持久化挂载 ${_target} <- ${_source}"
         return 0
     fi
     warn "绑定失败：${_target}（本次启动不会保存该目录）"
@@ -275,7 +343,7 @@ seed_panel_state() {
     if [ ! -e "${_source}" ] && [ -d "${_target}" ]; then
         if mkdir -p "${_source}" 2> /dev/null \
            && cp -a "${_target}/." "${_source}/" 2> /dev/null; then
-            log "面板状态首次初始化：${_sub} <- 镜像"
+            echo "${_sub}" >> "${RUNTIME_DIR}/.seeded" 2> /dev/null || true
         else
             warn "面板状态 ${_sub} 初始化失败，将以空目录启动"
         fi
@@ -332,6 +400,10 @@ mount_www_layer() {
 main() {
     acquire_lock || exit 1
 
+    # 运行态标记目录（tmpfs）：准备 seeded 记录文件，供挂载汇总树标注「首次初始化」
+    mkdir -p "${RUNTIME_DIR}" 2> /dev/null || true
+    : > "${RUNTIME_DIR}/.seeded" 2> /dev/null || true
+
     # ---- 1. 暂存 Docker 动态注入的文件（/etc 即将被 overlay 盖住）----
     rm -rf "${STAGING_DIR}"
     mkdir -p "${STAGING_DIR}"
@@ -351,7 +423,7 @@ main() {
     # 被 overlay 合并后的视图，面板内更新会写进持久化层，换镜像就升不了面板）
     if [ -d "${PANEL_DIR}" ] && mkdir -p "${PANEL_PIN_DIR}" 2> /dev/null; then
         if mount -o bind "${PANEL_DIR}" "${PANEL_PIN_DIR}" 2> /dev/null; then
-            log "面板代码已钉在 ${PANEL_PIN_DIR}（挂 overlay 后 bind 回 ${PANEL_DIR}）"
+            :
         else
             warn "无法把 ${PANEL_DIR} bind 到 ${PANEL_PIN_DIR}，本次面板代码会落进持久化层"
             PANEL_PIN_DIR=''
@@ -373,7 +445,7 @@ main() {
     # 插件数据）留在 overlay 的 upper 里持久化，面板目录本身则始终来自镜像
     if [ -n "${PANEL_PIN_DIR}" ]; then
         if mount -o bind "${PANEL_PIN_DIR}" "${PANEL_DIR}" 2> /dev/null; then
-            log "面板代码已 bind 回镜像层：${PANEL_DIR}（不落持久化层）"
+            :
         else
             warn "面板代码 bind 回 ${PANEL_DIR} 失败：面板代码可能落进持久化层"
             mark_critical "${PANEL_DIR}: 面板代码未隔离出持久化层"
@@ -382,6 +454,9 @@ main() {
 
     # ---- 3. 业务数据与面板状态（逐子目录 bind）----
     mount_www_layer
+
+    # ---- 3.5 挂载汇总成目录树（替代逐条日志）----
+    print_mount_tree
 
     if [ "${_failed}" -ne 0 ]; then
         warn '存在未持久化的目录，容器仍会启动，但销毁后这些目录的数据会丢失'
