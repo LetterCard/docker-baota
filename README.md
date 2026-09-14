@@ -268,7 +268,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 |---|---|
 | 把面板跑起来（飞牛 / 普通 Linux） | [快速开始](docs/quickstart.md) |
 | 搞清楚数据存在哪、会不会丢 | [持久化原理](docs/persistence.md) |
-| 了解为什么不用「直接挂 /etc」 | [持久化原理](docs/persistence.md#为什么用-overlay-而不是整目录-bind) |
+| 了解为什么不用「直接挂 /etc」 | [为什么用 overlay 而不是整目录 bind](docs/persistence.md#为什么用-overlay-而不是整目录-bind) |
 | 调整 compose 里的配置项 | [编排配置详解](docs/configuration.md) |
 | 备份、恢复或搬到新机器 | [备份与恢复](docs/backup.md) |
 | 升级、回滚或跨机器迁移 | [升级与迁移](docs/upgrade.md) |
