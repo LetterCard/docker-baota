@@ -133,6 +133,9 @@ install_packages() {
     # 清理必须写在本层内：Docker 分层特性下，后续层删除本层文件不会减小体积
     apt-get clean
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    # doc/man 兜底删除：上面的 dpkg path-exclude 已尽量不装，但个别包仍会落盘；
+    # 同层内删才真减体积（运行期无人读文档/手册，零风险）
+    rm -rf /usr/share/doc /usr/share/man
 
     # locale-gen 已在上面把 en_US.UTF-8 编译进 /usr/lib/locale/locale-archive，
     # 运行期 glibc 读的是那个归档，不再需要 /usr/share/i18n 的 charmaps/locales

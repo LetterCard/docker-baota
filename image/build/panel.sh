@@ -79,6 +79,8 @@ install_panel() {
     rm -f ${PANEL_DIR}/logs/*.pid ${PANEL_DIR}/logs/*.log
     find /var/log -type f -name '*.log' -delete
     rm -rf /tmp/* /var/tmp/*
+    # doc/man 兜底删除（同层内才减体积；官方脚本可能又 apt 装依赖，零风险）
+    rm -rf /usr/share/doc /usr/share/man
 }
 
 # ==============================================================================
