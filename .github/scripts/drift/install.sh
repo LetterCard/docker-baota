@@ -144,12 +144,29 @@ log '执行官方安装脚本（参数与 image/build/panel.sh 保持一致）'
 docker exec "$CONTAINER" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
     || die "下载安装脚本失败：${INSTALL_URL}"
 
-# 参数故意不加引号：官方脚本要求逐个参数传入（与 panel.sh 一致）
-docker exec "$CONTAINER" bash -c \
-    "cd /root && bash install.sh -y --ssl-disable" \
-    || { docker exec "$CONTAINER" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
-         die '官方安装脚本执行失败'; }
-log '安装完成，开始比对'
+# 流式执行：后台跑安装、前台 tail 实时进度，避免长静默像卡死
+# 官方安装脚本在 non-TTY（CI / 本地管道）下几乎不向 stdout 打印，进度都写进
+# 容器内的 /tmp/install.log；这里跟随它，安装过程的每一步都可见。
+docker exec -d "$CONTAINER" bash -c "cd /root && bash install.sh -y --ssl-disable" \
+    || die '官方安装脚本启动失败'
+log '官方安装脚本执行中（实时输出见下方），请稍候…'
+docker exec "$CONTAINER" tail -F /tmp/install.log 2>/dev/null &
+_TAIL_PID=$!
+# 安装进程退出即停止跟随（pgrep 匹配 bash install.sh）
+while docker exec "$CONTAINER" bash -c 'pgrep -f "install.sh" >/dev/null 2>&1'; do
+    sleep 5
+done
+kill "$_TAIL_PID" 2>/dev/null || true
+wait "$_TAIL_PID" 2>/dev/null || true
+
+# 成功判据：面板主程序已就位（与原「依赖退出码」等价，但兼容后台执行；
+# core.sh A4 同样以 /www/server/panel/BT-P* 存在作为面板装好的标志）
+if docker exec "$CONTAINER" bash -c 'ls /www/server/panel/BT-P* >/dev/null 2>&1'; then
+    log '安装完成，开始比对'
+else
+    docker exec "$CONTAINER" bash -c "tail -n 80 '${INSTALL_LOG}'" >&2 || true
+    die '官方安装脚本执行失败'
+fi
 
 AFTER=$(count_top_dirs)
 

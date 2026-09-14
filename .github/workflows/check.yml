@@ -69,6 +69,7 @@ jobs:
             [ -n "${ver}" ] || { echo "::error::${vfile} 为空"; exit 1; }
 
             # 回归脚本自己会 pull / 起容器 / 跑三套门禁；这里只负责收集结果
+            echo "🔬 开始验证 ${display}（${ver}）…"
             if bash "${CHECK_DIR}/published.sh" "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${ver}" \
                     "${ver}" "/tmp/report-${line}.md"; then
               icon='✅'
