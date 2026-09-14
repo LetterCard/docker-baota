@@ -2,8 +2,8 @@
 
 > 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-09-14 01:03:37
-- 触发方式：workflow_dispatch
+- 生成时间（UTC）：2026-09-14 21:59:56
+- 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
 - 验证脚本：`.github/scripts/check/published.sh`
 
@@ -25,7 +25,7 @@
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ✅ 通过 6 / 失败 0 |
-| 耗时 | 164s |
+| 耗时 | 137s |
 
 #### 检查项
 
@@ -42,43 +42,33 @@
 #### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 09:01:24 - 已获得系统层持久化层独占锁
-⚙️ [init] 09:01:27 - 已获得数据层持久化层独占锁
-⚙️ [init] 09:01:27 - 持久化层并发保护已就位
-⚙️ [init] 09:01:27 - 面板代码已钉在 /run/baota/panel（挂 overlay 后 bind 回 /www/server/panel）
-⚙️ [init] 09:01:27 - 持久化已挂载 /etc <- /data/.system/etc
-⚙️ [init] 09:01:27 - 持久化已挂载 /usr <- /data/.system/usr
-⚙️ [init] 09:01:27 - 持久化已挂载 /var <- /data/.system/var
-⚙️ [init] 09:01:27 - 持久化已挂载 /root <- /data/.system/root
-⚙️ [init] 09:01:27 - 持久化已挂载 /opt <- /data/.system/opt
-⚙️ [init] 09:01:27 - 持久化已挂载 /home <- /data/.system/home
-⚙️ [init] 09:01:27 - 持久化已挂载 /srv <- /data/.system/srv
-⚙️ [init] 09:01:27 - 持久化已挂载 /www/server <- /data/.system/www/server
-⚙️ [init] 09:01:27 - 面板代码已 bind 回镜像层：/www/server/panel（不落持久化层）
-⚙️ [init] 09:01:27 - 持久化挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 09:01:27 - 持久化挂载 /www/backup <- /data/www/backup
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/data <- /data/www/server/data
-⚙️ [init] 09:01:27 - 面板状态首次初始化：data <- 镜像
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/panel/data <- /data/www/server/panel/data
-⚙️ [init] 09:01:27 - 面板状态首次初始化：plugin <- 镜像
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/panel/plugin <- /data/www/server/panel/plugin
-⚙️ [init] 09:01:27 - 面板状态首次初始化：vhost <- 镜像
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/panel/vhost <- /data/www/server/panel/vhost
-⚙️ [init] 09:01:27 - 面板状态首次初始化：ssl <- 镜像
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/panel/ssl <- /data/www/server/panel/ssl
-⚙️ [init] 09:01:27 - 面板状态首次初始化：config <- 镜像
-⚙️ [init] 09:01:27 - 持久化挂载 /www/server/panel/config <- /data/www/server/panel/config
-🚀 [entrypoint] 09:01:27 - 首次使用这份持久化数据，记录镜像版本 12.0.0
-🚀 [entrypoint] 09:01:27 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+⚙️ [init] 05:58:04 - 已获得系统层持久化层独占锁
+⚙️ [init] 05:58:07 - 已获得数据层持久化层独占锁
+⚙️ [init] 05:58:07 - 持久化层并发保护已就位
+💾 持久化层挂载
+├─ 系统层  /data/.system
+│   ├── etc
+│   ├── usr
+│   ├── var
+│   ├── root
+│   ├── opt
+│   ├── home
+│   ├── srv
+│   └── www/server
+├─ 数据层  /data/www
+└─ 面板状态  /data/www/server/panel
+⚠️ [init][WARN] 05:58:07 - 面板代码未能隔离出持久化层，面板内「更新」可能污染持久化
+🚀 [entrypoint] 05:58:07 - 首次使用这份持久化数据，记录镜像版本 12.0.0
+🚀 [entrypoint] 05:58:07 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 09:01:28 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 09:01:28 - 面板用户：baota
-🚀 [entrypoint] 09:01:28 - 面板口令：***已脱敏***
-🚀 [entrypoint] 09:01:28 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 09:01:28 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 09:01:28 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 05:58:07 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 05:58:07 - 面板用户：baota
+🚀 [entrypoint] 05:58:07 - 面板口令：***已脱敏***
+🚀 [entrypoint] 05:58:07 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 05:58:07 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 05:58:07 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 09:01:28 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 05:58:07 - 移交 systemd：/usr/sbin/init
 ```
 
 ---
@@ -92,7 +82,7 @@
 | 镜像 | `bugseeker/baota:13.0.0` |
 | 期望宝塔版本 | `13.0.0` |
 | 结果 | ✅ 通过 6 / 失败 0 |
-| 耗时 | 142s |
+| 耗时 | 131s |
 
 #### 检查项
 
@@ -109,43 +99,33 @@
 #### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 09:01:17 - 已获得系统层持久化层独占锁
-⚙️ [init] 09:01:20 - 已获得数据层持久化层独占锁
-⚙️ [init] 09:01:20 - 持久化层并发保护已就位
-⚙️ [init] 09:01:20 - 面板代码已钉在 /run/baota/panel（挂 overlay 后 bind 回 /www/server/panel）
-⚙️ [init] 09:01:20 - 持久化已挂载 /etc <- /data/.system/etc
-⚙️ [init] 09:01:20 - 持久化已挂载 /usr <- /data/.system/usr
-⚙️ [init] 09:01:20 - 持久化已挂载 /var <- /data/.system/var
-⚙️ [init] 09:01:20 - 持久化已挂载 /root <- /data/.system/root
-⚙️ [init] 09:01:20 - 持久化已挂载 /opt <- /data/.system/opt
-⚙️ [init] 09:01:20 - 持久化已挂载 /home <- /data/.system/home
-⚙️ [init] 09:01:20 - 持久化已挂载 /srv <- /data/.system/srv
-⚙️ [init] 09:01:20 - 持久化已挂载 /www/server <- /data/.system/www/server
-⚙️ [init] 09:01:20 - 面板代码已 bind 回镜像层：/www/server/panel（不落持久化层）
-⚙️ [init] 09:01:20 - 持久化挂载 /www/wwwroot <- /data/www/wwwroot
-⚙️ [init] 09:01:20 - 持久化挂载 /www/backup <- /data/www/backup
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/data <- /data/www/server/data
-⚙️ [init] 09:01:20 - 面板状态首次初始化：data <- 镜像
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/panel/data <- /data/www/server/panel/data
-⚙️ [init] 09:01:20 - 面板状态首次初始化：plugin <- 镜像
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/panel/plugin <- /data/www/server/panel/plugin
-⚙️ [init] 09:01:20 - 面板状态首次初始化：vhost <- 镜像
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/panel/vhost <- /data/www/server/panel/vhost
-⚙️ [init] 09:01:20 - 面板状态首次初始化：ssl <- 镜像
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/panel/ssl <- /data/www/server/panel/ssl
-⚙️ [init] 09:01:20 - 面板状态首次初始化：config <- 镜像
-⚙️ [init] 09:01:20 - 持久化挂载 /www/server/panel/config <- /data/www/server/panel/config
-🚀 [entrypoint] 09:01:20 - 首次使用这份持久化数据，记录镜像版本 13.0.0
-🚀 [entrypoint] 09:01:20 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+⚙️ [init] 05:57:51 - 已获得系统层持久化层独占锁
+⚙️ [init] 05:57:54 - 已获得数据层持久化层独占锁
+⚙️ [init] 05:57:54 - 持久化层并发保护已就位
+💾 持久化层挂载
+├─ 系统层  /data/.system
+│   ├── etc
+│   ├── usr
+│   ├── var
+│   ├── root
+│   ├── opt
+│   ├── home
+│   ├── srv
+│   └── www/server
+├─ 数据层  /data/www
+└─ 面板状态  /data/www/server/panel
+⚠️ [init][WARN] 05:57:54 - 面板代码未能隔离出持久化层，面板内「更新」可能污染持久化
+🚀 [entrypoint] 05:57:54 - 首次使用这份持久化数据，记录镜像版本 13.0.0
+🚀 [entrypoint] 05:57:54 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 09:01:20 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 09:01:20 - 面板用户：baota
-🚀 [entrypoint] 09:01:20 - 面板口令：***已脱敏***
-🚀 [entrypoint] 09:01:20 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 09:01:20 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 09:01:20 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 05:57:54 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 05:57:54 - 面板用户：baota
+🚀 [entrypoint] 05:57:54 - 面板口令：***已脱敏***
+🚀 [entrypoint] 05:57:54 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 05:57:54 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 05:57:54 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 09:01:20 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 05:57:54 - 移交 systemd：/usr/sbin/init
 ```
 
 ---
