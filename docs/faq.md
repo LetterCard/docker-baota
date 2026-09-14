@@ -63,8 +63,9 @@ docker exec -it baota bt 5         # 重置面板口令
 
 ## ARM 机型上很慢
 
-compose 里 `platform: linux/amd64` 会让 ARM 机型跑在 QEMU 模拟下 ——
-镜像同时发布了 amd64 与 arm64，把这行注释掉即可自动挑匹配的架构。
+旧版 compose 曾锁定 `platform: linux/amd64`，会让 ARM 机型跑在 QEMU 模拟下。
+当前 compose 已移除该行，Docker 会按宿主机架构自动选择 —— 若仍很慢，
+确认你没有在用旧的 compose 文件。
 
 ## `/tmp` 里的临时文件占了很多空间？
 

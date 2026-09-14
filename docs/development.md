@@ -246,8 +246,8 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 | amd64 | 官方安装脚本自带的那一份 | 构建快 |
 | arm64 | 同上（本项目不做任何干预） | 官方脚本在 arm64 上要多编译一些组件，构建较慢但功能一致 |
 
-因为两个架构都已发布，compose 里的 `platform: linux/amd64` 在 ARM 机型上**应该注释掉**，
-否则会跑在 QEMU 模拟下、性能损耗明显。
+因为两个架构都已发布，compose **不再锁定** `platform`，Docker 会按宿主机架构自动选择。
+（历史上曾写死 `linux/amd64`，会让 ARM 机型跑在 QEMU 模拟下，现已移除。）
 
 ## 镜像纯净度
 
