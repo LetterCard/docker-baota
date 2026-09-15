@@ -7,12 +7,12 @@
 #        health          功能检查（面板 / 凭据 / 备份 / 重建 / 入口守卫）
 #        health-degrade  只读持久化根是否真被识别为降级
 #        health-upgrade  版本护栏 + 升级前快照
-#        health-all      一次跑全三套
+#        health-restore  备份恢复闭环（备份能不能真的恢复回来）
+#        health-all      一次跑全四套
 #        backup          全量备份   reset-system  重置系统层（CONFIRM=yes）
 #        lint            静态检查（语法 / 配置真源 / 命名 / 注释 / 链接）
 #
-#  线参数（安装脚本 / 基础镜像 / 版本）从 image/lines.conf 读，Dockerfile 只有一份；
-#  镜像标签可用 BAOTA_IMAGE=... make up 覆盖。
+#  线参数从 image/lines.conf 读、Dockerfile 只有一份；镜像标签可用 BAOTA_IMAGE=... make up 覆盖。
 # ==============================================================================
 
 LINE ?= 12_version
@@ -45,7 +45,7 @@ endif
 
 .DEFAULT_GOAL := help
 .PHONY: help build up down restart logs ps exec health health-degrade health-upgrade \
-        health-all backup reset-system lint version
+        health-restore health-all backup reset-system lint version
 
 help: ## 显示本帮助
 	@echo 'baota-docker · make <目标> [LINE=12.0.0|13.0.0] [IMAGE=标签]'
@@ -81,11 +81,12 @@ ps: ## 查看健康状态
 exec: ## 进入容器（make exec CMD="bt default"）
 	cd $(ROOT_DIR) && docker compose exec baota $(or $(CMD),bash)
 
-# 三套发布前检查的统一入口（.github/scripts/check/），
+# 四套发布前检查的统一入口（.github/scripts/check/），
 # 各覆盖一个互不相关的失效面：
 #   core     功能检查 —— 「功能完整性」
 #   degrade  持久化降级场景 —— 「挂载正确性」
 #   upgrade  升级 / 降级路径 —— 「版本演进」
+#   restore  备份恢复闭环 —— 「备份可恢复」
 CHECK_DIR := .github/scripts/check
 CHECK_VERSION := $(or $(VERSION),$(LINE_VER))
 
@@ -98,7 +99,10 @@ health-degrade: ## 持久化降级场景（只读持久化根是否被识别为 
 health-upgrade: ## 升级 / 降级路径（版本护栏 + 升级前快照）
 	bash $(CHECK_DIR)/run.sh upgrade "$(IMAGE)" "$(CHECK_VERSION)"
 
-health-all: ## 三套全部跑一遍，任一失败即终止
+health-restore: ## 备份恢复闭环（站点 / 数据库 / 面板状态能否恢复回来）
+	bash $(CHECK_DIR)/run.sh restore "$(IMAGE)"
+
+health-all: ## 四套全部跑一遍，任一失败即终止
 	bash $(CHECK_DIR)/run.sh all "$(IMAGE)" "$(CHECK_VERSION)"
 
 backup: ## 在运行中的容器里生成一份全量备份

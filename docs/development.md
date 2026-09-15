@@ -277,7 +277,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 ## 发布前检查覆盖什么
 
-四份脚本，各覆盖一个**互不相关**的失效面；具体断言写在脚本里（脚本头有说明），
+五份脚本，各覆盖一个**互不相关**的失效面；具体断言写在脚本里（脚本头有说明），
 这里只给索引 —— 细节抄一份到这里只会两处漂移：
 
 | 脚本 | 覆盖 |
@@ -285,10 +285,11 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 | `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
 | `check/degrade.sh` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
 | `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
-| `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述三套** |
+| `check/restore.sh` | 备份恢复闭环：包内三类关键路径完整、解回全新数据卷后站点 / 数据库 / 面板状态可恢复、**恢复后不被误判为首次启动**（安全入口与端口不变） |
+| `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述四套** |
 
-入口 `check/run.sh <core|degrade|upgrade|all> <镜像> <版本>`；
-`make health` / `health-degrade` / `health-upgrade` / `health-all` 是它的包装。
+入口 `check/run.sh <core|degrade|upgrade|restore|all> <镜像> [<版本>]`；
+`make health` / `health-degrade` / `health-upgrade` / `health-restore` / `health-all` 是它的包装。
 
 ## 改代码时的注意事项
 

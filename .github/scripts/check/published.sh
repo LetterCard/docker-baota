@@ -168,10 +168,11 @@ C
 # ---------------------------------------------------------------------------
 run_suites() {
     local suite rc
-    for suite in core degrade upgrade; do
+    for suite in core degrade upgrade restore; do
         log "运行门禁：${suite}"
         rc=0
-        if [ "$suite" = 'degrade' ]; then
+        # degrade / restore 只用 <镜像>（不依赖期望版本）
+        if [ "$suite" = 'degrade' ] || [ "$suite" = 'restore' ]; then
             bash "${SCRIPT_DIR}/run.sh" "$suite" "$IMAGE" > "/tmp/suite-${suite}.log" 2>&1 || rc=$?
         else
             bash "${SCRIPT_DIR}/run.sh" "$suite" "$IMAGE" "$EXPECT_VERSION" > "/tmp/suite-${suite}.log" 2>&1 || rc=$?

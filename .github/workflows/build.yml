@@ -9,7 +9,7 @@ name: 📦 发布：构建并发布镜像
 #  流程（每条线独立、互不阻塞）：
 #    prep        读声明表 → 探测上游版本 → 与 VERSION 比对 → 生成「线 × 架构」矩阵
 #    lint        静态检查（与版本无关，无条件运行）
-#    build       各架构在原生 runner 构建 → 三套发布前检查 → 通过才按 digest 推送
+#    build       各架构在原生 runner 构建 → 四套发布前检查 → 通过才按 digest 推送
 #    publish     合并两架构 digest → 按标签策略打 repo:<版本>
 #    write_back  把已发布版本号回写进该线的 VERSION 文件
 #
@@ -268,10 +268,10 @@ jobs:
           df -Ph / /var/lib/docker 2>/dev/null || true
           docker system df 2>/dev/null || true
 
-      # ---- 三道验证：任一失败，本 job 即失败，推送不会发生 ----
-      # 三套检查测三个互不相关的失效面（功能完整性 / 挂载与降级 / 版本演进），
+      # ---- 四道验证：任一失败，本 job 即失败，推送不会发生 ----
+      # 四套检查测四个互不相关的失效面（功能完整性 / 挂载与降级 / 版本演进 / 备份可恢复），
       # 各自启停独立容器（容器名按 PID 区分），可以并行跑
-      - name: 🩺 三套健康检查并行（功能 / 挂载 / 升级）
+      - name: 🩺 四套健康检查并行（功能 / 挂载 / 升级 / 恢复）
         run: |
           set -euo pipefail
           LOG_DIR="${RUNNER_TEMP:-/tmp}/hc-logs"
@@ -281,20 +281,22 @@ jobs:
           bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
           bash .github/scripts/check/run.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
           bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check/run.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
 
           FAILED=0
           wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
           wait "${PID_DEGRADE}"  || { echo "::error::degrade 检查失败，日志见 ${LOG_DIR}/degrade.log";  FAILED=1; }
           wait "${PID_UPGRADE}" || { echo "::error::upgrade 检查失败，日志见 ${LOG_DIR}/upgrade.log"; FAILED=1; }
+          wait "${PID_RESTORE}" || { echo "::error::restore 检查失败，日志见 ${LOG_DIR}/restore.log"; FAILED=1; }
 
           if [ "${FAILED}" -ne 0 ]; then
-            for f in core degrade upgrade; do
+            for f in core degrade upgrade restore; do
               echo "===== ${f}.log (tail 80) ====="
               tail -n 80 "${LOG_DIR}/${f}.log" || true
             done
             exit 1
           fi
-          echo '✅ 三套健康检查全过'
+          echo '✅ 四套健康检查全过'
 
       - name: 🔑 登录 DockerHub
         uses: docker/login-action@v4.6.0
