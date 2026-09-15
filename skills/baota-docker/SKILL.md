@@ -38,16 +38,21 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
    `AUTO_SNAPSHOT_KEEP` 的唯一真源是 `image/conf/defaults.env`。
    不要往 Dockerfile `ENV` 或 CI 脚本里再抄一份 —— 漂移的表现是静默丢数据。
-2. **命名先查 `docs/conventions.md`**（唯一真源）：宝塔官方已有的目录原样沿用，
-   官方没有的按权威标准，都没有的用单词、不写连字符组合。新的持久化落点必须
-   与容器内路径同名（`data/www/<路径>`），不要另起一套。
-2. **运行期脚本必须放 `/baota`**，不能放 `/opt`、`/etc`、`/var` 等持久化目录。
+2. **命名先查 `docs/conventions.md`**（唯一真源），分节查：新增文件 / 目录查 §4，
+   新增变量查 §5。要点：官方已有的目录原样沿用；**连字符是常规分隔符、该用就用**
+   （`python-real` 就是标准范例），真正禁止的是自造拼法与自造缩写 —— 缩写只在业界
+   通用时才用，白名单就 `rc` / `pid` / `sha` / `tmp` 四个（`src` / `dst` / `PKG`
+   都不算，要写 `source` / `target` / `BACKUP_FILE`）。变量与它指向的路径要对得上：
+   标记文件 `/run/baota/critical` 对应变量 `CRITICAL`，不加 `_FILE`。
+   新的持久化落点必须与容器内路径同名（`data/www/<路径>`），不要另起一套。
+3. **运行期脚本必须放 `/baota`**，不能放 `/opt`、`/etc`、`/var` 等持久化目录。
    放进持久化目录 = 用户还原备份时旧脚本反过来屏蔽新镜像。
-3. **构建期与探活命令里不能出现 `BT-Panel` 字面量**。`bt7.init` 用
+4. **构建期与探活命令里不能出现 `BT-Panel` 字面量**。`bt7.init` 用
    `ps aux | grep -E '(runserver|BT-Panel)'` 判断面板是否已在运行，
    匹配到 PID 1 就会误判 already running 而跳过启动。用 glob（`BT-P*`）。
-4. **降级判据用标记文件，不用日志文案**。`/run/baota/degraded`、
-   `/run/baota/critical` 是门读取的对象，改告警文案不能影响门禁。
+5. **判据用标记文件，不用日志文案**。`/run/baota/degraded`、
+   `/run/baota/critical`、`/run/baota/panel-isolated` 都是门禁读取的对象，
+   改告警文案不能影响门禁。
 5. **持久化层每次写入都不可逆**：新增「每次启动都做的事」时，必须先判断结果是否真的
    需要变化，变了才写（`cmp` / 符号链接检查 / 文件存在性检查）。
 6. **`init.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。

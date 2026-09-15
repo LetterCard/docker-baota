@@ -9,7 +9,7 @@
 #    ① 禁用标识符（§4、§5）      ② 容器名 baota- 前缀（§4）
 #    ③ 卷名 -data / -ro（§4）    ④ 配置变量前后缀白名单（§5）
 #    ⑤ 术语「线」（§6、§7）      ⑥ image/scripts/ 一律 .sh（§4）
-#    ⑦ 线声明表含 line / display 两列（§6）
+#    ⑦ 线声明表含 line / display 两列（§6）  ⑧ 自造缩写（§4）
 #
 #  只扫当前代码：docs/history.md 是开发期归档，按 conventions 的说明豁免
 # ==============================================================================
@@ -118,10 +118,40 @@ else:
     if not head or 'line' not in head[0] or 'display' not in head[0]:
         bad.append('image/lines.conf 的列标题行缺少 line / display 两列')
 
+# ---------------------------------------------------------------- ⑧ 自造缩写
+# §4：缩写只在**业界通用**时才用，白名单就 rc / pid / sha / tmp 四个。
+# 机器分不出「缩写」与「本就完整的短单词」—— SAFE / PORT / MODE / ICON 是完整
+# 单词，SRC / DST / PKG 是把一个词截断，没有字典就判不出来。所以只能列清单：
+# 新踩到一个就往这里加一个，并把对应的全称同步进 docs/conventions.md §4 与
+# skills/baota-docker/SKILL.md 的红线，让下一个人不用再踩同一个坑。
+ABBREV = {
+    'SRC':  'source',
+    'DST':  'target（dest 同样是缩写，别换过去）',
+    'PKG':  'BACKUP_FILE（路径变量的 _FILE 后缀见 §5）',
+    'CFG':  'config',
+    'TMPL': 'template',
+}
+for f in targets:
+    try:
+        text = f.read_text(encoding='utf-8')
+    except (UnicodeDecodeError, OSError):
+        continue
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith('#'):
+            continue          # 同 ①：注释里举例「不该叫 X」是允许的
+        # 必须把标识符按 _ 拆开再比：`\bSRC\b` 抓不到 SRC_CONTAINER —— 下划线是
+        # 词字符，SRC 后面没有词边界，整词匹配会静默漏掉「缩写 + 后缀」这种写法，
+        # 而那恰恰是缩写最常见的出现形式（SRC_CONTAINER / DST_VOLUME / PKG_PATH）
+        for token in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', line):
+            for part in re.split(r'[^A-Za-z0-9]+', token):
+                if part in ABBREV:
+                    bad.append(f'{f}:{lineno}: 自造缩写 `{part}` → 写全称'
+                               f' {ABBREV[part]} → {line.strip()[:60]}')
+
 if bad:
     for b in bad:
         print(f'  FAIL {b}')
     print('  命名规范见 docs/conventions.md；改约定时要同时改本检查')
     sys.exit(1)
-print('  ok  命名规范（禁用标识符 / 容器名 / 卷名 / 变量前后缀 / 术语 / 声明表）')
+print('  ok  命名规范（禁用标识符 / 自造缩写 / 容器名 / 卷名 / 变量前后缀 / 术语 / 声明表）')
 PY
