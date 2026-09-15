@@ -61,6 +61,12 @@ DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
 RUNTIME_DIR=/run/baota
 DEGRADED="${RUNTIME_DIR}/degraded"
 CRITICAL="${RUNTIME_DIR}/critical"
+# 面板代码隔离成功的标记。与 degraded / critical 同属「运行态标记」：/run 是 tmpfs，
+# 每次启动重新评估、不会残留上次的结果。core 门禁断言它存在 —— 让「隔离是否生效」
+# 能被门禁直接判定，而不是只体现在启动日志的文案里（两者此前出现过不一致）
+# 变量名照 §5 的对应规则：标记文件 /run/baota/critical 对应变量 CRITICAL，
+# 故这里不加 _FILE（_FILE 是给 META_VERSION_FILE 那种「文件名」用的）
+PANEL_ISOLATED="${RUNTIME_DIR}/panel-isolated"
 
 # ------------------------------------------------------------------------------
 # 日志与降级标记
@@ -94,7 +100,7 @@ is_critical() {
 #   · 失败路径的告警仍由各 mount 函数 inline 打印，这里只渲染成功态
 #   · 面板代码隔离状态不走 /proc/mounts 反查：盖在 /www/server overlay 之下的
 #     bind 在 /proc/mounts 里的 device 字段不可靠，会误报「未隔离」；这里直接
-#     用 main() 根据 bind 回的成败设好的 PANEL_ISOLATED 判断
+#     用 main() 按 bind 回的成败写下的 PANEL_ISOLATED 标记判断
 # ------------------------------------------------------------------------------
 _emit_group() {
     _hdr="$1"; _items="$2"; _cont="$3"; _seeded="${4:-}"
@@ -152,7 +158,7 @@ print_mount_tree() {
     _emit_group "├─ 系统层  ${PERSIST_SYSTEM_ROOT}" "${_sys}" "│   "
     _emit_group "├─ 数据层  ${PERSIST_DATA_ROOT}/www" "${_www}" "│   "
     _emit_group "└─ 面板状态  ${PERSIST_DATA_ROOT}/www/server/panel" "${_panel}" "    " "${_seeded_list}"
-    if [ "${PANEL_ISOLATED:-0}" -eq 1 ]; then
+    if [ -e "${PANEL_ISOLATED}" ]; then
         echo "📦 面板代码：来自镜像层 ${PANEL_DIR}（不落持久化层）"
     else
         warn "面板代码未能隔离出持久化层，面板内「更新」可能污染持久化"
@@ -419,7 +425,9 @@ main() {
     #     /www/server 也在这一层（组件、计划任务脚本、插件数据都在它下面），
     #     但面板代码必须先钉在 /run 上、挂完 overlay 再 bind 回去 —— 见下面
     _failed=0
-    PANEL_ISOLATED=0
+    # 标记先清掉：/run 正常是 tmpfs（重启即空），但万一不是，也不能让上次的
+    # 「已隔离」残留成假阳性 —— 隔离结论只认本次 bind 回的成败
+    rm -f "${PANEL_ISOLATED}" 2> /dev/null || true
 
     # 面板代码来自镜像层、不落持久化层：先把镜像里的面板目录 bind 到 /run，
     # 等 /www/server 的 overlay 挂上后再 bind 回去（顺序反了装的就是镜像里那份
@@ -448,7 +456,7 @@ main() {
     # 插件数据）留在 overlay 的 upper 里持久化，面板目录本身则始终来自镜像
     if [ -n "${PANEL_PIN_DIR}" ]; then
         if mount -o bind "${PANEL_PIN_DIR}" "${PANEL_DIR}" 2> /dev/null; then
-            PANEL_ISOLATED=1
+            : > "${PANEL_ISOLATED}" 2> /dev/null || true
         else
             warn "面板代码 bind 回 ${PANEL_DIR} 失败：面板代码可能落进持久化层"
             mark_critical "${PANEL_DIR}: 面板代码未隔离出持久化层"

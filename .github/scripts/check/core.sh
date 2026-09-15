@@ -167,6 +167,13 @@ fi
 inside_sh 'rm -f /www/server/panel/_code_probe'
 pass "面板代码来自镜像、不落持久化层（组件与插件数据则落在 ${PERSIST_SYSTEM_ROOT}/www/server）"
 
+# 隔离标记（init.sh 在 bind 回成功后写下 /run/baota/panel-isolated）：把「隔离是否
+# 生效」变成可断言的状态，而不只是启动日志里的一句文案 —— 两者此前出现过不一致
+# （日志误报「未隔离」而实际是隔离的），只有标记能让这类不一致在门禁里直接变红
+inside test -e /run/baota/panel-isolated \
+    || fail "缺少面板隔离标记 /run/baota/panel-isolated：面板代码可能落进持久化层"
+pass "面板隔离标记存在（隔离结论与真实挂载结果一致）"
+
 # 并发保护：同一份 data 不能被两个实例同时挂载（内核 EBUSY / 行为未定义）。
 # 第二实例必须被独占锁拦下并中止 —— 这是数据安全性质，要在推送前就拦住
 # （判据是「它退出了」，不依赖日志文案）
