@@ -85,7 +85,7 @@ data/
 - **CI 临时容器与卷**（`check/` 与 `drift/` 里 `docker run` 出来的，跑完即删）：
   容器名 `baota-<用途>-<PID>`、卷名 `baota-<用途>-<data|ro>-<PID>`。
   ★ 统一 `baota-` 前缀，是为了能 `docker ps -f name=baota-` 一次看全、
-  `docker rm -f $(docker ps -aq -f name=baota-)` 一次清干净（三套门禁 + 巡检 +
+  `docker rm -f $(docker ps -aq -f name=baota-)` 一次清干净（四套门禁 + 巡检 +
   漂移检测同时在前台跑时，混杂的名字会让人漏掉残留）；卷名后缀 `-data` / `-ro`
   说明**用途**（普通数据卷 / 只读卷），不写 `-vol` 那种只说明「它是个卷」的名字。
 - **禁止自造缩写**（自造拼法的近亲）：项目里已有的全称照抄 —— `SYSTEM` 不写 `SYS`、

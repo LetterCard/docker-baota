@@ -2,7 +2,7 @@
 # ==============================================================================
 #  发布前健康检查的公共样板（被 core.sh / degrade.sh / upgrade.sh source）
 #
-#  三套检查脚本（core / degrade / upgrade）各自盯一个互不相关的失效面，但「跟
+#  四套检查脚本（core / degrade / upgrade / restore）各自盯一个互不相关的失效面，但「跟
 #  docker 打交道 + 输出格式」的样板原本是三份逐字重复的实现，抽在这里：
 #    配置解析 expand_vars / read_default（含嵌套引用展开）｜输出 pass / step / fail
 #    容器操作 inside / inside_sh / inside_cat / is_running / logs_match
@@ -11,7 +11,7 @@
 #  source 前必须先设置 CONTAINER；可选（设了才会被 cleanup 回收）：
 #    VOLUME / VOL_RO / WORK_ROOT；ICON 是 step 的日志前缀 emoji，只影响观感
 #
-#  ★ 只放「三套都一样」的样板：各脚本特有的断言留在各自文件里，抽出来只会
+#  ★ 只放「四套都一样」的样板：各脚本特有的断言留在各自文件里，抽出来只会
 #    让「这套检查到底验了什么」变得难读。
 # ==============================================================================
 
@@ -49,7 +49,7 @@ fail() {
 
 # 收尾：按各脚本实际用到的资源名清理，没设置的直接跳过。
 # 用 ${VAR:-} 而不是 $VAR —— 本文件可能在那些变量赋值之前就被 source，
-# 而三套脚本都开着 set -u，引用未定义变量会直接中断退出
+# 而四套脚本都开着 set -u，引用未定义变量会直接中断退出
 cleanup() {
     [ -n "${CONTAINER:-}" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     [ -n "${CONTAINER_DUP:-}" ] && docker rm -f "$CONTAINER_DUP" >/dev/null 2>&1 || true

@@ -51,7 +51,7 @@ baota-docker/
     ├── reports/                 CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
     ├── scripts/
     │   ├── report.py       把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
-    │   ├── check/          发布前检查三套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
+    │   ├── check/          发布前检查四套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
     │   ├── drift/           漂移检测脚本（目录漂移）
     │   └── lint/            配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
     └── workflows/
@@ -75,7 +75,7 @@ baota-docker/
 - **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` /
   `CRITICAL_DIRS` / `AUTO_SNAPSHOT_KEEP` 的唯一真源是 `image/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
-  `check/` 下的三套检查脚本也从该文件解析，不再硬编码一份
+  `check/` 下的四套检查脚本也从该文件解析，不再硬编码一份
 - **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]` /
   `[guard]` / `[verify]`（日巡检）/ `[drift]`（漂移检测）
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。

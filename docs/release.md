@@ -44,7 +44,7 @@ line         display  version                    install                        
 ```
 prep   读 lines.conf → 逐线探测上游版本（banner / api）→ 与 VERSION 比对 → 生成矩阵
   ├─ lint   静态检查（与版本无关，无条件跑）
-  ├─ build  线 × 架构 矩阵：本地构建 → 三套发布前检查 → 通过后才按 digest 推送
+  ├─ build  线 × 架构 矩阵：本地构建 → 四套发布前检查 → 通过后才按 digest 推送
   ├─ publish 合并两架构 digest → 按标签策略打 repo:<版本>（标了 latest 的线再加 :latest）
   └─ write_back 把已发布版本回写进该线的 VERSION 文件
 ```
@@ -54,12 +54,12 @@ prep   读 lines.conf → 逐线探测上游版本（banner / api）→ 与 VERS
 不改版本来源）。探测失败时按各条线 VERSION 继续，绝不自动降级。
 
 ```
-        ┌─ amd64（ubuntu-latest）── 构建①(本地) → 三套验证 → 构建②按 digest 推送 ─┐
+        ┌─ amd64（ubuntu-latest）── 构建①(本地) → 四套验证 → 构建②按 digest 推送 ─┐
 读版本 ─┤                                                                          ├─ 合并 digest → 打标签
-        └─ arm64（ubuntu-24.04-arm）─ 构建①(本地) → 三套验证 → 构建②按 digest 推送 ─┘
+        └─ arm64（ubuntu-24.04-arm）─ 构建①(本地) → 四套验证 → 构建②按 digest 推送 ─┘
 ```
 
-每个架构**构建两次**：① `--load` 到本地跑三套验证；② 验证全过后按
+每个架构**构建两次**：① `--load` 到本地跑四套验证；② 验证全过后按
 `push-by-digest=true` 入库（不创建任何 arch 标签）。用户可见的标签只有
 `:版本` 与（标了 `latest` 那条线的）`:latest`，DockerHub 上永远不会出现 `<版本>-amd64`。
 
@@ -72,7 +72,7 @@ prep   读 lines.conf → 逐线探测上游版本（banner / api）→ 与 VERS
 ### 为什么「先本地构建验证，再第二次按 digest 推送」
 
 buildx 一次调用里没法做到「推送发生在验证之后」，所以拆成两次：第一次只 `--load`
-到本地并跑完三套验证（坏镜像根本不会被推送）；第二次**命中第一次刚写入的 GHA 缓存**
+到本地并跑完四套验证（坏镜像根本不会被推送）；第二次**命中第一次刚写入的 GHA 缓存**
 （按线 + 架构分 scope），几乎不再重新编译，代价很小。第二次以 `push-by-digest`
 形式入库（manifest 只按 digest 索引、无标签），publish 再用 digest 合并成正式标签 ——
 同时拿到「坏镜像不推送」和「零 arch 标签」。

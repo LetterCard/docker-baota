@@ -10,7 +10,7 @@ name: 🔬 巡检：已发布镜像回归
 #  ★ 多 job 结构（进度一目了然，每线一张独立 job 卡）：
 #     prep    读 image/lines.conf 生成「线 × 版本」矩阵（新增一条线不用改本文件）
 #     verify  每线一个 job 跑 published.sh（拉取 + 脱敏首启日志 + PHP 扩展真编译
-#              + 复用三套发布前门禁）；各自独立进度
+#              + 复用四套发布前门禁）；各自独立进度
 #     report  汇总报告并回写 README / .github/reports/report.md
 #  验什么由 .github/scripts/check/published.sh 决定。
 # ==============================================================================
@@ -75,7 +75,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v7.0.1
 
-      - name: 🔬 跑回归（拉取 + 脱敏首启日志 + PHP 扩展真编译 + 三套门禁）
+      - name: 🔬 跑回归（拉取 + 脱敏首启日志 + PHP 扩展真编译 + 四套门禁）
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
@@ -141,7 +141,7 @@ jobs:
             [ -n "${line:-}" ] || continue
             ver=$(tr -d '[:space:]' < "${vfile}")
 
-            # 回归脚本自己会 pull / 起容器 / 跑三套门禁；这里只负责收集结果。
+            # 回归脚本自己会 pull / 起容器 / 跑四套门禁；这里只负责收集结果。
             # 产物在 verify job 各自上传：有报告 = 通过，缺报告 = 该线失败
             if [ -f "/tmp/report-${line}.md" ]; then
               icon='✅'
