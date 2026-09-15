@@ -89,9 +89,12 @@ is_critical() {
 
 # ------------------------------------------------------------------------------
 # 挂载汇总成目录树（替代逐条打印的冗长日志）
-#   · 只读 /proc/mounts 为真值来源，不改任何挂载行为
+#   · 只读 /proc/mounts 为真值来源，不改任何挂载行为（仅用于渲染系统层 / 数据层
+#     / 面板状态的目录树）
 #   · 失败路径的告警仍由各 mount 函数 inline 打印，这里只渲染成功态
-#   · 面板代码（bind 自 /run 钉桩）单独一行提示「来自镜像层、不落持久化」
+#   · 面板代码隔离状态不走 /proc/mounts 反查：盖在 /www/server overlay 之下的
+#     bind 在 /proc/mounts 里的 device 字段不可靠，会误报「未隔离」；这里直接
+#     用 main() 根据 bind 回的成败设好的 PANEL_ISOLATED 判断
 # ------------------------------------------------------------------------------
 _emit_group() {
     _hdr="$1"; _items="$2"; _cont="$3"; _seeded="${4:-}"
@@ -112,7 +115,7 @@ _emit_group() {
 }
 
 print_mount_tree() {
-    _sys='' _www='' _panel='' _pinned=0
+    _sys='' _www='' _panel=''
     _seeded_list=''
     if [ -f "${RUNTIME_DIR}/.seeded" ]; then
         _seeded_list=$(cat "${RUNTIME_DIR}/.seeded" 2> /dev/null | tr '\n' ' ')
@@ -134,7 +137,6 @@ print_mount_tree() {
                 ;;
             *)
                 case "${_dev}" in
-                    "${PANEL_PIN_DIR}") _pinned=1;;
                     "${PERSIST_DATA_ROOT}/www/"*)
                         case "${_mp}" in
                             /www/server/panel/*) _panel="${_panel} ${_mp#/www/server/panel/}";;
@@ -150,7 +152,7 @@ print_mount_tree() {
     _emit_group "├─ 系统层  ${PERSIST_SYSTEM_ROOT}" "${_sys}" "│   "
     _emit_group "├─ 数据层  ${PERSIST_DATA_ROOT}/www" "${_www}" "│   "
     _emit_group "└─ 面板状态  ${PERSIST_DATA_ROOT}/www/server/panel" "${_panel}" "    " "${_seeded_list}"
-    if [ "${_pinned}" -eq 1 ]; then
+    if [ "${PANEL_ISOLATED:-0}" -eq 1 ]; then
         echo "📦 面板代码：来自镜像层 ${PANEL_DIR}（不落持久化层）"
     else
         warn "面板代码未能隔离出持久化层，面板内「更新」可能污染持久化"
@@ -417,6 +419,7 @@ main() {
     #     /www/server 也在这一层（组件、计划任务脚本、插件数据都在它下面），
     #     但面板代码必须先钉在 /run 上、挂完 overlay 再 bind 回去 —— 见下面
     _failed=0
+    PANEL_ISOLATED=0
 
     # 面板代码来自镜像层、不落持久化层：先把镜像里的面板目录 bind 到 /run，
     # 等 /www/server 的 overlay 挂上后再 bind 回去（顺序反了装的就是镜像里那份
@@ -445,7 +448,7 @@ main() {
     # 插件数据）留在 overlay 的 upper 里持久化，面板目录本身则始终来自镜像
     if [ -n "${PANEL_PIN_DIR}" ]; then
         if mount -o bind "${PANEL_PIN_DIR}" "${PANEL_DIR}" 2> /dev/null; then
-            :
+            PANEL_ISOLATED=1
         else
             warn "面板代码 bind 回 ${PANEL_DIR} 失败：面板代码可能落进持久化层"
             mark_critical "${PANEL_DIR}: 面板代码未隔离出持久化层"
