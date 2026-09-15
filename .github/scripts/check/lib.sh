@@ -69,6 +69,23 @@ inside()     { docker exec "$CONTAINER" "$@"; }
 inside_sh()  { docker exec "$CONTAINER" sh -c "$1"; }
 inside_cat() { docker exec "$CONTAINER" cat "$1" 2>/dev/null | tr -d '[:space:]' || true; }
 
+# ---------------------------------------------------------------------------
+# 无持久化降级 —— core / upgrade / restore 三套共用的断言
+#
+# 判据是**运行态标记文件**而不是日志文案：init.sh 在任何持久化失败 / 只读降级
+# 时都写 /run/baota/degraded，CRITICAL_DIRS 里的目录额外写 critical。
+# 这样告警文案怎么改都不影响门禁，也不会漏掉「挂载直接失败」这一类情况。
+# ---------------------------------------------------------------------------
+assert_no_degraded() {
+    if inside test -e /run/baota/critical; then
+        fail "关键目录未持久化（/run/baota/critical 存在），数据写入会静默丢失"
+    fi
+    if inside test -e /run/baota/degraded; then
+        fail "存在未持久化目录（/run/baota/degraded）：$(inside cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
+    fi
+    pass "无持久化降级"
+}
+
 is_running() {
     [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = 'true' ]
 }

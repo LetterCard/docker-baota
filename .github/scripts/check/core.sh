@@ -61,17 +61,7 @@ assert_processes_up() {
 # start_container / wait_systemd / wait_panel_http 见 lib.sh
 
 # 只读降级是本方案最危险的失效模式：挂载会「成功」，但所有写入静默丢失。
-# 判据从「grep 启动日志里的中文文案」改为读容器内的降级标记文件：
-# init.sh 在任何持久化失败/只读降级时都会写 /run/baota/degraded*，
-# 这样告警文案怎么改都不影响门禁，也不会漏掉「挂载直接失败」这一类情况
-assert_no_degraded() {
-    if inside test -e /run/baota/critical; then
-        fail "关键目录未持久化（/run/baota/critical 存在），数据写入会静默丢失"
-    fi
-    if inside test -e /run/baota/degraded; then
-        fail "存在未持久化目录（/run/baota/degraded）：$(inside cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
-    fi
-}
+# 判据读容器内的降级标记文件（assert_no_degraded 见 lib.sh），不 grep 日志文案
 
 # 面板状态漂移报告（不对抗上游版）：面板代码来自镜像层、不持久化，运行期写入
 # 只落容器可写层，docker pull 新镜像时被整体丢弃。我们要暴露「持久化声明的盲区」——

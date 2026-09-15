@@ -35,17 +35,6 @@ TARGET_CONTAINER="baota-restore-target-$$"
 TARGET_VOLUME="baota-restore-target-data-$$"
 WORK_ROOT=$(mktemp -d)
 
-# 与 core / degrade / upgrade 各自持有的那份同款断言（四处一致，收进 lib.sh 是后续项）
-assert_no_degraded() {
-    if inside test -e /run/baota/critical; then
-        fail "关键目录未持久化（/run/baota/critical 存在），数据写入会静默丢失"
-    fi
-    if inside test -e /run/baota/degraded; then
-        fail "存在未持久化目录（/run/baota/degraded）：$(inside cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
-    fi
-    pass "无持久化降级"
-}
-
 # ==============================================================================
 #  A) 源容器：写入三类数据并生成备份
 # ==============================================================================

@@ -43,16 +43,6 @@ META_VERSION_FILE=$(read_default META_VERSION_FILE)
 [ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 [ -n "${META_VERSION_FILE}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 META_VERSION_FILE"; exit 1; }
 
-assert_no_degraded() {
-    if inside test -e /run/baota/critical; then
-        fail "出现关键目录降级（critical）"
-    fi
-    if inside test -e /run/baota/degraded; then
-        fail "出现未持久化目录：$(docker exec "$CONTAINER" cat /run/baota/degraded 2>/dev/null | tr '\n' ' ' || true)"
-    fi
-    pass "无持久化降级"
-}
-
 # start_container 见 lib.sh
 
 # 改写持久化层里记录的镜像版本。
