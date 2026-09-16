@@ -129,8 +129,10 @@ PY
 patch_task_watchdog() {
     log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
 
-    local bt="${PANEL_DIR}/BT-Panel"
-    [ -f "${bt}" ] || { warn "未找到 ${bt}，跳过"; return 0; }
+    # 用 glob 绕开 "BT-Panel" 字面量（bt7.init 用 ps|grep 该字面量判运行，见上）。
+    local bt bt_origin
+    bt="$(ls -d "${PANEL_DIR}"/BT-P* 2>/dev/null | head -n1)"
+    [ -n "${bt}" ] && [ -f "${bt}" ] || { warn "未找到 ${PANEL_DIR} 面板主程序，跳过"; return 0; }
 
     _patch_watchdog_one() {
         "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "看门狗补丁失败（$1）"
@@ -141,14 +143,15 @@ old = "            comm = public.readFile(comm_file).strip()\n            if 'BT
 new = ("            comm = public.readFile(comm_file).strip()\n"
        "            cmdline = public.readFile(f\"/proc/{task_pid}/cmdline\") or ''\n"
        "            if 'BT-Task' not in comm and 'BT-Task' not in cmdline:")
-assert old in s, "未匹配看门狗判定（上游可能已改，请复查 BT-Panel）"
+assert old in s, "未匹配看门狗判定（上游可能已改，请复查任务看门狗逻辑）"
 open(p, 'w', encoding='utf-8').write(s.replace(old, new))
 print('patched', p)
 PY
     }
     _patch_watchdog_one "${bt}"
-    # 守卫基准副本也要打，否则版本比对会还原成未修版（安装又会坏）
-    [ -f /baota/origin/BT-Panel ] && _patch_watchdog_one /baota/origin/BT-Panel
+    # 守卫基准副本也要打，否则版本比对会还原成未修版（安装又会坏）。同样用 glob 绕字面量。
+    bt_origin="$(ls -d /baota/origin/BT-P* 2>/dev/null | head -n1)"
+    [ -n "${bt_origin}" ] && _patch_watchdog_one "${bt_origin}"
 }
 
 # ==============================================================================
