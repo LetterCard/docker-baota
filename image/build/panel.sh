@@ -84,23 +84,13 @@ install_panel() {
 }
 
 # ==============================================================================
-#  1.5 面板代码补丁（构建期固化，运行期面板只读无法改）
+#  1.5 面板代码补丁（构建期固化；运行期面板只读无法改）
 #
-#  两处，定位见本次排查：
-#
-#  1.5a 无害噪声（非安装失败根因）：独立部署未绑云账号时，
-#       class/config.py:read_dedicated_servicer 读不到 userInfo.json，
-#       public.readFile 返回 False(bool) 直接喂给 json.loads() → 被 except 吞掉、
-#       只往 error.log 喷一条 TypeError 噪声。兜底成 "{}" 仅为消噪，不改变功能，
-#       也解决不了「装不上软件」——真正的根因在 1.5b。
-#
-#  1.5b 真根因（软件安装全失败）：任务看门狗只读 /proc/<pid>/comm 并要求含
-#       'BT-Task'；但不可变面板守卫的 shim 把解释器改名成 python-real，
-#       所有面板/python 进程的 comm 都变成 python-real，永远不含 BT-Task →
-#       看门狗每轮误判「不是面板任务」并重启任务 → 安装脚本从未执行。
-#       修正：cmdline 里仍含 'BT-Task'，补成同时查 cmdline 即修复。
-#       注意：守卫基准副本 /baota/origin/BT-Panel 也要同步打，否则守卫在版本
-#       比对时会把改动还原回未修版（安装又会坏）。
+#  1.5a patch_panel_noise：read_dedicated_servicer 的 json.loads(bool) 仅消日志
+#       噪声，非安装失败根因，详见 docs/faq.md「面板里装软件全失败」。
+#  1.5b patch_task_watchdog：真根因——看门狗只查 /proc/<pid>/comm 要求含 'BT-Task'，
+#       而 shim 把解释器改名 python-real 致 comm 永远不含，误杀安装任务；
+#       补成同时查 cmdline，并同步打守卫基准副本，否则会被版本比对还原。
 # ==============================================================================
 patch_panel_noise() {
     log '1.5a/5 面板降噪（read_dedicated_servicer 的 json.loads(bool)，仅消日志，非安装根因）'
