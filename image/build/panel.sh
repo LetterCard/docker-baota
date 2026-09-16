@@ -148,7 +148,11 @@ PY
     for f in /baota/origin/BT-P*; do
         if [ -e "$f" ]; then bt_origin="$f"; break; fi
     done
-    [ -n "${bt_origin:-}" ] && _patch_watchdog_one "${bt_origin}"
+    # 用 if 而非 &&：条件为假时 if 语句本身返回 0，函数才不会把非 0 带出（set -e 会终止脚本）
+    if [ -n "${bt_origin}" ]; then
+        _patch_watchdog_one "${bt_origin}"
+    fi
+    return 0
 }
 
 # ==============================================================================
