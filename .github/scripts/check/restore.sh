@@ -53,7 +53,13 @@ PORT=$(inside_cat /www/server/panel/data/port.pl)
 [ -n "$PORT" ] || fail "无法读取面板端口（面板未初始化）"
 
 # 三类必须能回来的数据：站点 / 数据库目录 / 面板状态
-inside_sh 'mkdir -p /www/wwwroot/restore-test && echo marker > /www/wwwroot/restore-test/_marker'
+# 站点写到 wwwroot 顶层（与 core.sh A9 同款写法）：bind 挂载源 = /data/www/wwwroot，
+# 确认落到绑定源后再备份——bind 未生效就在 A1 暴露，而不是到 A3 才报「包里缺路径」。
+# 注：之前用 wwwroot/restore-test/ 子目录，在 CI 的 docker volume（overlay2 后端）下
+# 新建子目录偶尔不立即反映到 /data 侧，备份 tar 读不到；顶层文件写法已在 core 验证稳定
+inside_sh 'echo marker > /www/wwwroot/_restore_marker'
+inside test -f /data/www/wwwroot/_restore_marker \
+    || fail "站点写入未落到绑定源 /data/www/wwwroot（bind 挂载未生效，备份自然读不到）"
 inside test -d /www/server/data || fail "MySQL 数据目录缺失：/www/server/data"
 inside_sh 'echo state > /www/server/panel/data/_restore_probe'
 pass "已写入站点 / 数据库目录 / 面板状态三类数据"
@@ -71,7 +77,7 @@ pass "备份包已生成（$(du -h "$BACKUP_FILE" | cut -f1)）"
 
 step "A3) 校验包内含三类关键路径（文档「验证备份（别跳过）」）"
 # 只认包内成员名（相对 data 根），与 baota-backup 的产出结构一致
-for _m in 'www/wwwroot/restore-test/_marker' 'www/server/data/' 'www/server/panel/data/'; do
+for _m in 'www/wwwroot/_restore_marker' 'www/server/data/' 'www/server/panel/data/'; do
     tar tzf "$BACKUP_FILE" 2>/dev/null | grep -qF "$_m" \
         || fail "备份包缺少关键路径：${_m}（站点 / 数据库 / 面板状态缺一不可）"
 done
@@ -102,7 +108,7 @@ wait_panel_http
 pass "恢复后的容器 ${CONTAINER} 已启动且面板响应（数据卷 ${VOLUME}）"
 
 step "B3) 校验恢复后的数据完整"
-inside test -f /www/wwwroot/restore-test/_marker      || fail "站点数据在恢复后丢失"
+inside test -f /www/wwwroot/_restore_marker      || fail "站点数据在恢复后丢失"
 inside test -d /www/server/data                        || fail "MySQL 数据目录在恢复后丢失"
 inside test -f /www/server/panel/data/_restore_probe   || fail "面板状态在恢复后丢失"
 pass "站点、数据库目录、面板状态均随备份恢复"
