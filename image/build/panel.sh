@@ -119,10 +119,14 @@ PY
 patch_task_watchdog() {
     log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
 
-    # 用 glob 绕开 "BT-Panel" 字面量（bt7.init 用 ps|grep 该字面量判运行，见上）。
-    local bt bt_origin
-    bt="$(ls -d "${PANEL_DIR}"/BT-P* 2>/dev/null | head -n1)"
-    [ -n "${bt}" ] && [ -f "${bt}" ] || { warn "未找到 ${PANEL_DIR} 面板主程序，跳过"; return 0; }
+    # 用 glob 绕开 "BT-Panel" 字面量（bt7.init 用 ps|grep 该字面量判运行，见上）；
+    # 不用 ls：构建期 /baota/origin 可能尚无副本，ls 无匹配会在 pipefail+set -e 下让脚本退出。
+    local bt bt_origin f
+    bt=
+    for f in "${PANEL_DIR}"/BT-P*; do
+        if [ -f "$f" ]; then bt="$f"; break; fi
+    done
+    [ -n "${bt:-}" ] || { warn "未找到 ${PANEL_DIR} 面板主程序，跳过"; return 0; }
 
     _patch_watchdog_one() {
         "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "看门狗补丁失败（$1）"
@@ -139,9 +143,12 @@ print('patched', p)
 PY
     }
     _patch_watchdog_one "${bt}"
-    # 守卫基准副本也要打，否则版本比对会还原成未修版（安装又会坏）。同样用 glob 绕字面量。
-    bt_origin="$(ls -d /baota/origin/BT-P* 2>/dev/null | head -n1)"
-    [ -n "${bt_origin}" ] && _patch_watchdog_one "${bt_origin}"
+    # 守卫基准副本也要打，否则版本比对会还原成未修版（安装又会坏）。用 glob 循环，无匹配不报错。
+    bt_origin=
+    for f in /baota/origin/BT-P*; do
+        if [ -e "$f" ]; then bt_origin="$f"; break; fi
+    done
+    [ -n "${bt_origin:-}" ] && _patch_watchdog_one "${bt_origin}"
 }
 
 # ==============================================================================
