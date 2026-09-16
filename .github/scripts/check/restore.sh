@@ -78,16 +78,19 @@ pass "备份包已生成（$(du -h "$BACKUP_FILE" | cut -f1)）"
 step "A3) 校验包内含三类关键路径（文档「验证备份（别跳过）」）"
 # 只认包内成员名（相对 data 根），与 baota-backup 的产出结构一致
 missing=''
-for _m in 'www/wwwroot/_restore_marker' 'www/server/data/' 'www/server/panel/data/'; do
+for _m in 'www/wwwroot/_restore_marker' 'www/server/data' 'www/server/panel/data/system.db'; do
     if ! tar tzf "$BACKUP_FILE" 2>/dev/null | grep -qF "$_m"; then
         missing="${missing}${missing:+, }${_m}"
     fi
 done
 if [ -n "$missing" ]; then
-    echo "----- 备份包条目总数 -----"
-    tar tzf "$BACKUP_FILE" 2>/dev/null | wc -l
-    echo "----- 备份包内 www/ 清单（前 60 行） -----"
-    tar tzf "$BACKUP_FILE" 2>/dev/null | grep '^www/' | head -60 || true
+    echo "----- 备份包条目统计 -----"
+    printf '总条目: %s\n' "$(tar tzf "$BACKUP_FILE" 2>/dev/null | wc -l)"
+    printf 'www/wwwroot: %s\n' "$(tar tzf "$BACKUP_FILE" 2>/dev/null | grep -c '^www/wwwroot/' || true)"
+    printf 'www/server/data: %s\n' "$(tar tzf "$BACKUP_FILE" 2>/dev/null | grep -c '^www/server/data/' || true)"
+    printf 'www/server/panel/data: %s\n' "$(tar tzf "$BACKUP_FILE" 2>/dev/null | grep -c '^www/server/panel/data/' || true)"
+    echo "----- 标记文件查找 -----"
+    tar tzf "$BACKUP_FILE" 2>/dev/null | grep -F 'www/wwwroot/_restore_marker' || echo '未找到 www/wwwroot/_restore_marker'
     echo "----- /data/www/wwwroot 现场 -----"
     inside_sh 'ls -la /data/www/wwwroot/ 2>/dev/null || echo "目录不存在"' || true
     fail "备份包缺少关键路径：${missing}（站点 / 数据库 / 面板状态缺一不可）"
