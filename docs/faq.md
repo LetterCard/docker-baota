@@ -38,6 +38,52 @@ docker exec -it baota bt 5         # 重置面板口令
 说明 `/data` 落在了不支持的文件系统上 —— 挪到 ext4 / btrfs / xfs 即可，
 原因见[硬约束](persistence.md#硬约束)。
 
+## 面板里装软件全失败 / error.log 报 json.loads(bool)
+
+症状：软件商店里装**任何**软件（nginx、「安装必要环境库」等）都失败、任务反复重试；
+面板 `logs/script_logs/` 始终为空；`logs/error.log` 每分钟刷一条
+`进程 X 不是面板任务，重启任务`，偶尔夹着 `TypeError: the JSON object must be str,
+bytes or bytearray, not bool`（堆栈落在 `class/config.py:read_dedicated_servicer`）。
+
+根因（本镜像「不可变面板守卫」的 shim 与上游看门狗的冲突，非上游 Baota 本身）：
+`BT-Panel` 的任务看门狗只读 `/proc/<pid>/comm` 并要求进程名含 `BT-Task` 才认可是
+面板任务。但守卫的 shim（`/baota/shim.sh`）把真解释器改名成 `python-real` 后 `exec`，
+于是所有面板/python 进程的 `comm` 都是 `python-real`，永远不含 `BT-Task` → 看门狗
+每轮误判「不是面板任务」并重启任务 → 安装脚本从未执行 → `script_logs` 恒空。
+与 btrfs / overlay / 网络 / 磁盘 / Python 版本都无关（面板跑的是 Python 3.7.16，
+Baota 12.x 配套版本）。
+
+> 关于 `json.loads(bool)`：那是 `read_dedicated_servicer` 读不到「专享版用户信息」
+> 文件时，`public.readFile` 返回 `False` 喂给 `json.loads()` 抛的异常，但该函数体内
+> 已 `try/except: pass` 吞掉，**从不中断安装**，只是往 `error.log` 喷噪声。它最显眼，
+> 但**不是根因**——别被它带偏。镜像仍对它打补丁，但那只是 `patch_panel_noise` 消噪。
+
+处理：镜像层面修复——构建期 `image/build/panel.sh` 的 `patch_task_watchdog` 把看门狗
+从「只查 comm」改成「comm **或** cmdline 含 `BT-Task` 即可」（cmdline 里稳定含
+`BT-Task`），并同步打守卫基准副本 `/baota/origin/BT-Panel`，否则守卫在版本比对时会
+把改动还原成未修版。拉取**已含该补丁的镜像**即可；若手上是旧镜像，重新构建并推送后重试。
+
+临时验证（不动镜像）：手动把看门狗从只查 comm 改成也查 cmdline（无空字节写法），
+再同步 origin 副本、重启面板：
+
+```bash
+/www/server/panel/pyenv/bin/python - <<'PY'
+p = '/www/server/panel/BT-Panel'
+s = open(p, encoding='utf-8', errors='ignore').read()
+old = "            comm = public.readFile(comm_file).strip()\n            if 'BT-Task' not in comm:"
+new = ("            comm = public.readFile(comm_file).strip()\n"
+       "            cmdline = public.readFile(f\"/proc/{task_pid}/cmdline\") or ''\n"
+       "            if 'BT-Task' not in comm and 'BT-Task' not in cmdline:")
+assert old in s, "未找到目标代码（可能版本不同）"
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print("已修补 BT-Panel")
+PY
+cp -a /www/server/panel/BT-Panel /baota/origin/BT-Panel && echo "已同步 origin 副本"
+bt restart
+```
+
+（`BT-Panel` 来自镜像层、运行期只读，热改需重启面板生效，仅用于定位；根治请重建镜像。）
+
 ## 启动被「另一个容器实例正在使用」拦下
 
 同一份 `data/` 不允许两个容器同时挂载（内核 EBUSY / 行为未定义）。

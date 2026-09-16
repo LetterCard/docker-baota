@@ -84,6 +84,74 @@ install_panel() {
 }
 
 # ==============================================================================
+#  1.5 面板代码补丁（构建期固化，运行期面板只读无法改）
+#
+#  两处，定位见本次排查：
+#
+#  1.5a 无害噪声（非安装失败根因）：独立部署未绑云账号时，
+#       class/config.py:read_dedicated_servicer 读不到 userInfo.json，
+#       public.readFile 返回 False(bool) 直接喂给 json.loads() → 被 except 吞掉、
+#       只往 error.log 喷一条 TypeError 噪声。兜底成 "{}" 仅为消噪，不改变功能，
+#       也解决不了「装不上软件」——真正的根因在 1.5b。
+#
+#  1.5b 真根因（软件安装全失败）：任务看门狗只读 /proc/<pid>/comm 并要求含
+#       'BT-Task'；但不可变面板守卫的 shim 把解释器改名成 python-real，
+#       所有面板/python 进程的 comm 都变成 python-real，永远不含 BT-Task →
+#       看门狗每轮误判「不是面板任务」并重启任务 → 安装脚本从未执行。
+#       修正：cmdline 里仍含 'BT-Task'，补成同时查 cmdline 即修复。
+#       注意：守卫基准副本 /baota/origin/BT-Panel 也要同步打，否则守卫在版本
+#       比对时会把改动还原回未修版（安装又会坏）。
+# ==============================================================================
+patch_panel_noise() {
+    log '1.5a/5 面板降噪（read_dedicated_servicer 的 json.loads(bool)，仅消日志，非安装根因）'
+
+    local cfg="${PANEL_DIR}/class/config.py"
+    [ -f "${cfg}" ] || { warn "未找到 ${cfg}，跳过补丁"; return 0; }
+
+    "${PANEL_PY_BIN}" - <<'PY' || warn "面板降噪补丁应用失败（不影响构建）"
+import re
+p = '/www/server/panel/class/config.py'
+s = open(p, encoding='utf-8', errors='ignore').read()
+m = re.search(r'^([ \t]*)user_info = json\.loads\(user_info_str\)', s, re.M)
+if not m:
+    print('skip: 未匹配目标行（上游可能已改，请复查 read_dedicated_servicer）')
+else:
+    ind = m.group(1)
+    new = (ind + 'if not isinstance(user_info_str, (str, bytes, bytearray)):\n'
+           + ind + '    user_info_str = "{}"\n'
+           + ind + 'user_info = json.loads(user_info_str)')
+    s = s[:m.start()] + new + s[m.end():]
+    open(p, 'w', encoding='utf-8').write(s)
+    print('patched read_dedicated_servicer (noise only)')
+PY
+}
+
+patch_task_watchdog() {
+    log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
+
+    local bt="${PANEL_DIR}/BT-Panel"
+    [ -f "${bt}" ] || { warn "未找到 ${bt}，跳过"; return 0; }
+
+    _patch_watchdog_one() {
+        "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "看门狗补丁失败（$1）"
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8', errors='ignore').read()
+old = "            comm = public.readFile(comm_file).strip()\n            if 'BT-Task' not in comm:"
+new = ("            comm = public.readFile(comm_file).strip()\n"
+       "            cmdline = public.readFile(f\"/proc/{task_pid}/cmdline\") or ''\n"
+       "            if 'BT-Task' not in comm and 'BT-Task' not in cmdline:")
+assert old in s, "未匹配看门狗判定（上游可能已改，请复查 BT-Panel）"
+open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+print('patched', p)
+PY
+    }
+    _patch_watchdog_one "${bt}"
+    # 守卫基准副本也要打，否则版本比对会还原成未修版（安装又会坏）
+    [ -f /baota/origin/BT-Panel ] && _patch_watchdog_one /baota/origin/BT-Panel
+}
+
+# ==============================================================================
 #  2. 防火墙复位为关闭
 #  官方脚本会装 ufw 并 enable + default deny。构建期没 netfilter 权限、规则没真写入，
 #  但 ufw.conf 可能已被置为开启；运行期容器特权，一开机套用 deny 就封死面板端口。
@@ -171,6 +239,8 @@ warmup_account_chain() {
 # ==============================================================================
 main() {
     install_panel
+    patch_panel_noise
+    patch_task_watchdog
     reset_firewall
     remove_swap_file
     verify_key_files
