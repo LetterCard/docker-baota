@@ -54,7 +54,7 @@ install_panel() {
     # 变量故意不加引号：安装脚本要求逐个参数传入，加引号会被当成单个参数
     # shellcheck disable=SC2086
     bash install.sh ${args} \
-        || { echo '❌ [build][ERROR] 宝塔安装失败，日志尾部如下：'; tail -n 120 /tmp/install.log; exit 1; }
+        || { echo '❌ [build][ERROR] 宝塔安装失败，日志尾部如下：'; tail -n 120 /tmp/btpanel-install.log; exit 1; }
     cd /
 
     # 校验面板文件已就位。

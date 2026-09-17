@@ -33,6 +33,9 @@ die()  { echo "❌ [drift][ERROR] $*" >&2; exit 1; }
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# 官方安装脚本通过 exec > >(tee -a /tmp/btpanel-install.log) 2>&1 把全部输出写进该日志
+INSTALL_LOG=/tmp/btpanel-install.log
+
 in_known_dirs() {
     local d="$1" k
     # shellcheck disable=SC2086
@@ -109,9 +112,25 @@ echo 0 > "$CRITICAL_FILE"
 #  目录、只让 /usr 多几万个文件，装上它纯属多花几分钟构建时间。
 #  同理不含 logrotate —— 它随「日志体积防线」一起从 base.sh 移除了，这里若
 #  留着，被测环境就与真实镜像不一致（漂移检测的前提是「装的东西一致」）
+#
+#  注意：apt 环境（policy-rc.d、no-recommends、force-confold）必须和真实构建
+#  保持一致，已在上方单独设置。
 # ------------------------------------------------------------------------------
 docker run -d --name "$CONTAINER" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
 log "已启动一次性容器（${BASE_IMAGE}）"
+
+# 必须与 image/build/base.sh 的 apt 环境保持一致，否则官方安装脚本里的
+# systemctl/invoke-rc.d 行为会与真实构建不同，可能挂起或产生不一样的目录落点。
+log '同步真实构建的 apt 环境（移除 policy-rc.d、关闭推荐包、强制保留旧配置）'
+docker exec -i "$CONTAINER" bash -s <<'EOS'
+set -e
+rm -f /usr/sbin/policy-rc.d
+export DEBIAN_FRONTEND=noninteractive
+echo 'APT::Install-Recommends "false";' >  /etc/apt/apt.conf.d/01norecommends
+echo 'APT::Install-Suggests "false";'   >> /etc/apt/apt.conf.d/01norecommends
+echo 'DPkg::Options { "--force-confold"; "--force-confdef"; }' \
+    > /etc/apt/apt.conf.d/02dpkg-options
+EOS
 
 docker exec -i "$CONTAINER" bash -s <<'EOS'
 set -e
@@ -141,20 +160,33 @@ WWW_BEFORE=$(www_subdirs)
 BEFORE=$(count_top_dirs)
 
 log '执行官方安装脚本（参数与 image/build/panel.sh 保持一致）'
-docker exec "$CONTAINER" bash -c "cd /root && wget -q -O install.sh '${INSTALL_URL}'" \
-    || die "下载安装脚本失败：${INSTALL_URL}"
+# 给 wget 加超时与重试，避免 download.bt.cn 瞬时无响应导致下载挂死
+ok=0
+for i in 1 2 3; do
+    if docker exec "$CONTAINER" bash -c "cd /root && wget -T 30 -t 1 -O install.sh '${INSTALL_URL}'" >/dev/null 2>&1; then
+        ok=1; break
+    fi
+    log "下载安装脚本第 ${i} 次失败，$((i * 5))s 后重试"
+    sleep $((i * 5))
+done
+[ "${ok}" = 1 ] || die "下载安装脚本失败：${INSTALL_URL}"
 
-# 流式执行：后台跑安装、前台 tail 实时进度，避免长静默像卡死
-# 官方安装脚本在 non-TTY（CI / 本地管道）下几乎不向 stdout 打印，进度都写进
-# 容器内的 /tmp/install.log；这里跟随它，安装过程的每一步都可见。
-docker exec -d "$CONTAINER" bash -c "cd /root && bash install.sh -y --ssl-disable" \
+# 流式执行：后台跑安装、前台 tail 实时进度，避免长静默像卡死。
+# 官方安装脚本通过 exec > >(tee -a /tmp/btpanel-install.log) 2>&1 把进度写进该日志。
+# 外层包 timeout 5400（90 分钟）防止安装脚本因 systemctl/网络等原因无限挂起。
+docker exec -d "$CONTAINER" bash -c "cd /root && timeout 5400 bash install.sh -y --ssl-disable" \
     || die '官方安装脚本启动失败'
 log '官方安装脚本执行中（实时输出见下方），请稍候…'
-docker exec "$CONTAINER" tail -F /tmp/install.log 2>/dev/null &
+docker exec "$CONTAINER" tail -F /tmp/btpanel-install.log 2>/dev/null &
 _TAIL_PID=$!
 # 安装进程退出即停止跟随（pgrep 匹配 bash install.sh）
+elapsed=0
 while docker exec "$CONTAINER" bash -c 'pgrep -f "install.sh" >/dev/null 2>&1'; do
     sleep 5
+    elapsed=$((elapsed + 5))
+    if [ "$((elapsed % 60))" -eq 0 ]; then
+        log "安装仍在运行，已等待 ${elapsed}s…"
+    fi
 done
 kill "$_TAIL_PID" 2>/dev/null || true
 wait "$_TAIL_PID" 2>/dev/null || true
