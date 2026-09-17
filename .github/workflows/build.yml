@@ -384,7 +384,16 @@ jobs:
           if [ "${{ matrix.tag }}" = 'latest' ]; then
             tags+=( -t "${REPO}:latest" )
           fi
-          docker buildx imagetools create "${tags[@]}" "${REPO}@${AMD64}" "${REPO}@${ARM64}"
+          # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败
+          ok=0
+          for i in 1 2 3; do
+            if docker buildx imagetools create "${tags[@]}" "${REPO}@${AMD64}" "${REPO}@${ARM64}"; then
+              ok=1; break
+            fi
+            echo "::warning::imagetools create 第 ${i} 次失败（CDN 连接重置？），$((i * 10))s 后重试"
+            sleep $((i * 10))
+          done
+          [ "${ok}" = 1 ] || { echo '::error::imagetools create 重试耗尽'; exit 1; }
           echo "✅ 已发布：${tags[*]}"
 
   # ---------------------------------------------------------------------------
