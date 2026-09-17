@@ -86,36 +86,10 @@ install_panel() {
 # ==============================================================================
 #  1.5 面板代码补丁（构建期固化；运行期面板只读无法改）
 #
-#  1.5a patch_panel_noise：read_dedicated_servicer 的 json.loads(bool) 仅消日志
-#       噪声，非安装失败根因，详见 docs/faq.md「面板里装软件全失败」。
 #  1.5b patch_task_watchdog：真根因——看门狗只查 /proc/<pid>/comm 要求含 'BT-Task'，
 #       而 shim 把解释器改名 python-real 致 comm 永远不含，误杀安装任务；
 #       补成同时查 cmdline，并同步打守卫基准副本，否则会被版本比对还原。
 # ==============================================================================
-patch_panel_noise() {
-    log '1.5a/5 面板降噪（read_dedicated_servicer 的 json.loads(bool)，仅消日志，非安装根因）'
-
-    local cfg="${PANEL_DIR}/class/config.py"
-    [ -f "${cfg}" ] || { warn "未找到 ${cfg}，跳过补丁"; return 0; }
-
-    "${PANEL_PY_BIN}" - <<'PY' || warn "面板降噪补丁应用失败（不影响构建）"
-import re
-p = '/www/server/panel/class/config.py'
-s = open(p, encoding='utf-8', errors='ignore').read()
-m = re.search(r'^([ \t]*)user_info = json\.loads\(user_info_str\)', s, re.M)
-if not m:
-    print('skip: 未匹配目标行（上游可能已改，请复查 read_dedicated_servicer）')
-else:
-    ind = m.group(1)
-    new = (ind + 'if not isinstance(user_info_str, (str, bytes, bytearray)):\n'
-           + ind + '    user_info_str = "{}"\n'
-           + ind + 'user_info = json.loads(user_info_str)')
-    s = s[:m.start()] + new + s[m.end():]
-    open(p, 'w', encoding='utf-8').write(s)
-    print('patched read_dedicated_servicer (noise only)')
-PY
-}
-
 patch_task_watchdog() {
     log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
 
@@ -243,7 +217,6 @@ warmup_account_chain() {
 # ==============================================================================
 main() {
     install_panel
-    patch_panel_noise
     patch_task_watchdog
     reset_firewall
     remove_swap_file

@@ -56,7 +56,8 @@ Baota 12.x 配套版本）。
 > 关于 `json.loads(bool)`：那是 `read_dedicated_servicer` 读不到「专享版用户信息」
 > 文件时，`public.readFile` 返回 `False` 喂给 `json.loads()` 抛的异常，但该函数体内
 > 已 `try/except: pass` 吞掉，**从不中断安装**，只是往 `error.log` 喷噪声。它最显眼，
-> 但**不是根因**——别被它带偏。镜像仍对它打补丁，但那只是 `patch_panel_noise` 消噪。
+> 但**不是根因**——别被它带偏。镜像层不再对它打补丁（纯消噪、无功能影响，靠上游
+> 自身的 try/except 兜底），看门狗补丁才是真修复。
 
 处理：镜像层面修复——构建期 `image/build/panel.sh` 的 `patch_task_watchdog` 把看门狗
 从「只查 comm」改成「comm **或** cmdline 含 `BT-Task` 即可」（cmdline 里稳定含
