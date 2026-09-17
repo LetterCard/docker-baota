@@ -462,6 +462,25 @@ inside_sh 'grep -q user-data /www/server/panel/data/_guard_probe' \
     || fail "守卫恢复了状态目录（排除项失效，用户数据会被镜像初始数据覆盖）"
 pass "守卫在位：包装生效、副本完整、代码被换回 ${EXPECT_VERSION}、状态目录未被碰"
 
+step "A16) 任务看门狗兼容 shim 改名（面板里装软件失败的修复）"
+# 看门狗只认 /proc/<pid>/comm 含 BT-Task 才认可是面板任务；但 A15 的 shim 把解释器
+# 改名 python-real，comm 永远不含 BT-Task，看门狗会误杀安装任务、script_logs 恒空。
+# 修复（image/build/panel.sh patch_task_watchdog）把判定补成「comm 或 cmdline 含
+# BT-Task 即可」。补丁必须同时落在运行态面板与守卫基准副本 /baota/origin：否则守卫
+# 的版本比对会把运行态还原成未修版，装软件继续失败（根因见 docs/faq.md）。
+_wd_marker='not in cmdline'
+_patched=0
+for _f in $(inside_sh 'ls /www/server/panel/BT-P* 2>/dev/null' || true); do
+    inside_sh "grep -qF '${_wd_marker}' '${_f}'" && _patched=1
+done
+[ "$_patched" = 1 ] || fail "运行态面板主程序缺少看门狗 cmdline 补丁（装软件会被误杀）"
+_origin_patched=0
+for _f in $(inside_sh 'ls /baota/origin/BT-P* 2>/dev/null' || true); do
+    inside_sh "grep -qF '${_wd_marker}' '${_f}'" && _origin_patched=1
+done
+[ "$_origin_patched" = 1 ] || fail "守卫基准副本 /baota/origin/BT-P* 缺少看门狗补丁（守卫会还原成未修版）"
+pass "看门狗 cmdline 补丁同时落在运行态面板与守卫基准副本"
+
 # A 阶段末（容器已完整跑过一轮）做一次面板状态漂移报告
 report_panel_state_drift
 

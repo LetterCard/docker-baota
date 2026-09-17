@@ -89,32 +89,25 @@ buildx 一次调用里没法做到「推送发生在验证之后」，所以拆�
 
 ---
 
-## 构建后手动验证（看门狗修复）
+## 看门狗修复的回归验证（自动门禁）
 
-流水线本身的「四套发布前检查」不含看门狗修复专项校验 —— 它作为**运维现场诊断工具**
-随镜像进 `/baota/watchdogcheck.sh`。构建 / 推送完成后，建议按下面清单人工确认一次：
+「看门狗 vs shim 改名」的修复（面板里装软件失败的真根因，见 docs/faq.md）现在是 **CI
+自动门禁**，不用手动跑：
 
-1. **静态检查（对构建候选镜像即可跑）**
-   ```bash
-   docker run --rm <镜像名> /baota/watchdogcheck.sh
-   ```
-   通过 = 面板主程序与守卫基准副本 `/baota/origin` 都已含 cmdline 补丁，且解释器入口走
-   shim、`python-real` 存在。三项任一缺失即 FAIL，说明 `panel.sh` 补丁在构建期没生效，
-   **不要推送**。
+- **发布前门禁**：`core.sh` 的 `A16` 步断言看门狗 cmdline 补丁同时落在运行态面板
+  `BT-P*` 与守卫基准副本 `/baota/origin/BT-P*`；任一缺失即 `fail`，阻断发布。
+- **每日回归**：`.github/scripts/check/published.sh` 复用同一套 `core.sh`，线上镜像每天
+  也被这一断言覆盖。
 
-2. **端到端检查（可选但推荐，需真人到面板装软件）**
-   ```bash
-   docker run -d --name baota_check --privileged -v baota_check_data:/data <镜像名>
-   docker exec baota_check /baota/watchdogcheck.sh --watch 120
-   # 另开终端：浏览器进面板，装一个软件（nginx / 任意环境库）
-   ```
-   脚本监听 120s：窗口内 `logs/error.log` 不再刷「不是面板任务」且
-   `logs/script_logs/` 有新增条目 → 修复端到端生效。仍刷「不是面板任务」= 看门狗在误杀任务，
-   安装会继续失败。
+手动想确认也行（不依赖脚本）：起容器后
 
-> 这套检查目前**未接入 CI**（脚本留在 `image/scripts/`，不进 `.github/scripts/check`），
-> 所以是个「人工门禁」。想把它变成发布流水线自动拦截，把它挪到
-> `.github/scripts/check/` 并接进 `run.sh` / `published.sh` 即可。
+```bash
+docker exec <容器> sh -c "grep -qF 'not in cmdline' /www/server/panel/BT-P* && echo 运行态OK"
+docker exec <容器> sh -c "grep -qF 'not in cmdline' /baota/origin/BT-P* && echo 基准OK"
+```
+
+端到端（装软件真成功）仍需真人到面板装一个软件，并看 `logs/error.log` 不再刷「不是面板任务」、
+`logs/script_logs/` 有新增 —— 这条路 CI 无法代真人操作，故未自动化。
 
 ---
 

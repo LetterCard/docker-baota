@@ -84,8 +84,9 @@ bt restart
 
 （`BT-Panel` 来自镜像层、运行期只读，热改需重启面板生效，仅用于定位；根治请重建镜像。）
 
-构建推送后想确认修复真的生效：容器内直接 `docker exec baota /baota/watchdogcheck.sh`
-（加 `--watch` 再装个软件即可端到端验证；脚本在 `image/scripts/watchdogcheck.sh`，随镜像进 `/baota`）。
+修复是否生效已被 CI 自动门禁覆盖（`core.sh` 的 `A16` 步断言看门狗 cmdline 补丁同时落在
+运行态面板与守卫基准副本，发布前门禁与每日回归都跑这一断言）。想手动确认，起容器后：
+`docker exec <容器> sh -c "grep -qF 'not in cmdline' /www/server/panel/BT-P* && echo OK"`。
 
 ## 启动被「另一个容器实例正在使用」拦下
 
