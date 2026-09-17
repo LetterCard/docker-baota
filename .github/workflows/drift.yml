@@ -73,8 +73,16 @@ jobs:
             recorded=$(tr -d '[:space:]' < "${vfile}" || true)
 
             tmp=$(mktemp)
-            curl -fsSL --connect-timeout 10 --max-time 60 "${url}" -o "${tmp}" \
-              || { echo "::error::拉取 ${line} 的安装脚本失败：${url}"; exit 1; }
+            # download.bt.cn 偶发连接超时，重试避免漂移检测因瞬时网络失败
+            ok=0
+            for i in 1 2 3; do
+              if curl -fsSL --connect-timeout 10 --max-time 60 "${url}" -o "${tmp}"; then
+                ok=1; break
+              fi
+              echo "::warning::拉取 ${line} 安装脚本第 ${i} 次失败（网络超时？），$((i * 5))s 后重试"
+              sleep $((i * 5))
+            done
+            [ "${ok}" = 1 ] || { echo "::error::拉取 ${line} 的安装脚本失败：${url}"; exit 1; }
             sha=$(sha256sum "${tmp}" | awk '{print $1}')
             rm -f "${tmp}"
 
