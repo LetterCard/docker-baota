@@ -123,12 +123,12 @@ jobs:
           git rebase origin/main
 
       - name: 📥 下载回归报告
+        continue-on-error: true
         uses: actions/download-artifact@v8.0.1
         with:
           pattern: report-*
           path: /tmp
           merge-multiple: true
-          if-no-artifacts-found: ignore
 
       - name: 🔬 逐线汇总并生成报告
         run: |
