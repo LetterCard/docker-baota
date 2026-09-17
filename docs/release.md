@@ -89,6 +89,35 @@ buildx 一次调用里没法做到「推送发生在验证之后」，所以拆�
 
 ---
 
+## 构建后手动验证（看门狗修复）
+
+流水线本身的「四套发布前检查」不含看门狗修复专项校验 —— 它作为**运维现场诊断工具**
+随镜像进 `/baota/watchdogcheck.sh`。构建 / 推送完成后，建议按下面清单人工确认一次：
+
+1. **静态检查（对构建候选镜像即可跑）**
+   ```bash
+   docker run --rm <镜像名> /baota/watchdogcheck.sh
+   ```
+   通过 = 面板主程序与守卫基准副本 `/baota/origin` 都已含 cmdline 补丁，且解释器入口走
+   shim、`python-real` 存在。三项任一缺失即 FAIL，说明 `panel.sh` 补丁在构建期没生效，
+   **不要推送**。
+
+2. **端到端检查（可选但推荐，需真人到面板装软件）**
+   ```bash
+   docker run -d --name baota_check --privileged -v baota_check_data:/data <镜像名>
+   docker exec baota_check /baota/watchdogcheck.sh --watch 120
+   # 另开终端：浏览器进面板，装一个软件（nginx / 任意环境库）
+   ```
+   脚本监听 120s：窗口内 `logs/error.log` 不再刷「不是面板任务」且
+   `logs/script_logs/` 有新增条目 → 修复端到端生效。仍刷「不是面板任务」= 看门狗在误杀任务，
+   安装会继续失败。
+
+> 这套检查目前**未接入 CI**（脚本留在 `image/scripts/`，不进 `.github/scripts/check`），
+> 所以是个「人工门禁」。想把它变成发布流水线自动拦截，把它挪到
+> `.github/scripts/check/` 并接进 `run.sh` / `published.sh` 即可。
+
+---
+
 ## 每日巡检：验证已发布镜像
 
 构建流水线验的是**「本地构建出来的候选镜像」**（把坏镜像拦在推送之前）；
