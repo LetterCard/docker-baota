@@ -84,6 +84,9 @@ bt restart
 
 （`BT-Panel` 来自镜像层、运行期只读，热改需重启面板生效，仅用于定位；根治请重建镜像。）
 
+构建推送后想确认修复真的生效：容器内直接 `docker exec baota /baota/watchdogcheck.sh`
+（加 `--watch` 再装个软件即可端到端验证；脚本在 `image/scripts/watchdogcheck.sh`，随镜像进 `/baota`）。
+
 ## 启动被「另一个容器实例正在使用」拦下
 
 同一份 `data/` 不允许两个容器同时挂载（内核 EBUSY / 行为未定义）。

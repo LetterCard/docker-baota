@@ -23,6 +23,16 @@
 没有任何写入落到这 8 个目录之外 —— 这就是持久化目录集合的实测依据：
 `etc usr var root opt home srv` 七个走 overlay，`/www` 走逐子目录 bind（见下）。
 
+> ⚠️ 持久化是**两套独立机制**，不要从单一清单反推「某路径存不存在」：
+> - **系统层 overlay**（`PERSIST_SYSTEM_DIRS` = `etc usr var root opt home srv www/server`）：
+>   把整个目录盖成 overlay，增量落 `data/.system/<同名>`。`/usr/local` 属于 `/usr`，
+>   **走这套**，与下面的 /www 绑定清单毫无关系。
+> - **/www 子目录 bind / overlay**（`WWW_DATA_SUBDIRS` / `PANEL_STATE_SUBDIRS` /
+>   `WWW_OPTIONAL_SUBDIRS`）：只覆盖 `/www` 下的面板状态与业务数据。
+> 宝塔环境库（curl / openssl / freetype / libiconv）装在 `/usr/local/*`，归属系统层
+> overlay，**重建 / 换镜像后照样在**；别因为 `PANEL_STATE_SUBDIRS` 里没有 `/usr/local`
+> 就误判「会丢、要重装」—— 那套清单只管面板状态，管不到系统层。
+
 ---
 
 ## data/ 的目录模型（与容器内路径一一对应）

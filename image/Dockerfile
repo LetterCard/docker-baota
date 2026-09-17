@@ -72,6 +72,7 @@ COPY image/scripts/healthcheck.sh  /baota/healthcheck.sh
 COPY image/scripts/backup.sh       /baota/backup.sh
 COPY image/scripts/guard.sh        /baota/guard.sh
 COPY image/scripts/shim.sh         /baota/shim.sh
+COPY image/scripts/watchdogcheck.sh /baota/watchdogcheck.sh
 COPY image/conf/defaults.env       /baota/defaults.env
 COPY image/conf/btpanel.service    /etc/systemd/system/btpanel.service
 COPY image/scripts/init.sh         /baota/init.sh
