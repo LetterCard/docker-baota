@@ -186,10 +186,17 @@ while docker exec "$CONTAINER" bash -c 'pgrep -f "install.sh" >/dev/null 2>&1'; 
     elapsed=$((elapsed + 5))
     if [ "$((elapsed % 60))" -eq 0 ]; then
         log "安装仍在运行，已等待 ${elapsed}s…"
+        # 每分钟把当前安装日志落盘到 /tmp/uw，即使后续被 CI 超时杀掉也能留下现场
+        docker cp "$CONTAINER:$INSTALL_LOG" /tmp/uw/btpanel-install.log.partial >/dev/null 2>&1 || true
     fi
 done
 kill "$_TAIL_PID" 2>/dev/null || true
 wait "$_TAIL_PID" 2>/dev/null || true
+
+# 最终把安装日志拷出来，方便超时/失败后排查
+if docker cp "$CONTAINER:$INSTALL_LOG" /tmp/uw/btpanel-install.log >/dev/null 2>&1; then
+    log '安装日志已导出到 /tmp/uw/btpanel-install.log'
+fi
 
 # 成功判据：面板主程序已就位（与原「依赖退出码」等价，但兼容后台执行；
 # core.sh A4 同样以 /www/server/panel/BT-P* 存在作为面板装好的标志）
