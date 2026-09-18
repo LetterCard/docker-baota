@@ -85,15 +85,11 @@ install_panel() {
 
 # ==============================================================================
 #  1.5 面板代码补丁（构建期固化；运行期面板只读无法改）
-#
-#  1.5b patch_task_watchdog：真根因——看门狗只查 /proc/<pid>/comm 要求含 'BT-Task'，
-#       而 shim 把解释器改名 python-real 致 comm 永远不含，误杀安装任务；
-#       补成同时查 cmdline，并同步打守卫基准副本，否则会被版本比对还原。
-#
-#  1.5c patch_panel_start_idempotent：init.sh start 用 `runserver:app` 判定面板是否运行，
-#       容器内实际进程为 python-real .../BT-Panel，命令行不含 runserver:app；
-#       看门狗每 10 秒调用 start 都误判为未运行，反复执行 init_db.py 吃满 CPU。
-#       补一道以真实 BT-Panel 进程为准的幂等短路，并同步打守卫基准副本。
+#  1.5b patch_task_watchdog：看门狗只查 comm 要求含 'BT-Task'，shim 改名
+#       python-real 致 comm 永远不含，误杀安装任务；补查 cmdline 并打守卫副本。
+#  1.5c patch_panel_start_idempotent：init.sh 用 `runserver:app` 判面板是否运行，
+#       但容器内进程为 python-real 拉起的面板主程序、命令行不含 runserver:app，
+#       看门狗每 10 秒误判未运行、反复执行 init_db.py 吃满 CPU；补幂等短路。
 # ==============================================================================
 patch_task_watchdog() {
     log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'

@@ -108,13 +108,10 @@ echo 0 > "$CRITICAL_FILE"
 # ------------------------------------------------------------------------------
 #  0. 起容器并装前置包
 #  清单取 base.sh install_packages 的「基础系统」部分，刻意不含编译工具链与
-#  LNMP dev 库：漂移检测只关心「装完往哪些顶层目录写」，而工具链不新增顶层
-#  目录、只让 /usr 多几万个文件，装上它纯属多花几分钟构建时间。
-#  同理不含 logrotate —— 它随「日志体积防线」一起从 base.sh 移除了，这里若
-#  留着，被测环境就与真实镜像不一致（漂移检测的前提是「装的东西一致」）
-#
-#  注意：apt 环境（policy-rc.d、no-recommends、force-confold）必须和真实构建
-#  保持一致，已在上方单独设置。
+#  LNMP dev 库：漂移检测只关心「装完往哪些顶层目录写」，工具链只让 /usr 多几万文件。
+#  同理不含 logrotate（已随「日志体积防线」从 base.sh 移除），否则被测环境与真实
+#  镜像不一致（漂移检测前提是「装的东西一致」）；apt 环境（policy-rc.d、no-recommends、
+#  force-confold）须与真实构建一致，已在上方单独设置。
 # ------------------------------------------------------------------------------
 docker run -d --name "$CONTAINER" --privileged "$BASE_IMAGE" sleep infinity >/dev/null
 log "已启动一次性容器（${BASE_IMAGE}）"
