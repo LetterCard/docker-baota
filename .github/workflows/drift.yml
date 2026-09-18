@@ -194,6 +194,12 @@ jobs:
           merge-multiple: true
 
       - name: 📝 生成报告（必要时更新基线）
+        env:
+          # probe 输出直接内嵌到 run 脚本里会被反引号/JSON 双引号破坏 shell 解析，
+          # 改用 env 变量传入，shell 只把它们当普通字符串展开，不再二次解析。
+          SUMMARY: ${{ needs.probe.outputs.summary }}
+          LINES_JSON: ${{ needs.probe.outputs.lines }}
+          REASON: ${{ needs.probe.outputs.reason }}
         run: |
           set -euo pipefail
           analyzed='skipped'
@@ -206,14 +212,14 @@ jobs:
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
-            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo "- 变更判定：${REASON}"
             echo
             echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
             # SUMMARY 由 probe 输出传回，末尾换行会被 GitHub 吃掉：
             # 只 printf '%s' 再 echo 会让表格与下面的 --- 粘成一行（表格失效），
             # 所以这里显式补一个空行
-            printf '%s\n\n' "${{ needs.probe.outputs.summary }}"
+            printf '%s\n\n' "${SUMMARY}"
             if [ "${analyzed}" = 'success' ]; then
               while IFS= read -r item; do
                 line=$(jq -r '.line' <<< "${item}")
@@ -228,7 +234,7 @@ jobs:
                   echo '_（未产出该线的对比结果）_'
                 fi
                 echo
-              done < <(jq -c '.[]' <<< "${{ needs.probe.outputs.lines }}")
+              done < <(jq -c '.[]' <<< "${LINES_JSON}")
             else
               echo '---'
               echo
@@ -239,7 +245,7 @@ jobs:
 
           # 基线只在对比真的跑完后更新：否则一次失败就会把「上游变了」的信号吞掉
           if [ "${analyzed}" = 'success' ]; then
-            jq -n --argjson lines "${{ needs.probe.outputs.lines }}" \
+            jq -n --argjson lines "${LINES_JSON}" \
               '{lines: ($lines | map({key: .line, value: .sha}) | from_entries)}' > "${BASELINE}"
             echo '基线已更新（只记安装脚本 sha256）'
           fi
@@ -297,6 +303,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SUMMARY: ${{ needs.probe.outputs.summary }}
+          REASON: ${{ needs.probe.outputs.reason }}
         run: |
           set -euo pipefail
           critical=0
@@ -315,7 +322,7 @@ jobs:
           {
             echo "## 检测时间（UTC）：$(date -u '+%F %T')"
             echo
-            echo "- 变更判定：${{ needs.probe.outputs.reason }}"
+            echo "- 变更判定：${REASON}"
             echo
             echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
