@@ -231,6 +231,61 @@ else
     die '官方安装脚本执行失败'
 fi
 
+# ------------------------------------------------------------------------------
+#  1.5 附加守卫（裸上游也能验的两件事；与 image/build/panel.sh + core.sh A16 互补）
+# ------------------------------------------------------------------------------
+guard_anchor=''
+guard_smoke=''
+guard_extra() {
+    local crit=0
+    local _anchor="BT-Task' not in comm"
+
+    # (a) 看门狗判定锚点：我们的 patch_task_watchdog 靠它定位。上游一旦改了看门狗
+    #     判定，构建期 assert 与 core.sh A16 都会失败——这里先一步在漂移里预警。
+    log '检查上游看门狗判定锚点（决定我们的补丁能否打上）'
+    if docker exec "$CONTAINER" bash -c "grep -rqF \"${_anchor}\" /www/server/panel/BT-P* 2>/dev/null"; then
+        log '上游看门狗仍用 comm 判定，我们的 cmdline 补丁锚点有效'
+        guard_anchor='✅ 锚点仍在（补丁可打）'
+    else
+        warn '上游看门狗判定已改，我们的看门狗补丁可能无法应用（需人工复查 patch_task_watchdog）'
+        crit=1
+        guard_anchor='❌ 锚点丢失（补丁将失败）'
+    fi
+
+    # (b) 面板冒烟：裸装后面板应起来并响应 HTTP（抓上游安装脚本自身坏掉这类
+    #     目录比对抓不到的回归）。裸容器无 systemd，拉起方式可能与真机不同，
+    #     起不来只告警、不直接判死——真正的「面板能起」由构建门禁 core.sh 验。
+    log '面板冒烟：等待面板 HTTP 起来'
+    local _port=8888 _up=0 _i
+    for _i in $(seq 1 12); do
+        if docker exec "$CONTAINER" bash -c "curl -fsS -o /dev/null 'http://127.0.0.1:${_port}/' 2>/dev/null"; then
+            _up=1; break
+        fi
+        sleep 5
+    done
+    if [ "$_up" = 0 ]; then
+        docker exec "$CONTAINER" bash -c '/etc/init.d/bt start >/dev/null 2>&1' || true
+        for _i in $(seq 1 12); do
+            if docker exec "$CONTAINER" bash -c "curl -fsS -o /dev/null 'http://127.0.0.1:${_port}/' 2>/dev/null"; then
+                _up=1; break
+            fi
+            sleep 5
+        done
+    fi
+    if [ "$_up" = 1 ]; then
+        log "面板在 :${_port} 正常响应"
+        guard_smoke='✅ 面板 HTTP 可响应'
+    else
+        warn "面板 HTTP 在裸容器未起来（可能是无 systemd 的启动差异，CI 构建门禁 core.sh 会真验）"
+        guard_smoke='⚠️ 裸容器未起（需结合构建门禁判断）'
+    fi
+
+    [ "$crit" = 0 ] || return 1
+}
+if ! guard_extra; then
+    CRITICAL=1
+fi
+
 AFTER=$(count_top_dirs)
 
 declare -A BEFORE_MAP=() AFTER_MAP=()
@@ -298,6 +353,13 @@ done
 #  结论
 # ------------------------------------------------------------------------------
 {
+    echo
+    echo '### 附加守卫（裸上游可验，与 core.sh A16 互补）'
+    echo
+    echo "| 项 | 结果 |"
+    echo '|---|---|'
+    echo "| 看门狗判定锚点 \`BT-Task' not in comm\` | ${guard_anchor} |"
+    echo "| 面板冒烟（裸装后 HTTP 可响应） | ${guard_smoke} |"
     echo
     echo '### 结论'
     echo
