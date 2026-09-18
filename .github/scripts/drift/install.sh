@@ -174,24 +174,48 @@ done
 # 流式执行：后台跑安装、前台 tail 实时进度，避免长静默像卡死。
 # 官方安装脚本通过 exec > >(tee -a /tmp/btpanel-install.log) 2>&1 把进度写进该日志。
 # 外层包 timeout 5400（90 分钟）防止安装脚本因 systemctl/网络等原因无限挂起。
+#
+# 注意：官方脚本末尾会启动后台进程（如监控、证书异步检查等），这些后台进程
+# 因进程替换仍持有脚本 stdout，导致主 bash 进程无法立即退出。我们不能无限等
+# "install.sh" 进程消失，而是等"日志不再增长且面板主程序已就位"就视为完成。
 docker exec -d "$CONTAINER" bash -c "cd /root && timeout 5400 bash install.sh -y --ssl-disable" \
     || die '官方安装脚本启动失败'
 log '官方安装脚本执行中（实时输出见下方），请稍候…'
 docker exec "$CONTAINER" tail -F /tmp/btpanel-install.log 2>/dev/null &
 _TAIL_PID=$!
-# 安装进程退出即停止跟随（pgrep 匹配 bash install.sh）
+
 elapsed=0
+last_size=-1
+idle=0
 while docker exec "$CONTAINER" bash -c 'pgrep -f "install.sh" >/dev/null 2>&1'; do
     sleep 5
     elapsed=$((elapsed + 5))
+
     if [ "$((elapsed % 60))" -eq 0 ]; then
         log "安装仍在运行，已等待 ${elapsed}s…"
         # 每分钟把当前安装日志落盘到 /tmp/uw，即使后续被 CI 超时杀掉也能留下现场
         docker cp "$CONTAINER:$INSTALL_LOG" /tmp/uw/btpanel-install.log.partial >/dev/null 2>&1 || true
     fi
+
+    # 日志静止 2 分钟且面板主程序已就位 => 认为安装已实质完成
+    current_size=$(docker exec "$CONTAINER" bash -c "stat -c%s '${INSTALL_LOG}' 2>/dev/null || echo 0")
+    if [ "${current_size}" = "${last_size}" ]; then
+        idle=$((idle + 5))
+        if [ "${idle}" -ge 120 ] && docker exec "$CONTAINER" bash -c 'ls /www/server/panel/BT-P* >/dev/null 2>&1'; then
+            log '安装日志已静止 2 分钟且面板主程序在位，视为安装完成'
+            break
+        fi
+    else
+        idle=0
+        last_size="${current_size}"
+    fi
 done
 kill "$_TAIL_PID" 2>/dev/null || true
 wait "$_TAIL_PID" 2>/dev/null || true
+
+# 若因日志静止而提前跳出，后台可能还残留 install 相关进程；杀掉它们以便后续清理
+docker exec "$CONTAINER" bash -c 'pkill -9 -f "install.sh" 2>/dev/null || true' >/dev/null 2>&1 || true
+sleep 2
 
 # 最终把安装日志拷出来，方便超时/失败后排查
 if docker cp "$CONTAINER:$INSTALL_LOG" /tmp/uw/btpanel-install.log >/dev/null 2>&1; then
