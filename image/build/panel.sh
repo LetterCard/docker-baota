@@ -138,7 +138,7 @@ PY
 #  1.5c/5 panel_start 幂等化（避免看门狗反复 init_db 吃满 CPU）
 # ==============================================================================
 patch_panel_start_idempotent() {
-    log '1.5c/5 panel_start 幂等化（BT-Panel 进程判定）—— 反复 init_db 真根因'
+    log '1.5c/5 panel_start 幂等化（面板主程序进程判定）—— 反复 init_db 真根因'
 
     _patch_init_one() {
         "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "panel_start 幂等补丁失败（$1）"
@@ -154,7 +154,7 @@ b = s.index('{', idx)
 guard = ('\n'
          '        # BT-PANEL_IDEMPOTENT_GUARD: 容器化幂等短路\n'
          "        # init.sh 原用 `ps aux|grep 'runserver:app'` 判定面板是否运行，\n"
-         '        # 但容器内面板进程实际为 python-real .../BT-Panel，命令行不含 runserver:app，\n'
+         '        # 但容器内面板进程实际为 python-real 拉起的面板主程序，命令行不含 runserver:app，\n'
          '        # 导致看门狗每 10 秒调用 start 都误判为未运行，反复执行 init_db.py 吃满 CPU。\n'
          "        if ps aux | grep -E '[B]T-Panel' | grep -qv grep; then\n"
          '                echo "Starting Bt-Panel... Bt-Panel already running"\n'
