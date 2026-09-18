@@ -89,6 +89,11 @@ install_panel() {
 #  1.5b patch_task_watchdog：真根因——看门狗只查 /proc/<pid>/comm 要求含 'BT-Task'，
 #       而 shim 把解释器改名 python-real 致 comm 永远不含，误杀安装任务；
 #       补成同时查 cmdline，并同步打守卫基准副本，否则会被版本比对还原。
+#
+#  1.5c patch_panel_start_idempotent：init.sh start 用 `runserver:app` 判定面板是否运行，
+#       容器内实际进程为 python-real .../BT-Panel，命令行不含 runserver:app；
+#       看门狗每 10 秒调用 start 都误判为未运行，反复执行 init_db.py 吃满 CPU。
+#       补一道以真实 BT-Panel 进程为准的幂等短路，并同步打守卫基准副本。
 # ==============================================================================
 patch_task_watchdog() {
     log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
@@ -125,6 +130,54 @@ PY
     # 用 if 而非 &&：条件为假时 if 语句本身返回 0，函数才不会把非 0 带出（set -e 会终止脚本）
     if [ -n "${bt_origin}" ]; then
         _patch_watchdog_one "${bt_origin}"
+    fi
+    return 0
+}
+
+# ==============================================================================
+#  1.5c/5 panel_start 幂等化（避免看门狗反复 init_db 吃满 CPU）
+# ==============================================================================
+patch_panel_start_idempotent() {
+    log '1.5c/5 panel_start 幂等化（BT-Panel 进程判定）—— 反复 init_db 真根因'
+
+    _patch_init_one() {
+        "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "panel_start 幂等补丁失败（$1）"
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8', errors='ignore').read()
+marker = 'BT-PANEL_IDEMPOTENT_GUARD'
+if marker in s:
+    print('already patched', p)
+    raise SystemExit
+idx = s.index('panel_start()')
+b = s.index('{', idx)
+guard = ('\n'
+         '        # BT-PANEL_IDEMPOTENT_GUARD: 容器化幂等短路\n'
+         "        # init.sh 原用 `ps aux|grep 'runserver:app'` 判定面板是否运行，\n"
+         '        # 但容器内面板进程实际为 python-real .../BT-Panel，命令行不含 runserver:app，\n'
+         '        # 导致看门狗每 10 秒调用 start 都误判为未运行，反复执行 init_db.py 吃满 CPU。\n'
+         "        if ps aux | grep -E '[B]T-Panel' | grep -qv grep; then\n"
+         '                echo "Starting Bt-Panel... Bt-Panel already running"\n'
+         '                return 0\n'
+         '        fi\n')
+s = s[:b+1] + guard + s[b+1:]
+open(p, 'w', encoding='utf-8').write(s)
+print('patched', p)
+PY
+    }
+
+    _patch_init_one "${PANEL_DIR}/init.sh"
+
+    # 守卫基准副本也要打：guard.sh 用 /baota/origin 做回滚来源，
+    # 若 origin 里还是未修版，版本比对时会把运行态 init.sh 还原成问题版本。
+    # services.sh 在 guard 装配之后才生成 origin，但这里也防一手手工重建 origin。
+    local init_origin
+    init_origin=
+    if [ -e /baota/origin/init.sh ]; then
+        init_origin=/baota/origin/init.sh
+    fi
+    if [ -n "${init_origin}" ]; then
+        _patch_init_one "${init_origin}"
     fi
     return 0
 }
@@ -218,6 +271,7 @@ warmup_account_chain() {
 main() {
     install_panel
     patch_task_watchdog
+    patch_panel_start_idempotent
     reset_firewall
     remove_swap_file
     verify_key_files
