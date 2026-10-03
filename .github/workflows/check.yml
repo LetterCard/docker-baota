@@ -51,6 +51,13 @@ jobs:
           matrix='[]'
           while read -r line display vfile _url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
+            # 静态线（probe=none）跳过每日验证：无标准版本号，且发布标签是字面量
+            # （如 pro），不按 <版本> 拉取；其持久化机制与共享 Dockerfile 一致，由
+            # 发布前四套门禁在手动构建时覆盖
+            if [ "${_probe}" = 'none' ]; then
+              echo "⏭️ 跳过静态线 ${line}（${display}）的每日验证"
+              continue
+            fi
             ver=$(tr -d '[:space:]' < "${vfile}")
             [ -n "${ver}" ] || { echo "::error::${vfile} 为空"; exit 1; }
             matrix=$(jq -c --arg line "${line}" --arg display "${display}" --arg ver "${ver}" \
@@ -139,6 +146,13 @@ jobs:
 
           while read -r line display vfile _url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
+            # 静态线（probe=none）跳过每日验证：无标准版本号，且发布标签是字面量
+            # （如 pro），不按 <版本> 拉取；其持久化机制与共享 Dockerfile 一致，由
+            # 发布前四套门禁在手动构建时覆盖
+            if [ "${_probe}" = 'none' ]; then
+              echo "⏭️ 跳过静态线 ${line}（${display}）的每日验证"
+              continue
+            fi
             ver=$(tr -d '[:space:]' < "${vfile}")
 
             # 回归脚本自己会 pull / 起容器 / 跑四套门禁；这里只负责收集结果。

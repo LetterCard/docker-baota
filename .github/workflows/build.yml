@@ -88,43 +88,55 @@ jobs:
             printf '%s' "${cur}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
               || { echo "::error::${vfile} 不是 x.y.z 形态：${cur}"; exit 1; }
 
-            # 上游版本探测：方式由声明表的 probe 字段决定（banner / api）
+            # 上游版本探测：方式由声明表的 probe 字段决定（banner / api / none）
+            #   none = 静态线：没有标准版本号可比，跳过探测；只在该线被显式选中
+            #   或勾选「强制更新」时才构建（绝不随 all 自动重建）
             probe_out=''
-            tmp=$(mktemp)
+            target="${cur}"
+            changed=false
             case "${probe}" in
+              none)
+                echo "🔧 ${display} 为静态线（probe=none），跳过版本探测"
+                if [ "${SELECT}" = "${line}" ] || [ "${FORCE}" = 'true' ]; then
+                  changed=true
+                fi
+                ;;
               banner)
+                tmp=$(mktemp)
                 if curl -fsSL --connect-timeout 10 --max-time 60 "${url}" -o "${tmp}" 2> /dev/null; then
                   probe_out=$(grep -m1 '您正在安装宝塔面板' "${tmp}" \
                               | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
                 fi
+                rm -f "${tmp}"
                 ;;
               api)
+                tmp=$(mktemp)
                 if curl -fsSL --connect-timeout 10 --max-time 30 "${VERSION_API}" -o "${tmp}" 2> /dev/null; then
                   probe_out=$(tr -d '[:space:]' < "${tmp}" || true)
                 fi
+                rm -f "${tmp}"
                 ;;
               *)
-                echo "::error::线 ${line} 的 probe 字段非法：${probe}（应为 banner 或 api）"
+                echo "::error::线 ${line} 的 probe 字段非法：${probe}（应为 banner / api / none）"
                 exit 1
                 ;;
             esac
-            rm -f "${tmp}"
 
-            target="${cur}"
-            changed=false
-            if [ -z "${probe_out}" ]; then
-              echo "::warning::${display} 探测上游版本失败，按 ${vfile}（${cur}）继续"
-            elif [ "${probe_out}" = "${cur}" ]; then
-              echo "✅ ${display} 已是最新（${cur}）"
-            else
-              newer=$(printf '%s\n%s\n' "${cur}" "${probe_out}" | sort -V | tail -1)
-              if [ "${newer}" = "${probe_out}" ]; then
-                target="${probe_out}"
-                changed=true
-                echo "::warning::${display} 发现上游新版本：${cur} → ${probe_out}"
+            if [ "${probe}" != 'none' ]; then
+              if [ -z "${probe_out}" ]; then
+                echo "::warning::${display} 探测上游版本失败，按 ${vfile}（${cur}）继续"
+              elif [ "${probe_out}" = "${cur}" ]; then
+                echo "✅ ${display} 已是最新（${cur}）"
               else
-                # 上游回滚或探测异常：绝不自动降级，VERSION 文件是比对基准
-                echo "::warning::${display} 上游版本（${probe_out}）低于已发布版本（${cur}），不自动降级"
+                newer=$(printf '%s\n%s\n' "${cur}" "${probe_out}" | sort -V | tail -1)
+                if [ "${newer}" = "${probe_out}" ]; then
+                  target="${probe_out}"
+                  changed=true
+                  echo "::warning::${display} 发现上游新版本：${cur} → ${probe_out}"
+                else
+                  # 上游回滚或探测异常：绝不自动降级，VERSION 文件是比对基准
+                  echo "::warning::${display} 上游版本（${probe_out}）低于已发布版本（${cur}），不自动降级"
+                fi
               fi
             fi
             if [ "${FORCE}" = 'true' ]; then
@@ -135,9 +147,11 @@ jobs:
             if [ -n "${BASE_OVERRIDE}" ]; then
               base_img="${BASE_OVERRIDE}"
             fi
+            # tag 策略：exact=只发 <版本>；latest=<版本> + latest；
+            # 其它字面量（如 pro）= 只发那个字面量标签（不随版本号、也不发 latest）
             case "${tag}" in
               exact | latest) ;;
-              *) echo "::error::线 ${line} 的 tag 字段非法：${tag}（应为 exact 或 latest）"; exit 1 ;;
+              *) : ;;   # 字面量静态标签，发布阶段按 matrix.tag 原样用作标签
             esac
 
             # 回写：只有「本次要发布的版本 ≠ 仓库记录」时才需要
@@ -380,9 +394,14 @@ jobs:
           echo "amd64: ${AMD64}  arm64: ${ARM64}"
           [ -n "${AMD64}" ] && [ -n "${ARM64}" ] || { echo '::error::缺少 digest'; exit 1; }
 
-          tags=( -t "${REPO}:${VER}" )
-          if [ "${{ matrix.tag }}" = 'latest' ]; then
-            tags+=( -t "${REPO}:latest" )
+          tags=()
+          if [ "${{ matrix.tag }}" = 'exact' ]; then
+            tags=( -t "${REPO}:${VER}" )
+          elif [ "${{ matrix.tag }}" = 'latest' ]; then
+            tags=( -t "${REPO}:${VER}" -t "${REPO}:latest" )
+          else
+            # 字面量静态标签（如 pro）：只发 :<tag>，不随版本号、也不发 latest
+            tags=( -t "${REPO}:${{ matrix.tag }}" )
           fi
           # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败
           ok=0
@@ -473,6 +492,12 @@ jobs:
               echo "### ✏️ ${{ matrix.display }}：版本记录已是 \`${{ matrix.version }}\`，无需回写"
             fi
             echo
-            echo "- 镜像标签：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`$([ '${{ matrix.tag }}' = 'latest' ] && echo ' 与 `:latest`')"
+            tag_note=''
+            if [ '${{ matrix.tag }}' = 'latest' ]; then
+              tag_note=' 与 `:latest`'
+            elif [ '${{ matrix.tag }}' != 'exact' ]; then
+              tag_note="（静态标签 \`:${{ matrix.tag }}\`）"
+            fi
+            echo "- 镜像标签：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`${tag_note}"
             echo "- 架构：linux/amd64、linux/arm64"
           } >> "$GITHUB_STEP_SUMMARY"

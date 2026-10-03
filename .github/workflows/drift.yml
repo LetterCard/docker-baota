@@ -70,6 +70,11 @@ jobs:
 
           while read -r line display vfile url _probe _tag _base; do
             [ -n "${line:-}" ] || continue
+            # 静态线（probe=none）跳过漂移检测：无标准上游版本可比，每日巡检无意义
+            if [ "${_probe}" = 'none' ]; then
+              echo "⏭️ 跳过静态线 ${line}（${display}）的漂移检测"
+              continue
+            fi
             recorded=$(tr -d '[:space:]' < "${vfile}" || true)
 
             tmp=$(mktemp)
