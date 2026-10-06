@@ -34,6 +34,12 @@ data/
 .env
 .env.*
 
-# 编排文件与版本记录（镜像内不需要；Dockerfile 本身必须留在上下文中）
+# 编排文件（镜像内不需要；Dockerfile 由 -f 指定，不受本清单影响）
 docker-compose.yml
-image/versions/
+
+# 版本目录下的记录不入上下文，但 pro 线的 Dockerfile 与构建期补丁脚本必须留
+image/versions/*
+!image/versions/pro
+image/versions/pro/*
+!image/versions/pro/Dockerfile
+!image/versions/pro/build
