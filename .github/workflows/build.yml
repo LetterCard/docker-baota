@@ -1,7 +1,7 @@
 name: 📦 发布：构建并发布镜像
 
 # ==============================================================================
-#  📦 各条线共用这一份流水线（当前：12_version / 13_version / pro_version）
+#  📦 各条线共用这一份流水线（当前：12_version / 13_version）
 #
 #  线的差异只有一处来源：image/lines.conf。本文件里**不写**任何「if 是 13 就…」
 #  式的判断 —— 唯一分支是「读表里的 probe 字段」；新增一条线 = 往表里加一行。
@@ -25,15 +25,15 @@ on:
       line:
         # 用自由文本而不是 choice：线是会不断加的（14_version、15_version…），
         # choice 的选项得手写死，迟早要改 ✗
-        description: '构建哪条线（线标识，如 12_version / 13_version / pro_version；all=全部）'
+        description: '构建线(线标识 12_version / 13_version)，all=全部'
         type: string
         default: 'all'
       force_update:
-        description: '🔧 强制更新：跳过「已是最新」判断，直接重建发布'
+        description: '强制更新(跳过最新判断)，直接重建发布'
         type: boolean
         default: false
       base_image:
-        description: '可选：覆盖基础镜像（例如 debian:13），留空用 lines.conf 的值'
+        description: '覆盖基础镜像(例如 debian:13)，留空用 lines.conf 的值'
         type: string
         default: ''
 
@@ -148,7 +148,7 @@ jobs:
               base_img="${BASE_OVERRIDE}"
             fi
             # tag 策略：exact=只发 <版本>；latest=<版本> + latest；
-            # 其它字面量（如 pro）= 只发那个字面量标签（不随版本号、也不发 latest）
+            # 其它字面量 = 只发那个字面量标签（不随版本号、也不发 latest）
             case "${tag}" in
               exact | latest) ;;
               *) : ;;   # 字面量静态标签，发布阶段按 matrix.tag 原样用作标签
@@ -400,7 +400,7 @@ jobs:
           elif [ "${{ matrix.tag }}" = 'latest' ]; then
             tags=( -t "${REPO}:${VER}" -t "${REPO}:latest" )
           else
-            # 字面量静态标签（如 pro）：只发 :<tag>，不随版本号、也不发 latest
+            # 字面量静态标签：只发 :<tag>，不随版本号、也不发 latest
             tags=( -t "${REPO}:${{ matrix.tag }}" )
           fi
           # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败

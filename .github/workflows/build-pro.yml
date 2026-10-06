@@ -1,0 +1,361 @@
+name: 📦 发布：构建专业版镜像
+
+# ==============================================================================
+#  📦 pro 线专属发布流水线 —— 与 12/13 官方线完全独立
+#
+#  pro 已从 image/lines.conf 摘除，不再走共享的 build.yml / image/Dockerfile。
+#  本工作流只构建并发布 baota:pro，使用 pro 专属的：
+#    · Dockerfile  → image/versions/pro/Dockerfile
+#    · 授权补丁    → image/versions/pro/build/patch_pro_license.sh
+#    · 版本文件    → image/versions/pro/VERSION
+#  12/13 线的任何改动都不会触发本流程，反之亦然。
+#
+#  流程（pro 是静态线：版本号真源是 baota.1000.run 后台填的 new_version，经其公开
+#        接口透出；该云端自建可控，无兜底，接口不可用直接失败；构建成功后回写 VERSION 文件）：
+#    prep       从云端接口取 pro 版本 → 输出版本与基础镜像
+#    lint       静态检查（make lint）
+#    build      两架构在原生 runner 构建 → 四套发布前检查 → 通过才按 digest 推送
+#    publish    合并两架构 digest → 按字面量标签 pro 发布
+#    write_back 把已发布版本号回写进 image/versions/pro/VERSION
+#
+#  🔑 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+# ==============================================================================
+
+on:
+  # 发布是手动的：pro 随改随发，无「已是最新」判断，每次都完整重建。
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: '覆盖基础镜像(例如 debian:13)，留空用 debian:12'
+        type: string
+        default: ''
+      version:
+        description: '覆盖版本(仅镜像 label)，留空用云端探测'
+        type: string
+        default: ''
+      install_url:
+        description: '覆盖脚本(例如镜像源)，留空用默认源 PRO_INSTALL_URL'
+        type: string
+        default: ''
+
+# 不取消在途运行：发布动作应完整跑完
+concurrency:
+  group: build-pro
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: baota
+  PRO_VERSION_FILE: image/versions/pro/VERSION
+  PRO_VERSION_API: https://baota.1000.run/api/panel/get_version
+  PRO_INSTALL_URL: https://baota.1000.run/install/install_panel.sh
+  # 面板云端（btcloud）根地址：安装包里的 API 地址是占位符，构建期补丁用这个值纠正。
+  # 改这里即可切换云端，Dockerfile 内不写死。
+  PRO_CLOUD_URL: https://baota.1000.run
+  PRO_BASE: debian:12
+  PRO_TAG: pro
+
+jobs:
+  # ---------------------------------------------------------------------------
+  #  1) 取 pro 版本号（btcloud 后台填写值），输出构建参数
+  # ---------------------------------------------------------------------------
+  prep:
+    name: 🔍 读 pro 版本
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      base: ${{ steps.plan.outputs.base }}
+      install_url: ${{ steps.plan.outputs.install_url }}
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔍 解析 pro 版本
+        id: plan
+        env:
+          VER_OVERRIDE: ${{ inputs.version }}
+          BASE_OVERRIDE: ${{ inputs.base_image }}
+          INSTALL_OVERRIDE: ${{ inputs.install_url }}
+        run: |
+          set -euo pipefail
+          ver=''
+          if [ -n "${VER_OVERRIDE}" ]; then
+            ver="${VER_OVERRIDE}"
+          else
+            # 版本号真源是 baota.1000.run 后台填写的 new_version，经其公开接口透出；
+            # 该云端自建可控，无兜底，接口不可用直接失败。
+            tmp=$(mktemp)
+            if curl -fsSL --connect-timeout 10 --max-time 30 "${PRO_VERSION_API}" -o "${tmp}" 2>/dev/null; then
+              ver=$(tr -d '[:space:]' < "${tmp}" || true)
+            fi
+            rm -f "${tmp}"
+            echo "云端版本接口：${ver}"
+          fi
+          printf '%s' "${ver}" | grep -Eq '^[0-9][0-9.]*$' \
+            || { echo "::error::版本不是合法形态：${ver}"; exit 1; }
+          base_img="${PRO_BASE}"
+          [ -n "${BASE_OVERRIDE}" ] && base_img="${BASE_OVERRIDE}"
+          install_url="${PRO_INSTALL_URL}"
+          [ -n "${INSTALL_OVERRIDE}" ] && install_url="${INSTALL_OVERRIDE}"
+          {
+            echo "version=${ver}"
+            echo "base=${base_img}"
+            echo "install_url=${install_url}"
+          } >> "$GITHUB_OUTPUT"
+          echo "pro 版本=${ver}  基础镜像=${base_img}"
+
+  # ---------------------------------------------------------------------------
+  #  2) 静态检查
+  # ---------------------------------------------------------------------------
+  lint:
+    name: 🧹 静态检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🔧 安装检查工具
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y shellcheck python3-yaml jq
+          shellcheck --version
+          python3 -c "import yaml; print('PyYAML ok')"
+
+      - name: 🧹 运行静态检查
+        run: make lint
+
+  # ---------------------------------------------------------------------------
+  #  3) 构建（amd64 / arm64，各自在原生 runner 上跑）
+  # ---------------------------------------------------------------------------
+  build:
+    name: 🏗️ pro / linux-${{ matrix.arch }}
+    needs: [prep, lint]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 🖥️ 确认 runner 原生架构
+        run: |
+          echo "runner: $(uname -m)  target: ${{ matrix.arch }}"
+          case "${{ matrix.arch }}-$(uname -m)" in
+            amd64-x86_64|arm64-aarch64) echo '✅ 原生构建' ;;
+            *) echo '::error::runner 与目标架构不匹配'; exit 1 ;;
+          esac
+
+      - name: 🔧 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: 🏗️ 构建镜像（加载到本地，供健康检查）
+        run: |
+          echo "构建 baota:candidate（pro / linux/${{ matrix.arch }}）"
+          docker buildx build \
+            --file ./image/versions/pro/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --load \
+            --provenance=false \
+            --build-arg "BASE_IMAGE=${{ needs.prep.outputs.base }}" \
+            --build-arg "INSTALL_URL=${{ needs.prep.outputs.install_url }}" \
+            --build-arg "PANEL_CLOUD_URL=${{ env.PRO_CLOUD_URL }}" \
+            --build-arg "LINE=pro_version" \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "IMAGE_VERSION=${{ needs.prep.outputs.version }}" \
+            --build-arg "IMAGE_DESCRIPTION=宝塔 Linux 面板容器化（pro 线，含授权补丁）" \
+            --tag "baota:candidate" \
+            --cache-from "type=gha,scope=pro-${{ matrix.arch }}" \
+            --cache-to "type=gha,scope=pro-${{ matrix.arch }},mode=max" \
+            .
+          docker image inspect --format '本地镜像 ID：{{.Id}}' baota:candidate
+
+      - name: 💽 runner 磁盘水位（healthcheck 判据②的对照）
+        run: |
+          echo '判据②：持久化根可用 <1GB 或已用 ≥95% 即 unhealthy'
+          df -Ph / /var/lib/docker 2>/dev/null || true
+          docker system df 2>/dev/null || true
+
+      - name: 🩺 四套健康检查并行（功能 / 挂载 / 升级 / 恢复）
+        run: |
+          set -euo pipefail
+          LOG_DIR="${RUNNER_TEMP:-/tmp}/hc-logs"
+          mkdir -p "${LOG_DIR}"
+          VER="${{ needs.prep.outputs.version }}"
+
+          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check/run.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
+          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check/run.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
+
+          FAILED=0
+          wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }
+          wait "${PID_DEGRADE}"  || { echo "::error::degrade 检查失败，日志见 ${LOG_DIR}/degrade.log";  FAILED=1; }
+          wait "${PID_UPGRADE}" || { echo "::error::upgrade 检查失败，日志见 ${LOG_DIR}/upgrade.log"; FAILED=1; }
+          wait "${PID_RESTORE}" || { echo "::error::restore 检查失败，日志见 ${LOG_DIR}/restore.log"; FAILED=1; }
+
+          if [ "${FAILED}" -ne 0 ]; then
+            for f in core degrade upgrade restore; do
+              echo "===== ${f}.log (tail 80) ====="
+              tail -n 80 "${LOG_DIR}/${f}.log" || true
+            done
+            exit 1
+          fi
+          echo '✅ 四套健康检查全过'
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 📤 按 digest 推送（不产生标签）
+        id: push
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          echo "推送 pro / linux/${{ matrix.arch }}（按 digest，无标签）"
+
+          docker buildx build \
+            --file ./image/versions/pro/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --provenance=false \
+            --build-arg "BASE_IMAGE=${{ needs.prep.outputs.base }}" \
+            --build-arg "INSTALL_URL=${{ needs.prep.outputs.install_url }}" \
+            --build-arg "PANEL_CLOUD_URL=${{ env.PRO_CLOUD_URL }}" \
+            --build-arg "LINE=pro_version" \
+            --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "IMAGE_VERSION=${{ needs.prep.outputs.version }}" \
+            --build-arg "IMAGE_DESCRIPTION=宝塔 Linux 面板容器化（pro 线，含授权补丁）" \
+            --output "type=image,name=${REPO},push=true,push-by-digest=true" \
+            --metadata-file "/tmp/meta-${{ matrix.arch }}.json" \
+            --cache-from "type=gha,scope=pro-${{ matrix.arch }}" \
+            .
+          DIGEST=$(jq -r '."containerimage.digest"' "/tmp/meta-${{ matrix.arch }}.json")
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "::error::取 digest 失败：${DIGEST}"; exit 1 ;;
+          esac
+          mkdir -p /tmp/digests
+          printf '%s\n' "${DIGEST}" > "/tmp/digests/${{ matrix.arch }}"
+          echo "✅ ${{ matrix.arch }} digest: ${DIGEST}"
+
+      - name: 📦 上传 digest 产物
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: digest-pro-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  #  4) 合并两架构 digest → 按字面量标签 pro 发布（不随版本号、也不发 latest）
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 🚀 发布 baota:pro
+    needs: [prep, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 📥 下载 digest 产物
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: digest-pro-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: 🔑 登录 DockerHub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🚀 合并多架构 manifest 并打标签
+        run: |
+          set -euo pipefail
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          AMD64=$(tr -d '[:space:]' < /tmp/digests/amd64)
+          ARM64=$(tr -d '[:space:]' < /tmp/digests/arm64)
+          echo "amd64: ${AMD64}  arm64: ${ARM64}"
+          [ -n "${AMD64}" ] && [ -n "${ARM64}" ] || { echo '::error::缺少 digest'; exit 1; }
+
+          tags=( -t "${REPO}:${{ env.PRO_TAG }}" )
+          # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败
+          ok=0
+          for i in 1 2 3; do
+            if docker buildx imagetools create "${tags[@]}" "${REPO}@${AMD64}" "${REPO}@${ARM64}"; then
+              ok=1; break
+            fi
+            echo "::warning::imagetools create 第 ${i} 次失败（CDN 连接重置？），$((i * 10))s 后重试"
+            sleep $((i * 10))
+          done
+          [ "${ok}" = 1 ] || { echo '::error::imagetools create 重试耗尽'; exit 1; }
+          echo "✅ 已发布：${tags[*]}"
+
+      - name: 📋 输出摘要
+        run: |
+          {
+            echo "### 🚀 baota:pro 已发布"
+            echo
+            echo "- 镜像标签：\`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.PRO_TAG }}\`"
+            echo "- 版本（label）：\`${{ needs.prep.outputs.version }}\`"
+            echo "- 架构：linux/amd64、linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  #  5) 回写已发布的 pro 版本号（保证 VERSION 文件永远对应「已推送」的版本）
+  # ---------------------------------------------------------------------------
+  write_back:
+    name: ✏️ 回写 pro 版本
+    needs: [prep, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: ✏️ 回写已发布的版本号
+        run: |
+          set -euo pipefail
+          VER="${{ needs.prep.outputs.version }}"
+          VERSION_FILE="${PRO_VERSION_FILE}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main
+
+            CURRENT=$(tr -d '[:space:]' < "${VERSION_FILE}" 2>/dev/null || true)
+            if [ "${CURRENT}" = "${VER}" ]; then
+              echo "✅ ${VERSION_FILE} 已是 ${VER}，本次无需回写"
+              exit 0
+            fi
+
+            printf '%s\n' "${VER}" > "${VERSION_FILE}"
+            git add "${VERSION_FILE}"
+            git commit -m "chore(release): baota pro ${VER}（回写 ${VERSION_FILE}）"
+            if git push origin HEAD:main; then
+              git fetch origin main
+              REMOTE_VER=$(git show "origin/main:${VERSION_FILE}" 2>/dev/null | tr -d '[:space:]' || true)
+              [ "${REMOTE_VER}" = "${VER}" ] \
+                || { echo "::error::回写后远端 ${VERSION_FILE} = ${REMOTE_VER:-空}，期望 ${VER}"; exit 1; }
+              echo "✅ 已回写 ${VERSION_FILE} = ${VER}（远端校验通过）"
+              exit 0
+            fi
+            echo "::warning::push 失败（第 ${attempt} 次），rebase 后重试"
+            sleep 5
+          done
+          echo '::error::VERSION 回写失败（连续 3 次 push 被拒）'
+          exit 1
