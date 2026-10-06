@@ -2,19 +2,14 @@
 # ==============================================================================
 #  🐳 baota:pro 专属 Dockerfile —— 与 12/13 官方线完全独立
 #
-#  本文件只构建 pro 线，不再走共享的 image/Dockerfile（那是 12/13 线共用的）。
-#  pro 的授权补丁（永久授权显示）在 panel 安装后无条件固化，无需任何
-#  「if LINE==pro_version」分支判断 —— 因为这个 Dockerfile 只为 pro 服务。
+#  本文件只构建 pro 线，不再走共享 image/Dockerfile（那是 12/13 线共用的）。
+#  pro 的授权补丁在安装后无条件固化，无需「if LINE==pro_version」分支判断。
 #
-#  构建上下文是仓库根：
-#    docker build -f image/versions/pro/Dockerfile \
-#      --build-arg INSTALL_URL=<安装脚本地址，由 CI 的 PRO_INSTALL_URL 提供> \
-#      --build-arg IMAGE_VERSION=<版本号，由 CI 从 btcloud 接口取> \
-#      -t baota:pro .
+#  构建上下文是仓库根（--build-arg 均由 CI 注入，见 build-pro.yml 的 env）：
+#    INSTALL_URL / IMAGE_VERSION / PANEL_CLOUD_URL  ← pro 的三个入参
 #
 #  持久化与不可变面板等机制与 12/13 一致（见 image/Dockerfile 顶部注释）。
-#  构建逻辑（base / panel / services 三阶段）复用 image/build/ 下的通用脚本，
-#  这些脚本不含任何 pro 专属逻辑；pro 的差异化只在 patch_pro_license.sh 一处。
+#  构建三阶段复用 image/build/ 通用脚本，pro 的差异化只在补丁脚本一处。
 # ==============================================================================
 
 ARG BASE_IMAGE

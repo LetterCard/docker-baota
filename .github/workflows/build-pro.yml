@@ -1,22 +1,15 @@
-name: 📦 发布：构建专业版镜像
+name: 🐳 构建：发布专业版镜像
 
 # ==============================================================================
 #  📦 pro 线专属发布流水线 —— 与 12/13 官方线完全独立
 #
-#  pro 已从 image/lines.conf 摘除，不再走共享的 build.yml / image/Dockerfile。
-#  本工作流只构建并发布 baota:pro，使用 pro 专属的：
-#    · Dockerfile  → image/versions/pro/Dockerfile
-#    · 授权补丁    → image/versions/pro/build/patch_pro_license.sh
-#    · 版本文件    → image/versions/pro/VERSION
-#  12/13 线的任何改动都不会触发本流程，反之亦然。
+#  pro 已从 image/lines.conf 摘除，不再走共享 build.yml / image/Dockerfile。
+#  本工作流只构建发布 baota:pro，用 pro 专属的 Dockerfile、
+#  patch_pro_license.sh、VERSION；12/13 的改动互不触发。
 #
-#  流程（pro 是静态线：版本号真源是 baota.1000.run 后台填的 new_version，经其公开
-#        接口透出；该云端自建可控，无兜底，接口不可用直接失败；构建成功后回写 VERSION 文件）：
-#    prep       从云端接口取 pro 版本 → 输出版本与基础镜像
-#    lint       静态检查（make lint）
-#    build      两架构在原生 runner 构建 → 四套发布前检查 → 通过才按 digest 推送
-#    publish    合并两架构 digest → 按字面量标签 pro 发布
-#    write_back 把已发布版本号回写进 image/versions/pro/VERSION
+#  版本号真源是 baota.1000.run 后台填的 new_version，经其公开接口透出
+#  （云端自建可控，无兜底，接口不可用直接失败）。
+#  流程：prep 取版本 → lint → build 两架构检查后推送 → publish → write_back
 #
 #  🔑 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
 # ==============================================================================
