@@ -30,6 +30,7 @@ fi
 "${PANEL_PY_BIN}" - "${PANEL_DIR}" "${CLOUD_URL}" <<'PY'
 import ast
 import os
+import re
 import sys
 
 panel_dir, cloud_url = sys.argv[1], sys.argv[2]
@@ -54,12 +55,14 @@ def write(p, s):
         f.write(s)
 
 
-def sub_once(source, old, new, desc, at_least=1):
-    n = source.count(old)
+def sub_once(source, old, new, desc, at_least=1, regex=False):
+    # 含云端地址的锚点一律用正则匹配：云端可能在下发前就把地址替换成真实域名，
+    # 写死地址字符串必然失配
+    n = len(re.findall(old, source)) if regex else source.count(old)
     if n < at_least:
         raise AssertionError('补丁锚点未命中（%s）：上游代码可能已变更，请复查' % desc)
     notes.append('  %s（%d 处）' % (desc, n))
-    return source.replace(old, new)
+    return re.sub(old, new, source, count=1) if regex else source.replace(old, new)
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +147,11 @@ NO_UPDATE_RULES = {
     ],
     'task.py': [
         (
-            "    @staticmethod\n"
-            "    def update_panel():\n"
-            "        os.system(\"curl -k %s/install/update6.sh|bash &\")\n" % PLACEHOLDER,
-            "    @staticmethod\n"
-            "    def update_panel():\n"
-            "        return  # %s: 面板自动更新定时任务已禁用\n" % TAG,
+            r'(    @staticmethod\n    def update_panel\(\):\n)'
+            r'        os\.system\("curl -k [^"\n]*?/install/update6\.sh\|bash &"\)\n',
+            '\\1        return  # %s: 面板自动更新定时任务已禁用\n' % TAG,
             'task.update_panel 定时任务禁用',
+            True,
         ),
     ],
     'tools.py': [
@@ -199,11 +200,11 @@ NO_UPDATE_RULES = {
     ],
     'script/local_fix.sh': [
         (
-            "wget --no-check-certificate -O update.sh %s/install/update6.sh -T 12 -t 2 \n"
-            "bash update.sh\n" % PLACEHOLDER,
+            r'wget [^\n]*?/install/update6\.sh[^\n]*\nbash update\.sh\n',
             "# %s: 面板内在线更新已禁用（原为下载并执行云端 update6.sh）\n"
             "echo \"panel in-app update disabled\"\n" % TAG,
             'local_fix.sh update6.sh 禁用',
+            True,
         ),
     ],
     # 命令行自救通道一并封死：pro 线不跟踪官方更新，升级一律换镜像标签
@@ -271,10 +272,14 @@ def patch_no_update(rel, source):
     rules = NO_UPDATE_RULES.get(rel)
     if not rules:
         return source
-    for old, new, desc in rules:
-        if new in source:  # 幂等：已打过则跳过
+    for rule in rules:
+        old, new, desc = rule[0], rule[1], rule[2]
+        is_re = rule[3] if len(rule) > 3 else False
+        # 幂等：已打过则跳过。正则规则的 new 是模板（含 \1 组引用），
+        # 要先剥掉组引用才是文件里真实存在的样子
+        if new.replace('\\1', '') in source:
             continue
-        source = sub_once(source, old, new, desc)
+        source = sub_once(source, old, new, desc, regex=is_re)
     return source
 
 
