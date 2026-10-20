@@ -36,7 +36,7 @@ on:
       dev:
         # dev 测试标签：只构建编号最大的那条线，固定发布 :dev，
         # 不回写版本记录。用于先测后发；不勾选（默认）= 正式发布
-        description: '构建 dev 测试标签(只构建最新一条线，标签固定 dev，不回写版本记录)'
+        description: 'dev 标签(只构建最新线)，不回写版本号'
         type: boolean
         default: false
       base_image:
