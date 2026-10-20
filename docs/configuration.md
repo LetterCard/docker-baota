@@ -69,7 +69,6 @@
 | `PANEL_STATE_ROOT` | `/data/www/server/panel` | 面板状态根目录（与容器内同名） |
 | `PANEL_STATE_SUBDIRS` | `data plugin vhost ssl config` | 面板状态子目录：配置与 SQLite / 插件 / 站点配置与证书 / 面板证书 / 面板设置 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv www/server` | 系统层 overlay 的顶层目录（含 `/www/server`：组件、计划任务、插件数据；面板代码不在此，属镜像） |
-| `PERSIST_OVERLAY_METACOPY` | `on` | overlay 挂载带 `metacopy=on`（内核 ≥4.19）：chmod / chown 不再触发整文件 copy-up；老内核自动回退 |
 | `PANEL_PYENV_OVERLAY` | `on` | pyenv 独立覆盖层：pip 包持久化 + 解释器随镜像更新；`off` 回到「pyenv 完全不持久化」 |
 | `PERSIST_SYSTEM_IMAGE` | 空（关闭） | **opt-in 兜底**：设成 data 卷内的镜像路径（如 `/data/.system.img`）即把系统层装进 ext4 镜像，用于 `data/` 只能放 SMB/NFS/exFAT/NTFS 的场景 |
 | `PERSIST_SYSTEM_IMAGE_SIZE_MB` | `8192` | 上述镜像的初始大小（MB，稀疏文件） |

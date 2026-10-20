@@ -279,7 +279,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 | 脚本 | 覆盖 |
 |---|---|
-| `check/core.sh` | 功能完整性：启动、持久化落盘（含 **pyenv 覆盖层**与 **metacopy=on 生效断言**）、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢（含 pip 包）、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
+| `check/core.sh` | 功能完整性：启动、持久化落盘（含 **pyenv 覆盖层**）、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢（含 pip 包）、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
 | `check/degrade.sh` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
 | `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
 | `check/restore.sh` | 备份恢复闭环：包内三类关键路径完整、解回全新数据卷后站点 / 数据库 / 面板状态可恢复、**恢复后不被误判为首次启动**（安全入口与端口不变） |

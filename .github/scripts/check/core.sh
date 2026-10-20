@@ -197,38 +197,6 @@ if inside_sh 'grep -q " /tmp " /proc/mounts'; then
 fi
 pass "/tmp 未被 tmpfs 化"
 
-step "A2b) 校验 overlay metacopy 参数（内核支持时才要求生效）"
-# metacopy=on 让「只改元数据」的 copy-up（chmod / chown）不再复制文件内容，
-# 面板对镜像里的小配置文件大量 chmod，开了能明显减少 upper 体积与 I/O。
-# 内核 <4.19 或文件系统不支持时 init.sh 会自动去掉该参数重挂，所以门禁先探
-# 内核支持（在数据层上挂一个一次性 overlay），支持了才断言生产挂载真的生效。
-# 行为判据：chmod 一个只存在于镜像里的大文件（bash 约 1.2MB）——metacopy
-# 生效时 upper 只落元数据（几乎不占块），未生效时是整文件 copy-up（≈1.2MB）
-_probe="${PERSIST_DATA_ROOT}/.baota/.metacopy-probe"
-_mc=0
-if inside_sh "mkdir -p ${_probe}/low ${_probe}/up ${_probe}/work ${_probe}/mnt && \
-    mount -t overlay overlay -o lowerdir=${_probe}/low,upperdir=${_probe}/up,workdir=${_probe}/work,metacopy=on ${_probe}/mnt"; then
-    _mc=1
-fi
-inside_sh "umount ${_probe}/mnt 2>/dev/null; rm -rf ${_probe}" || true
-if [ "${_mc}" = 1 ]; then
-    inside test -f /usr/bin/bash || fail "metacopy 行为判据需要 /usr/bin/bash（镜像里没有？）"
-    _mode=$(inside_sh "stat -c %a /usr/bin/bash")
-    inside_sh 'chmod 0600 /usr/bin/bash'
-    _blocks=$(inside_sh "du -k ${PERSIST_SYSTEM_ROOT}/usr/bin/bash 2>/dev/null | cut -f1" || true)
-    inside_sh "chmod ${_mode} /usr/bin/bash"
-    case "${_blocks}" in
-        ''|*[!0-9]*) fail "无法测量 upper 体积：chmod 后 ${PERSIST_SYSTEM_ROOT}/usr/bin/bash 不在？" ;;
-    esac
-    if [ "${_blocks}" -lt 64 ]; then
-        pass "metacopy=on 生效：chmod 元数据 copy-up 未复制文件内容（upper ${_blocks}KB）"
-    else
-        fail "内核支持 metacopy 但生产 overlay 未启用（chmod 后 upper 占 ${_blocks}KB，疑似整文件 copy-up）"
-    fi
-else
-    pass "内核不支持 metacopy=on，运行期已自动回退（不阻断发布）"
-fi
-
 # compose 的 healthcheck 判据已收口到镜像内 /baota/healthcheck.sh，
 # 这里直接执行它，等于在真实容器里跑一遍生产健康检查（降级标记 / 磁盘水位 / 端口）
 step "A3) 执行生产健康检查脚本"

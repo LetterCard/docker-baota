@@ -118,6 +118,13 @@ VOLUME="$TARGET_VOLUME"
 start_container
 wait_systemd
 assert_no_degraded
+# 解释器必须是真二进制，不能是零长文件：「upper 里的零长副本盖住 lower 真文件」
+# 这类损坏 [ -x] 能过、exec 才报 Exec format error（metacopy 事故的形态），
+# 在这里先用文件大小拦下，报错比「面板起不来」直指原因
+_py_real=$(inside_sh 'readlink -f /www/server/panel/pyenv/bin/python-real' || true)
+[ -n "${_py_real}" ] || fail "无法解析面板真解释器（/www/server/panel/pyenv/bin/python-real）"
+inside test -s "${_py_real}" \
+    || fail "面板真解释器是空文件（${_py_real}）：恢复出的持久化层里有零长副本盖住了镜像文件"
 wait_panel_http
 # 显式带上 CONTAINER / VOLUME：它们后续由 lib.sh 的样板使用，这里出现一次
 # 既让日志可读，也免掉 shellcheck 的「赋值后未读取」误报

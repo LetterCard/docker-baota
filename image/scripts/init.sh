@@ -308,44 +308,14 @@ acquire_lock() {
 
 # ==============================================================================
 #  1. overlay 分层持久化（仅系统层）
-#
-#    /etc /usr /var … ←overlay→  upper = data/.system/<同名>
-#    lowerdir = 镜像内的同名目录（随镜像升级而更新）
-#
+#    /etc /usr /var … ←overlay→  upper = data/.system/<同名>；lowerdir 随镜像更新
 #  ★ 面板（/www）不再走 overlay：代码由镜像层直接提供、不持久化，
 #    只有业务与状态子目录走 bind（见 mount_www_layer）。
 #  ★ index=off 是必须的，不是优化（同 upper 换 lower 的升级语义需要它）
+#  ★ 刻意不开 metacopy=on：「只改元数据」的 copy-up 会在 upper 落零数据的元数据
+#    副本，备份打包 upper 原始内容时会把它打成零长文件，恢复后盖住镜像真文件
+#    （CI 实测）。要开先让备份能跳过这类条目，推导见 docs/persistence.md
 # ==============================================================================
-
-# 组 overlay 挂载参数。metacopy=on（内核 ≥4.19）让「只改元数据」的 copy-up
-# （chmod / chown）不再复制文件内容 —— 面板对镜像里的小配置文件大量 chmod，
-# 开了能明显减少 upper 体积与 copy-up I/O
-_overlay_opts() {
-    _o="lowerdir=$1,upperdir=$2,workdir=$3,index=off"
-    case "${PERSIST_OVERLAY_METACOPY}" in
-        on) _o="${_o},metacopy=on" ;;
-    esac
-    echo "${_o}"
-}
-
-# 挂一个 overlay。带 metacopy=on 失败时去掉它重试：一个可选参数不能拖垮整层
-# 持久化（老内核 / 不支持 trusted xattr 的文件系统都会走到这里）
-mount_overlay() {
-    _lo="$1"; _tg="$2"; _up="$3"; _wk="$4"
-    _opts=$(_overlay_opts "${_lo}" "${_up}" "${_wk}")
-    if mount -t overlay overlay -o "${_opts}" "${_tg}" 2> /dev/null; then
-        return 0
-    fi
-    case "${_opts}" in
-        *metacopy*)
-            warn "overlay 挂载失败：${_tg}，去掉 metacopy=on 重试"
-            _opts="lowerdir=${_lo},upperdir=${_up},workdir=${_wk},index=off"
-            mount -t overlay overlay -o "${_opts}" "${_tg}" 2> /dev/null && return 0
-            ;;
-    esac
-    return 1
-}
-
 mount_persist() {
     _dir="$1"
     _lower="/${_dir}"
@@ -365,7 +335,8 @@ mount_persist() {
         return 1
     fi
 
-    if ! mount_overlay "${_lower}" "${_lower}" "${_upper}" "${_work}"; then
+    if ! mount -t overlay overlay \
+        -o "lowerdir=${_lower},upperdir=${_upper},workdir=${_work},index=off" "${_lower}"; then
         warn "overlay 挂载失败：/${_dir} 本次不会持久化"
         warn '  常见原因：容器未以 --privileged 运行 / 持久化根位于 overlay 之上 / 内核未启用 overlayfs'
         mark_degraded "${_dir}: overlay 挂载失败"
@@ -551,7 +522,8 @@ mount_pyenv_overlay() {
         return 1
     fi
 
-    if ! mount_overlay "${PANEL_PIN_DIR}/pyenv" "${_target}" "${_upper}" "${_work}"; then
+    if ! mount -t overlay overlay \
+        -o "lowerdir=${PANEL_PIN_DIR}/pyenv,upperdir=${_upper},workdir=${_work},index=off" "${_target}"; then
         warn "pyenv 覆盖层挂载失败：插件 pip 包不会持久化"
         mark_degraded "${_target}: pyenv 覆盖层挂载失败"
         mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"

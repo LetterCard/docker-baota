@@ -45,12 +45,18 @@ upper = `data/www/server/panel/pyenv`。
 文件当归档成员（挂载点内容不进包，否则恢复后会被遮挡）；`make reset-system`
 在镜像模式下禁用并给出提示。需要 loop 设备（Docker Desktop 的虚拟机里通常没有）。
 
-### overlay `metacopy=on`（`PERSIST_OVERLAY_METACOPY`，默认 `on`）
+### overlay `metacopy=on`：评估后**回退**（不要开）
 
-「只改元数据」的 copy-up（chmod / chown）不再复制文件内容 —— 面板对镜像里的小配置
-文件大量 chmod，开了 upper 更小、I/O 更少。老内核或不支持的文件系统上 init.sh
-会自动去掉该参数重挂；CI 门禁（core.sh A2b）先探内核支持，支持了就断言生产挂载
-真的生效（行为判据：chmod 镜像里的大文件后 upper 不占数据块）。
+曾按「chmod / chown 不再触发整文件 copy-up」加上 `metacopy=on`，CI 的 restore 门禁
+当场抓到一个**静默数据损坏**：metacopy 下「只改元数据」的 copy-up 会在 upper 落下
+**零数据的元数据副本**，而备份是直接打包 upper 目录的 —— 那种条目被打成零长/稀疏
+文件，恢复后**盖住镜像里的真文件**。实测表现：源容器里面板对 pyenv 做过 chown
+（BT 面板惯例），备份恢复后 `pyenv/bin/python-real` 变成零长文件，`[ -x]` 通过但
+exec 报 `Exec format error`，面板起不来。
+
+结论：**本方案的备份语义（tar 原始 upper）与 metacopy 不兼容**，已整体回退
+（`init.sh` 挂载处与 `docs/persistence.md`「overlay 元数据与备份」记了这条约束）。
+将来要开 metacopy，先让备份能识别并跳过这类元数据副本条目。
 
 ### 版本记录增加面板代码指纹（`data/.system/.baota/digest`）
 
@@ -61,7 +67,7 @@ upper = `data/www/server/panel/pyenv`。
 ### 其它
 
 - 镜像补装 `e2fsprogs`（mkfs.ext4 / e2fsck）与 `btrfs-progs`（子卷快照）；
-- 门禁扩展：`core.sh` 新增 pyenv 覆盖层挂载断言、metacopy 生效断言、pip 包
+- 门禁扩展：`core.sh` 新增 pyenv 覆盖层挂载断言、pip 包
   「写入 → 重建 → 仍在 → 镜像里本来没有」闭环断言；`upgrade.sh` 断言首启记录代码指纹；
 - 文档同步：持久化原理（pyenv 专节 / 镜像兜底专节 / 快照与指纹）、编排配置、
   备份、FAQ、升级迁移、命名约定（§2 落点表、§3 元数据清单）。

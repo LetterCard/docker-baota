@@ -157,10 +157,6 @@ lowerdir = 镜像内的同名目录（随镜像升级而更新）
 ```
 
 overlay 挂载显式带 `index=off`：同 upper 换 lower（升级）需要它。
-默认还带 `metacopy=on`（内核 ≥ 4.19）：chmod / chown 只改元数据时不再触发
-**整文件** copy-up —— 面板对镜像里的小配置文件大量 chmod，开了 upper 更小、
-I/O 更少；老内核或不支持的文件系统上 init.sh 会自动去掉该参数重挂（CI 门禁
-断言它确实生效）。
 overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 > workdir 路径最后那一层 `work`（`<目录>.work/work`）是**内核**在挂载时建的，
@@ -280,6 +276,11 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 overlay 把「删除镜像自带文件」记成字符设备节点（0:0）、「整体替换目录」记成
 `trusted.overlay.opaque` 扩展属性。备份必须带 `--xattrs`（`baota-backup` 已带），
 否则恢复后目录会与镜像内容合并。
+
+⚠️ **因此 overlay 不能开 `metacopy=on`**：它让「只改元数据」的 copy-up（chmod /
+chown）在 upper 落下**零数据的元数据副本**，而备份打包的是 upper 的**原始内容** ——
+那种条目会被打成零长/稀疏文件，恢复后盖住镜像里的真文件（CI 实测：解释器变零长 →
+`Exec format error` → 面板起不来）。要开它，先让备份能识别并跳过这类条目。
 
 - `baota-backup`：全量打包整份 `data/`（业务 + 面板 + 系统都在里面），自动自校验
 - NAS / 云盘快照：文件系统级，天然保留一切，最省心
