@@ -2,17 +2,18 @@ name: 📦 发布：构建并发布镜像
 
 # ==============================================================================
 #  📦 各条线共用这一份流水线（当前：12_version / 13_version）
-#
 #  线的差异只有一处来源：image/lines.conf。本文件里**不写**任何「if 是 13 就…」
 #  式的判断 —— 唯一分支是「读表里的 probe 字段」；新增一条线 = 往表里加一行。
-#
 #  流程（每条线独立、互不阻塞）：
 #    prep        读声明表 → 探测上游版本 → 与 VERSION 比对 → 生成「线 × 架构」矩阵
 #    lint        静态检查（与版本无关，无条件运行）
 #    build       各架构在原生 runner 构建 → 四套发布前检查 → 通过才按 digest 推送
 #    publish     合并两架构 digest → 按标签策略打 repo:<版本>
 #    write_back  把已发布版本号回写进该线的 VERSION 文件
-#
+#  🧪 dev 测试标签（勾选 dev 时，见下方 inputs）：
+#    忽略「构建线」输入，只构建编号最大的那条线（有 15_version 就它，否则 14…），
+#    标签固定发布 :dev（不随版本号、不发 latest），且**不回写版本记录** ——
+#    它是「先测后发」的测试标签，不影响正式发布线；正式发布 = 不勾选（默认）。
 #  🔑 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
 # ==============================================================================
 
@@ -30,6 +31,12 @@ on:
         default: 'all'
       force_update:
         description: '强制更新(跳过最新判断)，直接重建发布'
+        type: boolean
+        default: false
+      dev:
+        # dev 测试标签：只构建编号最大的那条线，固定发布 :dev，
+        # 不回写版本记录。用于先测后发；不勾选（默认）= 正式发布
+        description: '构建 dev 测试标签(只构建最新一条线，标签固定 dev，不回写版本记录)'
         type: boolean
         default: false
       base_image:
@@ -57,6 +64,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       any: ${{ steps.plan.outputs.any }}
+      dev: ${{ steps.plan.outputs.dev }}
       build_matrix: ${{ steps.plan.outputs.build_matrix }}
       pub_matrix: ${{ steps.plan.outputs.pub_matrix }}
     steps:
@@ -69,17 +77,38 @@ jobs:
           SELECT: ${{ inputs.line }}
           FORCE: ${{ inputs.force_update }}
           BASE_OVERRIDE: ${{ inputs.base_image }}
+          DEV: ${{ inputs.dev }}
         run: |
           set -euo pipefail
 
           any=0
+          dev_out=0
           build='[]'
           pub='[]'
           plan_rows=''
 
+          # dev 测试标签：忽略 line 输入，只构建编号最大的那条线
+          # （15_version 优先于 14_version…）。标签固定 :dev、不回写版本记录
+          newest_line=''
+          if [ "${DEV}" = 'true' ]; then
+            dev_out=1
+            newest_line=$(grep -vE '^[[:space:]]*(#|$)' "${LINES}" \
+              | awk '{print $1}' | sed -En 's/^([0-9]+)_version$/\1/p' \
+              | sort -n | tail -1)
+            [ -n "${newest_line}" ] \
+              || { echo '::error::无法从 lines.conf 解析最新线（期望 <编号>_version 形态）'; exit 1; }
+            newest_line="${newest_line}_version"
+            echo "🧪 dev 模式：只构建最新线 ${newest_line}，标签固定 :dev，不回写版本记录"
+            if [ "${SELECT}" != 'all' ] && [ "${SELECT}" != "${newest_line}" ]; then
+              echo "::warning::dev 模式下忽略「构建线」输入（${SELECT}）"
+            fi
+          fi
+
           while read -r line display vfile url probe tag base; do
             [ -n "${line:-}" ] || continue
-            if [ "${SELECT}" != 'all' ] && [ "${SELECT}" != "${line}" ]; then
+            if [ "${DEV}" = 'true' ]; then
+              [ "${line}" = "${newest_line}" ] || continue
+            elif [ "${SELECT}" != 'all' ] && [ "${SELECT}" != "${line}" ]; then
               continue
             fi
 
@@ -142,23 +171,31 @@ jobs:
             if [ "${FORCE}" = 'true' ]; then
               changed=true
             fi
+            # dev 是手动测试标签：无论上游是否已最新都构建（否则勾了却没产出）
+            if [ "${DEV}" = 'true' ]; then
+              changed=true
+            fi
 
             base_img="${base}"
             if [ -n "${BASE_OVERRIDE}" ]; then
               base_img="${BASE_OVERRIDE}"
             fi
-            # tag 策略：exact=只发 <版本>；latest=<版本> + latest；
-            # 其它字面量 = 只发那个字面量标签（不随版本号、也不发 latest）
-            case "${tag}" in
-              exact | latest) ;;
-              *) : ;;   # 字面量静态标签，发布阶段按 matrix.tag 原样用作标签
-            esac
+            # 发布标签：dev 模式固定为字面量 dev（只发 :dev，不随版本号、
+            # 不发 latest、不回写版本记录）；否则按 lines.conf 的 tag 策略
+            # （exact=只发 <版本>；latest=<版本> + latest；其它字面量=只发该标签）
+            pub_tag="${tag}"
+            if [ "${DEV}" = 'true' ]; then
+              pub_tag='dev'
+            fi
 
             # 回写：只有「本次要发布的版本 ≠ 仓库记录」时才需要
             if [ "${target}" = "${cur}" ]; then
               write_back='无需（就是当前记录）'
             else
               write_back="将回写 ${cur} → ${target}"
+            fi
+            if [ "${DEV}" = 'true' ]; then
+              write_back='不回写（dev 测试标签）'
             fi
 
             if [ "${changed}" = 'true' ]; then
@@ -176,7 +213,7 @@ jobs:
                   <<< "${build}")
               done
               pub=$(jq -c \
-                --arg line "${line}" --arg display "${display}" --arg version "${target}" --arg tag "${tag}" \
+                --arg line "${line}" --arg display "${display}" --arg version "${target}" --arg tag "${pub_tag}" \
                 '. + [{line:$line, display:$display, version:$version, tag:$tag}]' <<< "${pub}")
             fi
 
@@ -192,11 +229,19 @@ jobs:
           fi
           {
             echo "any=${any}"
+            echo "dev=${dev_out}"
             echo "build_matrix=$(jq -c . <<< "${build}")"
             echo "pub_matrix=$(jq -c . <<< "${pub}")"
           } >> "$GITHUB_OUTPUT"
 
           {
+            if [ "${DEV}" = 'true' ]; then
+              echo '### 🧪 dev 测试构建'
+              echo
+              echo "只构建最新线 \`${newest_line}\`，标签固定 \`:dev\`，**不回写版本记录**。"
+              echo '正式发布：取消勾选 dev 后再运行本工作流。'
+              echo
+            fi
             echo '### 🔍 线计划'
             echo
             echo '| 线 | 线 | 仓库记录 | 本次目标 | 需构建 | 回写 |'
@@ -413,6 +458,9 @@ jobs:
             sleep $((i * 10))
           done
           [ "${ok}" = 1 ] || { echo '::error::imagetools create 重试耗尽'; exit 1; }
+          if [ "${{ needs.prep.outputs.dev }}" = '1' ]; then
+            echo '🧪 dev 测试标签：未回写版本记录；正式发布请取消勾选 dev 再运行'
+          fi
           echo "✅ 已发布：${tags[*]}"
 
   # ---------------------------------------------------------------------------
@@ -422,7 +470,9 @@ jobs:
   write_back:
     name: ✏️ 回写 ${{ matrix.display }} 版本
     needs: [prep, publish]
-    if: needs.prep.outputs.any == '1'
+    # dev 测试标签不回写版本记录：写了会让下一次正式构建误判「已是最新」
+    # 而跳过，版本标签永远发不出去
+    if: needs.prep.outputs.any == '1' && needs.prep.outputs.dev != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
