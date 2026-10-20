@@ -40,6 +40,7 @@
 | `/www/server/data` | 数据库（MySQL/MariaDB） | `data/www/server/data` | bind |
 | `/www/server/panel` | **面板程序** | —— | 镜像层，不持久化 |
 | `/www/server/panel/{data,plugin,vhost,ssl,config}` | 面板状态 | `data/www/server/panel/<同名>` | bind |
+| `/www/server/panel/pyenv` | 面板 Python 环境 | `data/www/server/panel/pyenv` | overlay（lower = 镜像 pyenv，upper 持久化 pip 包） |
 | `/www/server`（其余） | 组件、cron 脚本、插件数据 | `data/.system/www/server` | overlay |
 | `/www/vmail` | 邮局（装了才有） | `data/www/vmail` | bind，不预建 |
 | `/www/dk_project` | 面板 Docker 模块的项目（装了才有） | `data/www/dk_project` | bind，不预建 |
@@ -65,7 +66,8 @@ data/
 - `.system` 用隐藏目录：它是增量（overlay upper），与「内容完整、可直接读写」的
   `data/www` 性质不同；`/www/server` 走 overlay 而不是整目录 bind，所以它的 upper
   在这里，而不是 `data/www/server`（否则 MySQL 与面板状态的 bind 源会落进 upperdir 内部）。
-- `.baota` 一律隐藏、备份排除，只放项目元数据：`lock`、`version`、`boot.log`、
+- `.baota` 一律隐藏、备份排除，只放项目元数据：`lock`、`version`、`digest`
+  （面板代码指纹）、`boot.log`、`system-image`（镜像兜底模式记的镜像路径）、
   overlay workdir。
 - **顶层只有一个可见目录。** 再加顶层 = 引入新语义，先改本文。
 
@@ -128,8 +130,8 @@ data/
   - **函数内临时变量**：小写下划线；POSIX 脚本（`init.sh` 由 busybox 解释）没有 `local`，
     统一用 `_` 前缀并在文件头注明。
 
-  ★ 判据是「这个变量跨不跨函数」，不是「它在不在脚本里」。本文原先只写了「小写下划线」，
-  而全仓脚本顶部那批常量一直是大写 —— 属本文落后于实现，现按实现修订，不改代码。
+  ★ 判据是「这个变量跨不跨函数」，不是「它在不在脚本里」—— 全仓脚本顶部那批
+  常量跨函数使用，所以是大写。
 - **同一个概念只允许一个名字。** `BAOTA_STATE` 与 `STATE_DIR` 曾并存（同一目录两种叫法），
   已统一为 `STATE_DIR` —— 再发现同义异名，按本文合并，不要「两个都留着」。
 - 变量名与它指向的路径要能对上：`PANEL_ORIGIN_DIR=/baota/origin`（不叫 `MIRROR_DIR`）、
@@ -167,12 +169,14 @@ skills/     AI 助手技能包，只引用 docs，不复述正文
 
 | 位置 | 放什么 |
 |---|---|
-| `README.md` | 入口：是什么、怎么跑、三条不变式；细节一律给链接 |
+| `README.md` | 入口：是什么、怎么跑、四条原则摘要、发布线表；细节一律给链接 |
 | `docs/persistence.md` | 持久化的唯一详解 |
 | `docs/configuration.md` | compose / 环境变量逐项说明 |
 | `docs/conventions.md` | **本文**：命名、路径、目录结构的唯一真源 |
 | `docs/development.md` | 开发流程、本地构建、门禁覆盖 |
-| `CHANGELOG.md` | 用户可见变更（`1.0.0` 起） |
+| 其它 `docs/*.md` | 各自专题（备份 / 升级 / 运维 / 排障 / 发布 / 开发期记录） |
+| `skills/baota-docker/` | 给 AI 助手的索引与红线，只引用 docs，不复述正文 |
+| `CHANGELOG.md` | 用户可见变更（`1.0.0` 起）；公开前的开发期记录进 `docs/history.md` |
 
 - 术语（统一叫法，避免同义混用）：
 

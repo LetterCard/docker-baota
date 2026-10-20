@@ -27,9 +27,9 @@ baota-docker/
 │   └── baota-docker/          通用 skill（Codex / CodeBuddy / Trae 共用同一份）
 │
 ├── image/                     镜像本体：Dockerfile、线声明表、构建期与运行期脚本
-│   ├── Dockerfile             唯一的一份 Dockerfile（线差异由 build-arg 传入）
-│   ├── lines.conf          ★ 线声明表（12/13 的脚本地址成对排列）
-│   ├── versions/<主线号>/         各线「已发布」版本（发布流水线回写）
+│   ├── Dockerfile             12/13 主线共用的一份（线差异由 build-arg 传入）
+│   ├── lines.conf             ★ 线声明表（12/13 的脚本地址成对排列）
+│   ├── versions/<主线号>/    各线「已发布」版本（发布流水线回写）
 │   ├── build/                 构建期脚本（顺序由 Dockerfile 的三行 RUN 决定）
 │   │   ├── base.sh            基础系统 + 救援 shell + SSH
 │   │   ├── panel.sh           官方脚本安装宝塔 + 安装后收尾
@@ -38,8 +38,10 @@ baota-docker/
 │   │   ├── btpanel.service    systemd unit
 │   │   └── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
-│       ├── init.sh            阶段 0：并发锁 + overlay 持久化
-│       ├── entrypoint.sh      阶段 1：版本护栏 / 快照 / 初始化，交棒 systemd
+│       ├── init.sh            阶段 0：并发锁 + overlay 持久化 + 面板代码隔离
+│       │                      + pyenv 覆盖层 + ext4 镜像兜底（opt-in）
+│       ├── entrypoint.sh      阶段 1：版本护栏（版本 + 代码指纹）/ 快照（cp -a 或
+│       │                      btrfs 子卷）/ 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
 │       ├── guard.sh           执行入口守卫（版本不一致就换回 /baota/origin 副本）
 │       ├── shim.sh            pyenv 解释器包装（每次执行都先过守卫）
@@ -48,22 +50,22 @@ baota-docker/
 ├── docker-compose.yml         编排文件（只挂一个 data 目录）
 │
 └── .github/
-    ├── reports/                 CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
+    ├── reports/               CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
     ├── scripts/
-    │   ├── report.py       把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
-    │   ├── check/          发布前检查四套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
-    │   ├── drift/           漂移检测脚本（目录漂移）
-    │   └── lint/            配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
+    │   ├── report.py          把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
+    │   ├── check/             发布前检查四套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
+    │   ├── drift/             漂移检测脚本（目录漂移）
+    │   └── lint/              配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
     └── workflows/
-        ├── build.yml        构建发布（一份流水线跑所有线，矩阵从 lines.conf 生成）
-        ├── check.yml        每日巡检已发布镜像（矩阵：各条线并行）
-        └── drift.yml        漂移检测（只监测，不发布）
+        ├── build.yml          构建发布（一份流水线跑所有线，矩阵从 lines.conf 生成）
+        ├── check.yml          每日巡检已发布镜像（矩阵：各条线并行）
+        └── drift.yml          漂移检测（只监测，不发布）
 ```
 
 ### 关键约定
 
-- **构建上下文是仓库根，Dockerfile 只有一份**：`docker build -f image/Dockerfile .`
-  线参数（安装脚本地址 / 基础镜像 / 版本）从 `image/lines.conf` 读
+- **构建上下文是仓库根，12/13 主线共用一份 Dockerfile**：`docker build -f image/Dockerfile .`
+  线参数（安装脚本地址 / 基础镜像 / 版本）从 `image/lines.conf` 读（`pro` 线另有自己的一份）
 - **运行期脚本一律放 `/baota`**。它不属于任何持久化目录，永远跟随当前镜像。
   放进持久化目录（如 `/opt`）就不行：还原备份时会把旧脚本副本带回来，反过来屏蔽新镜像
 - **面板代码的执行入口只有一个**：pyenv 解释器。`image/build/services.sh` 的
@@ -115,17 +117,9 @@ baota-docker/
 | **踩过的坑**：写清**症状 + 原因** | 「`exec 9> f 2>/dev/null` 会把整个脚本的 stderr 永久重定向（恢复日志全部消失）」 |
 | **红线**：改这里会破坏什么 | 「探活命令里不能出现面板进程名，否则上游判定会跳过启动」 |
 
-**文档分工**（一个主题只有一处详解）：
-
-| 位置 | 放什么 |
-|---|---|
-| `README.md` | 入口：是什么、怎么跑、三条不变式摘要、发布线表；细节一律给链接 |
-| `docs/persistence.md` | 持久化的唯一详解（目录模型、守卫、方案选型、硬约束） |
-| `docs/conventions.md` | 命名、路径、目录结构与术语的唯一真源 |
-| `docs/configuration.md` | compose / 环境变量逐项说明 |
-| 其它 `docs/*.md` | 各自专题（备份 / 升级 / 运维 / 排障 / 发布 / 开发） |
-| `skills/baota-docker/` | 给 AI 助手的索引与红线，只引用 docs，不复述正文 |
-| `CHANGELOG.md` | 用户可见变更（`1.0.0` 起）；公开前的开发期记录进 `docs/history.md` |
+**文档分工**（一个主题只有一处详解）：表在[命名与目录结构约定](conventions.md) §7，
+改分工先改那里；这里只补一条给贡献者的读法 —— **改行为前先读对应主题的 docs/，
+改完只改那一处详解，其它位置一律留链接**。
 
 **标题层级**：`#` 后**必须**有空格（`##标题` 会被 GitHub 当正文，目录里的锚点点了没反应）；
 一篇只允许一个 H1；README 的章节一律 H2，注入进来的报告由
@@ -197,22 +191,26 @@ baota-docker/
 
 ## 基础镜像（固定 Debian 12）
 
-两个 Dockerfile 固定 `ARG BASE_IMAGE=debian:12`（bookworm，LTS 支持至 2028），不切换基座。
+主线 `image/Dockerfile` 固定 `ARG BASE_IMAGE=debian:12`（bookworm，LTS 支持至 2028），
+不切换基座；`pro` 线有自己的一份（基础镜像由 build-arg 传入，见[发布流程](release.md)）。
 `base.sh` 在构建期删除 `debian.sources`、写回经典 one-line `sources.list`——这是 Debian 12 的
 默认格式，也是宝塔安装脚本唯一能解析的格式。
 
 ## 本地构建
 
 ```bash
-make build LINE=12.0.0        # 等价于：
-# （make build 会自己从 lines.conf 取参数，等价于：）
-# docker build -f image/Dockerfile \
-#  --build-arg INSTALL_URL=<见 lines.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
+make build LINE=12_version     # 从 lines.conf 取安装脚本地址等参数（见下）
+make up                        # 起容器
+make logs                      # 看日志
+make health                    # 跑发布前健康检查
+make lint                      # shellcheck + bash -n + YAML 语法
+```
 
-make up LINE=12.0.0           # 起容器
-make logs LINE=12.0.0         # 看日志
-make health                      # 跑发布前健康检查
-make lint                        # shellcheck + bash -n + YAML 语法
+`make build` 背后等价于（线参数从 `image/lines.conf` 取，不用手填）：
+
+```bash
+docker build -f image/Dockerfile \
+  --build-arg INSTALL_URL=<见 lines.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
 ```
 
 > ⚠️ `make lint` 里的 shellcheck **未安装时会被直接跳过**（本地很常见），但 CI 上会真正
@@ -273,7 +271,6 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 > 一个容易踩的坑：Docker 分层的特性是，**在后续 RUN 里删除前面层产生的文件，镜像体积不会减小**
 > （旧层仍在，只是被 whiteout 遮住）。所以清理必须写在产生垃圾的那一层内。
-> 清理效果的实测数字待重测：此前记录的 1644.7 MB → 1622.8 MB 已随基础层依赖清单变更而失效。
 
 ## 发布前检查覆盖什么
 
@@ -282,7 +279,7 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 | 脚本 | 覆盖 |
 |---|---|
-| `check/core.sh` | 功能完整性：启动、持久化落盘、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
+| `check/core.sh` | 功能完整性：启动、持久化落盘（含 **pyenv 覆盖层**与 **metacopy=on 生效断言**）、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢（含 pip 包）、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
 | `check/degrade.sh` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
 | `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
 | `check/restore.sh` | 备份恢复闭环：包内三类关键路径完整、解回全新数据卷后站点 / 数据库 / 面板状态可恢复、**恢复后不被误判为首次启动**（安全入口与端口不变） |
@@ -290,6 +287,21 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 入口 `check/run.sh <core|degrade|upgrade|restore|all> <镜像> [<版本>]`；
 `make health` / `health-degrade` / `health-upgrade` / `health-restore` / `health-all` 是它的包装。
+
+## 构建期对面板的两处适配补丁
+
+「不改上游」的准确含义是**不为禁用面板更新而改上游**（那条清单永远跟不完）。
+另有**两处构建期小补丁**（`image/build/panel.sh`），是适配我们自己的执行入口包装
+（shim 把真解释器改名成 `python-real`）所必需的，与面板功能、面板更新无关：
+
+| 补丁 | 解决什么 | 失效时 |
+|---|---|---|
+| `patch_task_watchdog` | 面板任务看门狗只查 `/proc/<pid>/comm` 且要求含 `BT-Task`；shim 改名后所有面板进程的 comm 都不含它 → 看门狗每轮误判「不是面板任务」→ 软件商店装任何东西都失败 | 补丁同时打进运行态与 `/baota/origin` 副本，core 门禁断言两边都在 |
+| `patch_panel_start_idempotent` | 面板 `init.sh` 用进程命令行匹配 `runserver:app` 判断面板是否在运行；容器内进程不含该串 → 看门狗每 10 秒误判未运行、反复执行 `init_db` 吃满 CPU | 同上 |
+
+两处都只改「进程判定」、不碰面板功能；上游改到补丁锚点失效时构建期告警、
+core 门禁（A15 / A16）拦下发布，不会静默上线。完整根因分析见
+[常见问题](faq.md#面板里装软件全失败-errorlog-报-jsonloadsbool)。
 
 ## 改代码时的注意事项
 

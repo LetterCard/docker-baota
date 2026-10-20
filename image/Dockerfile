@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ==============================================================================
-#  🐳 宝塔 Linux 面板容器化 —— 唯一的一份 Dockerfile
+#  🐳 宝塔 Linux 面板容器化 —— 12/13 主线共用的一份 Dockerfile
 #
 #  各条线共用本文件，差异全部由 build-arg 传入，声明见 image/lines.conf。
 #  构建逻辑在 image/build/ 三阶段脚本里，运行期脚本在 image/scripts/。

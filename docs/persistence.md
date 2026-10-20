@@ -52,7 +52,8 @@ data/                        （./data:/data）
 │   │   ├── plugin/    已安装的插件
 │   │   ├── vhost/     站点配置 / 证书 / 伪静态 / 反代
 │   │   ├── ssl/       面板自身 HTTPS 证书
-│   │   └── config/    面板设置
+│   │   ├── config/    面板设置
+│   │   └── pyenv/     pyenv 覆盖层 upper（插件 pip 装的包）
 │   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库，装了才出现）
 │   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录，装了才出现）
 ├── .system/                  系统层（隐藏：overlay upper 是「相对镜像的改动」）
@@ -92,6 +93,7 @@ data/                        （./data:/data）
 | 面板代码 / 可再生的东西 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志）、`/www/.Recycle_bin`（回收站）、`/www/php_session`（PHP session） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志 / 回收站 / session 重建即空 |
 | 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在 `data/.system/www/server`），装什么都能留住，不用按组件列清单 |
 | 插件数据 / 计划任务脚本 | `/www/server/total`、`/www/server/btwaf`、`/www/server/cron` | **同上**：都在 `/www/server` 之下，自动跟着持久化 |
+| 面板 Python 环境 | `panel/pyenv`（解释器 + 站点包） | **独立 overlay**：lower = 镜像 pyenv、upper = `data/www/server/panel/pyenv` —— pip 包持久化，解释器随镜像更新（见[专节](#pyenv-覆盖层pip-包与解释器各得其所)） |
 | 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin`（插件）、`panel/vhost`（站点配置与证书）、`panel/ssl`（面板证书）、`panel/config`（面板设置） | **bind 直通**：必须保留，否则等于重装面板 / 站点证书丢失 |
 | 纯业务数据 | `/www/wwwroot`、`/www/server/data`、`/www/backup`、`/www/vmail`（邮局）、`/www/dk_project`（面板 Docker 模块） | **bind 直通**：运行期全量数据，宿主机直改有内核保证 |
 
@@ -146,6 +148,8 @@ data/                        （./data:/data）
 /www/server/panel/vhost  ←bind→  源 = data/www/server/panel/vhost
 /www/server/panel/ssl    ←bind→  源 = data/www/server/panel/ssl
 /www/server/panel/config ←bind→  源 = data/www/server/panel/config
+/www/server/panel/pyenv  ←overlay→ lower = 镜像 pyenv（经 /run/baota/panel 钉桩），
+                                 upper = data/www/server/panel/pyenv（pip 装的包）
 /www/server              ←overlay→ upper = data/.system/www/server（组件 / cron 脚本 / 插件数据）
 /www/server/panel        ←bind→  源 = 镜像里的面板目录（挂 overlay 前先 bind 到 /run，
                                  挂完再 bind 回，保证面板代码不落持久化层）
@@ -153,6 +157,10 @@ lowerdir = 镜像内的同名目录（随镜像升级而更新）
 ```
 
 overlay 挂载显式带 `index=off`：同 upper 换 lower（升级）需要它。
+默认还带 `metacopy=on`（内核 ≥ 4.19）：chmod / chown 只改元数据时不再触发
+**整文件** copy-up —— 面板对镜像里的小配置文件大量 chmod，开了 upper 更小、
+I/O 更少；老内核或不支持的文件系统上 init.sh 会自动去掉该参数重挂（CI 门禁
+断言它确实生效）。
 overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 > workdir 路径最后那一层 `work`（`<目录>.work/work`）是**内核**在挂载时建的，
@@ -207,6 +215,33 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 ---
 
+## pyenv 覆盖层：pip 包与解释器各得其所
+
+面板的 Python 环境（`/www/server/panel/pyenv`）里混着两类东西：**解释器与镜像
+自带的依赖**（属于镜像，该随镜像更新）和**插件 pip 装进来的包**（属于用户，
+重建后必须还在）。整目录持久化会把前者也钉死在首启版本，整目录不持久化又会
+丢掉后者 —— 于是给它单独挂一层 overlay：
+
+```
+/www/server/panel/pyenv  ←overlay→  lower = 镜像里的 pyenv（经 /run/baota/panel 钉桩）
+                                 upper = data/www/server/panel/pyenv
+                                 work  = data/.baota/pyenv.work
+```
+
+- **pip 包持久化**：插件在面板里装包写进 upper，销毁重建、换镜像后都在；
+- **解释器随镜像更新**：lower 换成新镜像的 pyenv，新解释器 / 新自带依赖照常生效；
+- **upper 放数据层而不是 `.system`**：镜像模式下 `.system` 是另一个文件系统，
+  而内核硬性要求 overlay 的 workdir 与 upperdir 同盘；
+- 开关是 `PANEL_PYENV_OVERLAY`（默认 `on`）；关掉后回到旧行为（pyenv 完全不
+  持久化，插件 pip 包重建即丢）；
+- 之前把 `pyenv` 加进 `PANEL_STATE_SUBDIRS` 的用户：那份全量拷贝会自动变成
+  本覆盖层的 upper（内容不丢），但它会遮住新镜像的 pyenv —— 要恢复「解释器
+  随镜像更新」，停容器后删掉 `data/www/server/panel/pyenv` 再启动
+  （pip 包需重装，见[升级与迁移](upgrade.md)）。
+
+失败时的表现与其他挂载一致：写 `/run/baota/degraded` 与 `critical`
+（pip 包即将丢失，必须在容器状态里可见），容器仍可启动。
+
 ## 快照（升级前）
 
 换镜像时唯一「对不上」的是**新版面板代码 + 旧版面板数据库**（SQLite），
@@ -214,6 +249,16 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 `/www/backup/auto/`（宿主 `data/www/backup/auto/`），默认保留 3 份。
 
 面板数据库（配置与 SQLite 库）的宿主路径：`data/www/server/panel/data/`。
+
+**btrfs 宿主上的快路径**（`AUTO_SNAPSHOT_MODE=auto` 默认开启）：宿主持 btrfs
+且 `data/www/server/panel/data` 是子卷时，快照改用 `btrfs subvolume snapshot -r`
+—— 只读子卷、O(1)、与目录大小无关，过期清理用 `btrfs subvolume delete`。
+子卷是一次性宿主机动作（停容器后 `btrfs subvolume create data/www/server/panel/data`），
+任何时候不满足条件都自动回退 `cp -a`，快照失败不阻断启动。
+
+**指纹比版本号更准**：持久层同时记录面板代码指纹（`data/.system/.baota/digest`，
+`/baota/origin` 内容的 sha256）。版本号相同但代码变了（同标签镜像被重新构建：
+换基础镜像、改构建脚本）时，只比版本号会漏过 —— 指纹变化同样触发升级前快照。
 
 ---
 
@@ -225,6 +270,8 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
   让 healthcheck 把容器判为 unhealthy
 - 降级记录追加到 `data/.system/.baota/boot.log`
 - 磁盘水位实时查持久化根（`data` 卷）
+- 镜像版本记录（`.baota/version`）旁边多一份面板代码指纹（`.baota/digest`）：
+  版本号相同但代码变了（同标签镜像被重新构建）也按升级处理，先快照再启动
 
 ---
 
@@ -240,10 +287,34 @@ overlay 把「删除镜像自带文件」记成字符设备节点（0:0）、「
 
 ---
 
+## 系统层 ext4 镜像兜底（opt-in）
+
+`data/` 落在 SMB / NFS / exFAT / NTFS 上时，overlay 的 upper 会「挂载成功但只读」、
+写入静默失败 —— 这是本方案唯一的硬约束。设一个环境变量即可绕开：
+
+```yaml
+    environment:
+      # 把系统层装进 data 卷里的一个 ext4 镜像（loop 挂载到 /data/.system）
+      PERSIST_SYSTEM_IMAGE: /data/.system.img
+      PERSIST_SYSTEM_IMAGE_SIZE_MB: '8192'
+```
+
+- 镜像文件是**稀疏文件**，mkfs 后按实际使用增长；不够用了停机
+  `truncate -s +<MB>M data/.system.img` 再启动（容器内 `resize2fs` 扩容）；
+- 业务层 `data/www` 仍是普通 bind，**任何文件系统上都能工作** —— 受影响的只有
+  系统层，而这正是唯一需要 ext4/btrfs/xfs 的那部分；
+- 每次启动先 `e2fsck -p` 再挂载：停机备份拷贝过来的脏镜像会被自动修复，
+  修不好则拒绝启动（带着损坏的文件系统跑，比起不来危险得多）；
+- 备份自动适配：系统层的真身变成镜像文件，`baota-backup` 改拿它当归档成员
+  （挂载点内容不打包，否则恢复后会被镜像挂载遮挡）；
+- `make reset-system` 在镜像模式下不可用（删镜像 = 删整个系统层），会给出提示；
+- **需要 loop 设备**：Docker Desktop 的虚拟机里通常没有，那条路用不了本兜底。
+
 ## 硬约束
 
 - **`data/` 必须落在 ext4 / btrfs / xfs 上**。SMB/NFS/exFAT/NTFS/macOS 目录会
-  「挂载成功但只读」、写入静默失败（启动时会实测并告警）
+  「挂载成功但只读」、写入静默失败（启动时会实测并告警）—— 唯一的绕法是上面的
+  [ext4 镜像兜底](#系统层-ext4-镜像兜底opt-in)
 - 持久化根不能位于 overlay 之上
 - 容器必须 `privileged`（要 mount overlay、跑 systemd）
 

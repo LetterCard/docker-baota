@@ -1,14 +1,15 @@
 #!/busybox sh
 # shellcheck shell=sh  # 本文件必须保持 POSIX（busybox 解释），shebang 不被 shellcheck 识别，需显式声明方言
 # ==============================================================================
-#  [阶段 0] 早期初始化 —— 并发锁 → 系统层 overlay → 业务/面板子目录 bind → 移交阶段 1
+#  [阶段 0] 早期初始化 —— 系统层镜像兜底 → 并发锁 → 系统层 overlay → 面板代码隔离
+#    → pyenv 覆盖层 → 业务/面板子目录 bind → 移交阶段 1
 #
 #  红线一：解释器用 busybox 而非 bash —— 本脚本要给 /usr 挂 overlay，万一持久化
 #    层里的 /usr 被写坏，usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失。
-# 红线二：只能用 POSIX 语法 —— 不能用 local / [[ ]] / 数组 / pipefail；
+# 红线二：只能用 POSIX 语法 —— 不能用 local / [[ ]] / 数组 / 进程替换 / pipefail；
 #    函数内临时变量统一 `_` 前缀，避免覆盖调用方的循环变量。
 #
-#  可用环境变量（真源见 /baota/defaults.env）：PERSIST_* / WWW_* / PANEL_STATE_*
+#  可用环境变量（真源见 /baota/defaults.env）：PERSIST_* / WWW_* / PANEL_*
 #    / CRITICAL_DIRS / STAGE1
 #
 #  日志：[init] 普通信息，[init][WARN] 告警
@@ -121,7 +122,7 @@ _emit_group() {
 }
 
 print_mount_tree() {
-    _sys='' _www='' _panel=''
+    _sys='' _www='' _panel='' _pyenv=0
     _seeded_list=''
     if [ -f "${RUNTIME_DIR}/.seeded" ]; then
         _seeded_list=$(cat "${RUNTIME_DIR}/.seeded" 2> /dev/null | tr '\n' ' ')
@@ -139,6 +140,7 @@ print_mount_tree() {
                 IFS="${_ifs}"
                 case "${_up}" in
                     "${PERSIST_SYSTEM_ROOT}/"*) _sys="${_sys} ${_up#${PERSIST_SYSTEM_ROOT}/}";;
+                    "${PANEL_STATE_ROOT}/pyenv") _pyenv=1 ;;
                 esac
                 ;;
             *)
@@ -157,12 +159,85 @@ print_mount_tree() {
     echo "💾 持久化层挂载"
     _emit_group "├─ 系统层  ${PERSIST_SYSTEM_ROOT}" "${_sys}" "│   "
     _emit_group "├─ 数据层  ${PERSIST_DATA_ROOT}/www" "${_www}" "│   "
+    if [ "${_pyenv}" = 1 ]; then
+        echo "├─ pyenv 覆盖层  ${PANEL_STATE_ROOT}/pyenv（pip 包持久化，解释器随镜像）"
+    fi
     _emit_group "└─ 面板状态  ${PERSIST_DATA_ROOT}/www/server/panel" "${_panel}" "    " "${_seeded_list}"
     if [ -e "${PANEL_ISOLATED}" ]; then
         echo "📦 面板代码：来自镜像层 ${PANEL_DIR}（不落持久化层）"
     else
         warn "面板代码未能隔离出持久化层，面板内「更新」可能污染持久化"
     fi
+}
+
+# ==============================================================================
+#  -0.5 系统层 ext4 镜像兜底（opt-in：PERSIST_SYSTEM_IMAGE 非空时启用）
+#
+#   持久化根落在 SMB / NFS / exFAT / NTFS 上时，overlay 的 upper 会「挂载成功
+#   但只读」—— 写入静默失败，是本方案最危险的失效模式。此时把系统层装进一个
+#   ext4 镜像文件（它躺在 data 卷上，任何文件系统都能放普通文件），loop 挂载到
+#   PERSIST_SYSTEM_ROOT，之后的 overlay 流程原样跑，对上层逻辑零改动。
+#   ★ 必须在取并发锁之前执行：系统层的锁文件就在 PERSIST_SYSTEM_ROOT 里
+#   ★ 显式开启却配不起来时直接拒绝启动：静默回落到只读根等于把用户骗进陷阱
+# ==============================================================================
+die_image() {
+    echo "❌ [init][ERROR] $*" >&2
+    exit 1
+}
+
+attach_system_image() {
+    _img="${PERSIST_SYSTEM_IMAGE}"
+
+    case "${_img}" in
+        "${PERSIST_DATA_ROOT}"/*) ;;
+        *) die_image "PERSIST_SYSTEM_IMAGE=${_img} 不在数据层 ${PERSIST_DATA_ROOT} 内（容器只挂了 data），拒绝启动" ;;
+    esac
+
+    _fresh=0
+    if [ ! -f "${_img}" ]; then
+        _fresh=1
+        truncate -s "${PERSIST_SYSTEM_IMAGE_SIZE_MB}M" "${_img}" 2> /dev/null \
+            || die_image "无法创建镜像文件 ${_img}（数据层不可写？）"
+    fi
+
+    # losetup 缺失 / 没有 loop 设备都在这一步暴露（Docker Desktop 的虚拟机里
+    # 通常没有 loop 设备，那条路用不了本兜底）
+    # 上一个容器异常退出时 loop 设备可能没释放：先解掉**本镜像名下**的旧绑定再挂，
+    # 否则每重启一次就漏一个 loop 设备（只动本文件的绑定，不碰宿主机其它 loop）
+    for _old in $(losetup -j "${_img}" 2> /dev/null || true); do
+        losetup -d "${_old}" 2> /dev/null || true
+    done
+    _loop=$(losetup -f --show "${_img}" 2> /dev/null || true)
+    [ -n "${_loop}" ] || die_image "无法把 ${_img} 绑定到 loop 设备（losetup 缺失或无空闲 loop 设备）"
+
+    if [ "${_fresh}" = 1 ]; then
+        mkfs.ext4 -F -q "${_loop}" > /dev/null 2>&1 \
+            || die_image "mkfs.ext4 失败：${_loop}（镜像缺 e2fsprogs？）"
+        log "系统层镜像已创建：${_img}（${PERSIST_SYSTEM_IMAGE_SIZE_MB}MB，ext4）"
+    else
+        # 停机备份拷贝过来的镜像可能是脏的：启动先修，修不好就拒绝启动 ——
+        # 带着损坏的文件系统跑，比起不来危险得多（e2fsck 退出码 ≤2 = 干净或已修复）
+        e2fsck -p "${_loop}" > /dev/null 2>&1
+        _rc=$?
+        [ "${_rc}" -le 2 ] \
+            || die_image "e2fsck 无法修复 ${_img}（退出码 ${_rc}），请从备份恢复该镜像"
+    fi
+
+    if [ -d "${PERSIST_SYSTEM_ROOT}" ] && [ -n "$(ls -A "${PERSIST_SYSTEM_ROOT}" 2> /dev/null)" ]; then
+        warn "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 非空：切到镜像模式后，这里的旧内容将被遮挡（不再生效）"
+    fi
+    mkdir -p "${PERSIST_SYSTEM_ROOT}" 2> /dev/null \
+        || die_image "无法创建挂载点 ${PERSIST_SYSTEM_ROOT}"
+    mount -t ext4 -o defaults "${_loop}" "${PERSIST_SYSTEM_ROOT}" 2> /dev/null \
+        || die_image "ext4 镜像挂载失败：${_loop} → ${PERSIST_SYSTEM_ROOT}"
+
+    # 备份工具靠这个标记识别镜像模式（tar 成员从「目录」换成「镜像文件」）。
+    # 写在数据层元数据里：它描述的是「这一层怎么存的」，随 data 卷一起走
+    mkdir -p "${DATA_STATE_DIR}" 2> /dev/null || true
+    _rel="${_img#${PERSIST_DATA_ROOT}/}"
+    printf '%s\n' "${_rel}" > "${DATA_STATE_DIR}/system-image" 2> /dev/null \
+        || warn "无法写入镜像标记 ${DATA_STATE_DIR}/system-image，备份可能按默认布局打包"
+    log "系统层已装入 ext4 镜像：${_img}（挂载于 ${PERSIST_SYSTEM_ROOT}）"
 }
 
 # ==============================================================================
@@ -241,6 +316,36 @@ acquire_lock() {
 #    只有业务与状态子目录走 bind（见 mount_www_layer）。
 #  ★ index=off 是必须的，不是优化（同 upper 换 lower 的升级语义需要它）
 # ==============================================================================
+
+# 组 overlay 挂载参数。metacopy=on（内核 ≥4.19）让「只改元数据」的 copy-up
+# （chmod / chown）不再复制文件内容 —— 面板对镜像里的小配置文件大量 chmod，
+# 开了能明显减少 upper 体积与 copy-up I/O
+_overlay_opts() {
+    _o="lowerdir=$1,upperdir=$2,workdir=$3,index=off"
+    case "${PERSIST_OVERLAY_METACOPY}" in
+        on) _o="${_o},metacopy=on" ;;
+    esac
+    echo "${_o}"
+}
+
+# 挂一个 overlay。带 metacopy=on 失败时去掉它重试：一个可选参数不能拖垮整层
+# 持久化（老内核 / 不支持 trusted xattr 的文件系统都会走到这里）
+mount_overlay() {
+    _lo="$1"; _tg="$2"; _up="$3"; _wk="$4"
+    _opts=$(_overlay_opts "${_lo}" "${_up}" "${_wk}")
+    if mount -t overlay overlay -o "${_opts}" "${_tg}" 2> /dev/null; then
+        return 0
+    fi
+    case "${_opts}" in
+        *metacopy*)
+            warn "overlay 挂载失败：${_tg}，去掉 metacopy=on 重试"
+            _opts="lowerdir=${_lo},upperdir=${_up},workdir=${_wk},index=off"
+            mount -t overlay overlay -o "${_opts}" "${_tg}" 2> /dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
 mount_persist() {
     _dir="$1"
     _lower="/${_dir}"
@@ -260,8 +365,7 @@ mount_persist() {
         return 1
     fi
 
-    if ! mount -t overlay overlay \
-        -o "lowerdir=${_lower},upperdir=${_upper},workdir=${_work},index=off" "${_lower}"; then
+    if ! mount_overlay "${_lower}" "${_lower}" "${_upper}" "${_work}"; then
         warn "overlay 挂载失败：/${_dir} 本次不会持久化"
         warn '  常见原因：容器未以 --privileged 运行 / 持久化根位于 overlay 之上 / 内核未启用 overlayfs'
         mark_degraded "${_dir}: overlay 挂载失败"
@@ -275,7 +379,7 @@ mount_persist() {
     fi
 
     warn "/${_dir} 的持久化层挂载成功但不可写，本次不会持久化"
-    warn "  请让持久化根落在 ext4 / xfs / btrfs 上，或改用 Docker 管理的 volume"
+    warn '  请让持久化根落在 ext4 / xfs / btrfs 上；实在换不了就设 PERSIST_SYSTEM_IMAGE 走镜像兜底'
     rm -f "${_lower}/${PROBE}" 2> /dev/null || true
     mark_degraded "${_dir}: 挂载成功但不可写"
     return 1
@@ -386,6 +490,11 @@ mount_www_layer() {
 
     for _sub in ${PANEL_STATE_SUBDIRS}; do
         [ -n "${_sub}" ] || continue
+        # pyenv 有专属覆盖层（mount_pyenv_overlay）：它既不是纯状态、也不是纯代码，
+        # 走 bind 会让「pip 包持久化」与「解释器随镜像更新」二选一
+        case "${_sub}" in
+            pyenv) continue ;;
+        esac
         if ! seed_panel_state "${_sub}"; then
             mark_degraded "/www/server/panel/${_sub}: 面板状态绑定失败"
             if is_critical "/www/server/panel/${_sub}"; then
@@ -403,9 +512,75 @@ mount_www_layer() {
 }
 
 # ==============================================================================
+#  2.5 pyenv 覆盖层：pip 包持久化 + 解释器随镜像更新（PANEL_PYENV_OVERLAY=on）
+#   lower = 钉桩里的镜像 pyenv（随镜像走）；upper = 数据层 pyenv（pip 的包在这里）。
+#  于是两者同时成立：pip 包重建后还在，镜像升级的新解释器 / 新依赖照样生效 ——
+#  不再有「把 pyenv 加进 PANEL_STATE_SUBDIRS 就不再随镜像更新」的取舍。
+#  ★ upper 放数据层而不是 .system：镜像模式下 .system 是另一个文件系统，而内核
+#    硬性要求 overlay 的 workdir 与 upperdir 同盘（workdir 跟着放数据层 .baota）
+#  ★ 必须挂在「面板代码 bind 回镜像」之后：早于它会被那次 bind 遮住
+# ==============================================================================
+mount_pyenv_overlay() {
+    _target="${PANEL_DIR}/pyenv"
+    _upper="${PANEL_STATE_ROOT}/pyenv"
+    _work="${DATA_STATE_DIR}/pyenv.work"
+
+    if [ -z "${PANEL_PIN_DIR}" ]; then
+        warn "面板代码未钉桩，pyenv 覆盖层跳过：插件 pip 包不会持久化"
+        mark_degraded "${_target}: 面板未钉桩，pyenv 覆盖层未挂载"
+        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
+        return 1
+    fi
+    if [ ! -d "${PANEL_PIN_DIR}/pyenv" ]; then
+        warn "镜像里没有 ${PANEL_PIN_DIR}/pyenv，pyenv 覆盖层跳过"
+        mark_degraded "${_target}: 镜像无 pyenv，覆盖层未挂载"
+        return 1
+    fi
+    if ! mkdir -p "${_upper}" 2> /dev/null; then
+        warn "无法创建 pyenv 覆盖层 upper：${_upper}（数据层不可写？）"
+        mark_degraded "${_target}: pyenv upper 创建失败"
+        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
+        return 1
+    fi
+
+    rm -rf "${_work}" 2> /dev/null || true
+    if ! mkdir -p "${_work}" 2> /dev/null; then
+        warn "无法创建 pyenv 覆盖层 workdir：${_work}"
+        mark_degraded "${_target}: pyenv workdir 创建失败"
+        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
+        return 1
+    fi
+
+    if ! mount_overlay "${PANEL_PIN_DIR}/pyenv" "${_target}" "${_upper}" "${_work}"; then
+        warn "pyenv 覆盖层挂载失败：插件 pip 包不会持久化"
+        mark_degraded "${_target}: pyenv 覆盖层挂载失败"
+        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
+        return 1
+    fi
+
+    # 挂载成功 ≠ 可写：实测一次（与 mount_persist 同一套判据）
+    if ( exec 2> /dev/null; : > "${_target}/${PROBE}" ) && [ -e "${_upper}/${PROBE}" ]; then
+        rm -f "${_target}/${PROBE}"
+        log "pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新"
+        return 0
+    fi
+
+    warn "pyenv 覆盖层挂载成功但不可写：插件 pip 包不会持久化"
+    rm -f "${_target}/${PROBE}" 2> /dev/null || true
+    mark_degraded "${_target}: pyenv 覆盖层不可写"
+    mark_critical "${_target}: pyenv 覆盖层不可写，pip 包将丢失"
+    return 1
+}
+
+# ==============================================================================
 #  入口
 # ==============================================================================
 main() {
+    # ---- 0. 系统层镜像兜底（必须在取锁之前：系统层的锁文件就在镜像里）----
+    if [ -n "${PERSIST_SYSTEM_IMAGE}" ]; then
+        attach_system_image
+    fi
+
     acquire_lock || exit 1
 
     # 运行态标记目录（tmpfs）：准备 seeded 记录文件，供挂载汇总树标注「首次初始化」
@@ -462,6 +637,16 @@ main() {
             mark_critical "${PANEL_DIR}: 面板代码未隔离出持久化层"
         fi
     fi
+
+    # ---- 2.5 pyenv 覆盖层（必须晚于上面的 bind 回，否则会被那次 bind 遮住）----
+    case "${PANEL_PYENV_OVERLAY}" in
+        on)
+            mount_pyenv_overlay || _failed=1
+            ;;
+        *)
+            warn "PANEL_PYENV_OVERLAY=${PANEL_PYENV_OVERLAY}：pyenv 不持久化，插件 pip 包重建即丢"
+            ;;
+    esac
 
     # ---- 3. 业务数据与面板状态（逐子目录 bind）----
     mount_www_layer

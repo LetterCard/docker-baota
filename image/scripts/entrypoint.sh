@@ -27,6 +27,9 @@ fi
 
 PANEL_DIR=/www/server/panel
 PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
+# 镜像里的面板代码副本（构建期生成，排除 pyenv）：代码指纹与守卫都从它取，
+# 保证「指纹」与「守卫换回去的那份」是同一份代码
+PANEL_ORIGIN_DIR=/baota/origin
 
 # 首次启动标记。它在 /www 持久化层里，所以「首次」= 这份 /data 第一次被使用
 FIRST_BOOT_MARKER="${PANEL_DIR}/data/.initialized"
@@ -144,8 +147,9 @@ refresh_consistency() {
 
 # ==============================================================================
 #  版本护栏 + 升级前自动快照
-#  比对镜像内 /baota/VERSION 与持久化层记录：首次仅记录；一致则零写入；
-#  升高 / 降低都先快照再启动 —— 降级只告警不阻断（出故障要先能起来）。
+#  比对镜像内 /baota/VERSION 与持久化层记录（版本 + 面板代码指纹）：首次仅记录；
+#  两者都一致则零写入；任一个变化（升高 / 降低 / 同版本号镜像被重新构建）都先
+#  快照再启动 —— 降级只告警不阻断（出故障要先能起来）。
 #  快照在此刻做是有意的：systemd 尚未拉起面板与数据库，数据静止、天然一致。
 #  ★ 只快照 /www/server/panel/data：站点 / MySQL / 备份都是 bind 目录，换镜像
 #    动不到；唯一「对不上」的是新版代码 + 旧版 SQLite。推导见 docs/persistence.md
@@ -160,14 +164,37 @@ prune_snapshots() {
     [ "${n}" -le "${keep}" ] && return 0
 
     ls -1td "${dir}"/baota-* 2> /dev/null | tail -n "$((n - keep))" | while read -r f; do
-        rm -rf "${f}"
-        log "已清理过期快照：$(basename "${f}")"
+        # btrfs 只读子卷删不掉（rm -rf 报 Read-only file system），必须用
+        # subvolume delete；判据是 inode 256（子卷根的固定 inode）
+        if [ "$(stat -c %i "${f}" 2> /dev/null || echo 0)" = '256' ] \
+           && command -v btrfs > /dev/null 2>&1 \
+           && btrfs subvolume delete "${f}" > /dev/null 2>&1; then
+            log "已清理过期快照（btrfs 子卷）：$(basename "${f}")"
+        else
+            rm -rf "${f}"
+            log "已清理过期快照：$(basename "${f}")"
+        fi
     done || true
+}
+
+# 快照后端判定：AUTO_SNAPSHOT_MODE=auto 时，宿主持 btrfs 且面板数据目录是子卷
+# （inode 256）才用只读子卷快照 —— O(1)，与目录大小无关；其余情况 cp -a。
+# 子卷是一次性宿主机动作（btrfs subvolume create），见 docs/persistence.md
+snapshot_backend() {
+    case "${AUTO_SNAPSHOT_MODE}" in
+        copy) echo copy; return 0 ;;
+    esac
+    command -v btrfs > /dev/null 2>&1 || { echo copy; return 0; }
+    [ "$(stat -f -c %T /www/server/panel/data 2> /dev/null || true)" = 'btrfs' ] \
+        || { echo copy; return 0; }
+    [ "$(stat -c %i /www/server/panel/data 2> /dev/null || true)" = '256' ] \
+        || { echo copy; return 0; }
+    echo btrfs
 }
 
 take_snapshot() {
     local prev="$1" keep="${AUTO_SNAPSHOT_KEEP}"
-    local dir=/www/backup/auto stamp out
+    local dir=/www/backup/auto stamp out backend
 
     case "${keep}" in
         ''|*[!0-9]*)
@@ -190,11 +217,22 @@ take_snapshot() {
 
     mkdir -p "${dir}" 2> /dev/null || { warn "快照目录不可写：${dir}"; return 1; }
 
+    backend=$(snapshot_backend)
     stamp=$(date '+%Y%m%d-%H%M%S')
     out="${dir}/baota-${prev:-fresh}-${stamp}"
     # 同一秒内重复执行时目标可能已存在，cp -a 会把它复制成 out/data 子目录。
     # 先清掉，保证 out 始终是「panel/data 的一份完整副本」
     rm -rf "${out}" 2> /dev/null || true
+
+    if [ "${backend}" = 'btrfs' ]; then
+        if btrfs subvolume snapshot -r /www/server/panel/data "${out}" > /dev/null 2>&1; then
+            log "升级前快照已保存（btrfs 只读子卷，秒级）：${out}"
+            prune_snapshots "${dir}" "${keep}"
+            return 0
+        fi
+        warn "btrfs 子卷快照失败，回退 cp -a：${out}"
+        rm -rf "${out}" 2> /dev/null || true
+    fi
 
     # 用 cp -a 而不是 tar czf：
     #   1) 快得多 —— 面板数据里主要是 SQLite 与二进制，gzip 压缩收益很低，
@@ -215,8 +253,37 @@ take_snapshot() {
     return 1
 }
 
+# 面板代码指纹：/baota/origin 内容的 sha256（只含内容，不含 mtime —— 同代码
+# 重新构建的镜像指纹必须一致）。与 version 一起回答「代码是不是真的变了」
+compute_code_digest() {
+    local out=''
+    [ -d "${PANEL_ORIGIN_DIR}" ] || return 1
+    out=$( cd "${PANEL_ORIGIN_DIR}" 2> /dev/null \
+           && find . -type f -exec sha256sum {} + 2> /dev/null | LC_ALL=C sort | sha256sum \
+           | cut -d' ' -f1 ) || true
+    [ -n "${out}" ] || return 1
+    printf '%s' "${out}"
+}
+
+# 版本与指纹一起回写。digest 为空（守卫副本缺失）时只写版本，不留空文件
+write_version_record() {
+    local state_file="$1" ver="$2" digest_file="$3" digest="$4"
+    mkdir -p "${STATE_DIR}" 2> /dev/null || true
+    printf '%s\n' "${ver}" > "${state_file}" 2> /dev/null \
+        || warn "无法写入镜像版本记录：${state_file}"
+    if [ -n "${digest}" ]; then
+        printf '%s\n' "${digest}" > "${digest_file}" 2> /dev/null \
+            || warn "无法写入面板代码指纹：${digest_file}"
+    else
+        # 算不出指纹时删掉旧记录：留着会让下次启动把它当「代码变了」而反复快照
+        rm -f "${digest_file}" 2> /dev/null || true
+    fi
+}
+
 version_guard() {
-    local img_ver prev='' state_file="${STATE_DIR}/${META_VERSION_FILE}"
+    local img_ver prev='' prev_digest='' img_digest=''
+    local state_file="${STATE_DIR}/${META_VERSION_FILE}"
+    local digest_file="${STATE_DIR}/${META_DIGEST_FILE}"
 
     img_ver=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null || true)
     if [ -z "${img_ver}" ]; then
@@ -224,22 +291,44 @@ version_guard() {
         return 0
     fi
     [ -f "${state_file}" ] && prev=$(cat "${state_file}" 2> /dev/null || true)
+    [ -f "${digest_file}" ] && prev_digest=$(cat "${digest_file}" 2> /dev/null || true)
 
     if [ -z "${prev}" ]; then
         # 首次使用：没有可回滚的旧数据，只记录版本，不做快照
         log "首次使用这份持久化数据，记录镜像版本 ${img_ver}"
-        mkdir -p "${STATE_DIR}" 2> /dev/null || true
-        printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
-            || warn "无法写入镜像版本记录：${state_file}"
+        write_version_record "${state_file}" "${img_ver}" "${digest_file}" "$(compute_code_digest || true)"
+        return 0
+    fi
+
+    img_digest=$(compute_code_digest || true)
+
+    # 取不到指纹（守卫副本缺失 / 读不到）时不让它参与比较：没有可比的东西，
+    # 否则「记录里有、现在算不出」会被判成代码变化，每次启动都快照一次
+    [ -n "${img_digest}" ] || prev_digest=''
+
+    # 旧数据没有指纹：补记一份，不当成「代码变了」—— 没有可比较的基准，
+    # 为一个不存在的差异生成快照只会让人困惑
+    if [ -z "${prev_digest}" ] && [ -n "${img_digest}" ]; then
+        log "补记面板代码指纹（旧版本数据未记录）"
+        printf '%s\n' "${img_digest}" > "${digest_file}" 2> /dev/null \
+            || warn "无法写入面板代码指纹：${digest_file}"
+        prev_digest="${img_digest}"
+    fi
+
+    if [ "${prev}" = "${img_ver}" ] && [ "${prev_digest}" = "${img_digest}" ]; then
+        # 版本与代码指纹都没变：什么都不写，避免每次启动都产生无意义的持久化层写入
         return 0
     fi
 
     if [ "${prev}" = "${img_ver}" ]; then
-        # 版本未变：什么都不写，避免每次启动都产生无意义的持久化层写入
-        return 0
-    fi
-
-    if version_lt "${img_ver}" "${prev}"; then
+        # 版本号相同但代码变了 = 同标签镜像被重新构建（换基础镜像、改构建脚本）。
+        # 只比版本号会漏过这种变化，升级前快照随之缺席
+        warn '=============================================================='
+        warn "⚠️ 检测到镜像代码变化（版本号相同 ${img_ver}）"
+        warn "   指纹：${prev_digest:-未知} → ${img_digest:-未知}"
+        warn '   同版本号镜像被重新构建：按升级处理，先创建快照再启动'
+        warn '=============================================================='
+    elif version_lt "${img_ver}" "${prev}"; then
         warn '=============================================================='
         warn "⚠️ 检测到镜像降级：${prev} -> ${img_ver}"
         warn '   宝塔不提供降级迁移：旧版代码读取新版数据库可能出现功能异常'
@@ -252,9 +341,7 @@ version_guard() {
     # 快照失败就不推进版本记录：prev 与 img_ver 的差异留到下次启动、
     # 自动重试快照 —— 否则一次瞬时故障（如磁盘满）就让回滚点永久缺席
     if take_snapshot "${prev}"; then
-        mkdir -p "${STATE_DIR}" 2> /dev/null || true
-        printf '%s\n' "${img_ver}" > "${state_file}" 2> /dev/null \
-            || warn "无法写入镜像版本记录：${state_file}"
+        write_version_record "${state_file}" "${img_ver}" "${digest_file}" "${img_digest}"
     else
         warn '本次不更新版本记录，下次启动将重试升级前快照'
     fi

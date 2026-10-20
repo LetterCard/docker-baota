@@ -68,12 +68,14 @@ services:
       # ROOT_PASSWORD: ""           # 不写/留空 → 随机 12 位，见首次启动日志
 
     # ---- 💾 持久化：只挂一个 data（./data:/data）----
-    #   data/www 业务与面板状态（bind，宿主可直改）｜data/.system 系统层（隐藏，overlay upper）
+    #   data/www 业务与面板状态（bind，宿主可直改；含 pyenv 覆盖层 upper —— pip 包
+    #   持久化、解释器随镜像）｜data/.system 系统层（隐藏，overlay upper）
     #   ｜data/.baota 并发锁元数据（隐藏）。不持久化：面板代码（init.sh 用镜像绑定盖回，
     #   面板内点「更新」不生效，由守卫兜住）与 /www/wwwlogs。面板组件/插件/cron 在
     #   data/.system/www/server，重建后免重装。
     #   ★ data 必须落 ext4/btrfs/xfs（飞牛存储池即满足）；放 SMB/NFS/exFAT/NTFS 会
-    #   「挂载成功但只读」、写入静默失败。完整映射见 docs/conventions.md。
+    #   「挂载成功但只读」、写入静默失败 —— 那种场景设 PERSIST_SYSTEM_IMAGE 走镜像
+    #   兜底（docs/persistence.md「系统层 ext4 镜像兜底」）。完整映射见 docs/conventions.md。
     volumes:
       - ./data:/data
 

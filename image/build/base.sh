@@ -96,6 +96,7 @@ install_packages() {
     # dnsutils（nslookup/dig）因宝塔可能调用予以保留。libtool 是拆分包：
     # libtoolize 在 libtool、命令本体 /usr/bin/libtool 在 libtool-bin，漏装它
     # A14 的「command -v libtool」护栏会拦下整条流水线（已踩过）。
+    # e2fsprogs / btrfs-progs 供两个 opt-in 特性用：ext4 镜像兜底、btrfs 子卷快照。
     # 包列表收进数组，安装与兜底重试共用；装失败自动切备用镜像重写源重试一次。
     local pkgs=(
         locales tzdata ca-certificates
@@ -116,7 +117,8 @@ install_packages() {
         libglib2.0-dev libkrb5-dev libpq-dev libpq5 libcap-dev libxslt1-dev
         libncurses-dev libbz2-dev libgd-dev libgd3 libwebp-dev libvpx-dev
         libfreetype6-dev libjpeg62-turbo libjpeg62-turbo-dev libudev-dev
-        libldap2-dev libxml2-dev libcurl4-openssl-dev
+        libldap2-dev         libxml2-dev libcurl4-openssl-dev
+    e2fsprogs btrfs-progs
     )
 
     if ! apt-get install -y --no-install-recommends "${pkgs[@]}"; then

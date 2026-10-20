@@ -12,7 +12,7 @@
 #        backup          全量备份   reset-system  重置系统层（CONFIRM=yes）
 #        lint            静态检查（语法 / 配置真源 / 命名 / 注释 / 链接）
 #
-#  线参数从 image/lines.conf 读、Dockerfile 只有一份；镜像标签可用 BAOTA_IMAGE=... make up 覆盖。
+#  线参数从 image/lines.conf 读、12/13 主线共用一份 Dockerfile；镜像标签可用 BAOTA_IMAGE=... make up 覆盖。
 # ==============================================================================
 
 LINE ?= 12_version
@@ -48,7 +48,7 @@ endif
         health-restore health-all backup reset-system lint version
 
 help: ## 显示本帮助
-	@echo 'baota-docker · make <目标> [LINE=12.0.0|13.0.0] [IMAGE=标签]'
+	@echo 'baota-docker · make <目标> [LINE=12_version|12.x] [IMAGE=标签]'
 	@echo
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-13s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
@@ -130,6 +130,12 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	@set -eu; \
 	cd "$(ROOT_DIR)"; \
 	SYSTEM=data/.system; \
+	if [ -f data/.baota/system-image ]; then \
+		echo '❌ 系统层装在 ext4 镜像里（data/.baota/system-image 存在），本目标不适用：'; \
+		echo '   镜像里是整个系统层（面板里装的组件、apt 软件、面板账号）。'; \
+		echo '   要重置请停容器后删除该镜像文件再启动（等于全新系统层）。'; \
+		exit 1; \
+	fi; \
 	if [ ! -d "$$SYSTEM" ]; then \
 	    echo "未找到系统层目录（$$SYSTEM）。容器还没启动过，或挂载方式与本项目不符。"; \
 	    exit 1; \

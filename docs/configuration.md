@@ -69,10 +69,15 @@
 | `PANEL_STATE_ROOT` | `/data/www/server/panel` | 面板状态根目录（与容器内同名） |
 | `PANEL_STATE_SUBDIRS` | `data plugin vhost ssl config` | 面板状态子目录：配置与 SQLite / 插件 / 站点配置与证书 / 面板证书 / 面板设置 |
 | `PERSIST_SYSTEM_DIRS` | `etc usr var root opt home srv www/server` | 系统层 overlay 的顶层目录（含 `/www/server`：组件、计划任务、插件数据；面板代码不在此，属镜像） |
+| `PERSIST_OVERLAY_METACOPY` | `on` | overlay 挂载带 `metacopy=on`（内核 ≥4.19）：chmod / chown 不再触发整文件 copy-up；老内核自动回退 |
+| `PANEL_PYENV_OVERLAY` | `on` | pyenv 独立覆盖层：pip 包持久化 + 解释器随镜像更新；`off` 回到「pyenv 完全不持久化」 |
+| `PERSIST_SYSTEM_IMAGE` | 空（关闭） | **opt-in 兜底**：设成 data 卷内的镜像路径（如 `/data/.system.img`）即把系统层装进 ext4 镜像，用于 `data/` 只能放 SMB/NFS/exFAT/NTFS 的场景 |
+| `PERSIST_SYSTEM_IMAGE_SIZE_MB` | `8192` | 上述镜像的初始大小（MB，稀疏文件） |
 | `CRITICAL_DIRS` | `/etc /usr /var /www/server /www/wwwroot /www/server/data /www/server/panel/data /www/server/panel/plugin /www/server/panel/vhost /www/server/panel/ssl /www/server/panel/config` | 持久化失败即写 `critical`、令容器 unhealthy。写**容器内挂载点路径** |
 | `DISK_MIN_AVAIL_MB` | `1024` | 磁盘告警线：数据层或系统层可用低于此值（MB）即 unhealthy |
 | `DISK_MAX_USED_PCT` | `95` | 已用百分比达此值即 unhealthy |
 | `AUTO_SNAPSHOT_KEEP` | `3` | 升级 / 降级前自动快照保留份数，`0` 关闭 |
+| `AUTO_SNAPSHOT_MODE` | `auto` | 快照生成方式：`auto`（btrfs 子卷可用就用只读子卷快照，否则 `cp -a`）/ `copy` / `btrfs` |
 
 > `DISK_MIN_AVAIL_MB` 在大盘上偏低（1GB 在几 TB 池上≈0），想提前预警可调大，
 > 如 `10240`（10GB）。改这两个值只需重建容器，不必重建镜像。
@@ -97,16 +102,23 @@
 | `data/.system/.baota/<目录>.work/work` | overlay 内部工作目录，每次启动重建，仅几十 KB |
 | `data/.system/.baota/lock`、`data/.baota/lock` | 持久化层独占锁；同一份数据不允许两个容器同时挂载，容器死亡自动释放 |
 | `data/.system/.baota/version` | 上次启动的镜像版本，用于检测升级 / 降级并触发自动快照 |
+| `data/.system/.baota/digest` | 上次启动的面板代码指纹（`/baota/origin` 的 sha256）：版本号相同但代码变了也按升级处理 |
 | `data/.system/.baota/boot.log` | 持久化降级的启动历史，仅出问题时追加 |
+| `data/.baota/system-image` | 仅镜像兜底模式出现：记录系统层 ext4 镜像的路径（备份据此切换归档成员） |
 
 ## 自动快照（升级前）
 
-镜像版本变化时，启动阶段（面板与数据库尚未拉起、数据静止）自动 `cp -a`
-`/www/server/panel/data` 到 `data/www/backup/auto/`，通常几十 MB、秒级完成。
+镜像版本变化（或版本号相同但**面板代码指纹**变化，即同标签镜像被重新构建）时，
+启动阶段（面板与数据库尚未拉起、数据静止）自动把 `/www/server/panel/data`
+复制到 `data/www/backup/auto/`，通常几十 MB、秒级完成。
 
 **为什么只快照这一个目录**：站点 / MySQL / 备份都是 bind 目录，换镜像动不到；唯一
 「对不上」的是「新版面板代码 + 旧版面板数据库」，快照它即可回到旧组合。
 完整推导见[持久化原理](persistence.md#换镜像后会发生什么)。
+
+**btrfs 宿主**：`AUTO_SNAPSHOT_MODE=auto`（默认）下，若 `data/www/server/panel/data`
+是 btrfs 子卷，快照改用只读子卷快照（O(1)，与目录大小无关）；否则自动回退 `cp -a`。
+子卷是一次性宿主机动作，见[持久化原理](persistence.md#快照升级前)。
 
 > 例外：若新镜像跨了 MySQL 大版本（如 5.7 → 8.0），MySQL 首启会就地升级数据文件，
 > **不可回退**。跨大版本前请先在面板内做一次完整数据库备份；同大版本无此风险。

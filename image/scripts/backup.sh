@@ -45,6 +45,15 @@ NAME_PREFIX='baota-backup'
 # 系统层那一项成员名从真源派生（basename PERSIST_SYSTEM_ROOT）：写死「system」
 # 会让排除静默失效 —— 表现为备份体积逐次翻倍
 SYSTEM_MEMBER=$(basename "${PERSIST_SYSTEM_ROOT}")
+# 系统层镜像模式标记：init.sh 在把系统层装进 ext4 镜像时写下（内容是镜像文件
+# 相对数据层的路径，如 .system.img）。默认布局下该文件不存在。
+# 镜像模式下系统层的真身是**镜像文件**，.system 只是它的挂载点 —— 备份必须改拿
+# 镜像文件当成员：漏掉它整个系统层就没了；而把挂载点内容打进去更危险
+# （恢复后会被镜像挂载遮挡，那份内容静默失效）
+SYSTEM_IMAGE_REL=''
+if [ -f "${PERSIST_DATA_ROOT}/.baota/system-image" ]; then
+    SYSTEM_IMAGE_REL=$(tr -d '[:space:]' < "${PERSIST_DATA_ROOT}/.baota/system-image" 2> /dev/null || true)
+fi
 EXCLUDES=(
     '.baota'
     'www/backup/auto'
@@ -149,6 +158,12 @@ show_sizes() {
         "${PERSIST_DATA_ROOT}/www" \
         $(for d in ${PERSIST_SYSTEM_DIRS}; do echo "${PERSIST_SYSTEM_ROOT}/${d}"; done) \
         2> /dev/null | sort -rh || true
+    if [ -n "${SYSTEM_IMAGE_REL}" ]; then
+        echo
+        echo "系统层装在 ext4 镜像里：${PERSIST_DATA_ROOT}/${SYSTEM_IMAGE_REL}"
+        echo "  （$(du -sh "${PERSIST_DATA_ROOT}/${SYSTEM_IMAGE_REL}" 2> /dev/null | cut -f1 || echo 未知)，启动时自动挂载到 ${PERSIST_SYSTEM_ROOT}）"
+    fi
+
     echo
     echo '可排除项体积：'
     for d in "${PERSIST_DATA_ROOT}/.baota" "${PERSIST_SYSTEM_ROOT}/.baota" \
@@ -208,7 +223,7 @@ dump_databases() {
 
 # 生成包内说明：版本号、时间、目录清单，以及恢复步骤
 write_manifest() {
-    local file="$1" image_ver db_note
+    local file="$1" image_ver db_note sys_note
 
     image_ver=$(cat /baota/VERSION 2> /dev/null || echo unknown)
     if [ -f "${TMP_DIR}/databases.sql" ]; then
@@ -216,6 +231,10 @@ write_manifest() {
     else
         db_note='未包含 MySQL 转储（容器停止或未安装 MySQL）'
     fi
+    # 镜像模式下系统层的真身是镜像文件，恢复步骤不变（解回 data，启动时自动挂载）
+    sys_note='系统层 data/.system/...'
+    [ -z "${SYSTEM_IMAGE_REL}" ] \
+        || sys_note="系统层在 ext4 镜像 ${SYSTEM_IMAGE_REL} 里（启动时自动挂载）"
 
     cat > "${file}" <<EOF
 baota-backup 备份清单
@@ -227,7 +246,7 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包是整份 data 卷的镜像（业务与面板状态 data/www、系统层 data/.system/...
+本包是整份 data 卷的镜像（业务与面板状态 data/www、${sys_note}
 都在里面），直接整包解回 data 即可。
 面板代码不在包里 —— 它属于镜像，换镜像即升级：
 
@@ -272,7 +291,19 @@ collect_members() {
     local _system
     _system=$(basename "${PERSIST_SYSTEM_ROOT}")
     DATA_MEMBERS=('www')
+
+    if [ -n "${SYSTEM_IMAGE_REL}" ]; then
+        # 镜像模式：系统层真身是镜像文件；.system 只是挂载点，不当成员打
+        DATA_MEMBERS+=("${SYSTEM_IMAGE_REL}")
+        return 0
+    fi
+
     if [ -d "${PERSIST_DATA_ROOT}/${_system}" ]; then
+        # 是挂载点却没有镜像标记：有人手工挂了别的东西在系统层上。照常打进去
+        # 会得到一份恢复后就被遮挡的内容，宁可拒绝产出
+        if mountpoint -q "${PERSIST_SYSTEM_ROOT}" 2> /dev/null; then
+            die "系统层 ${PERSIST_SYSTEM_ROOT} 是独立挂载点，但找不到镜像标记 ${PERSIST_DATA_ROOT}/.baota/system-image：拒绝产出恢复后可能失效的备份"
+        fi
         DATA_MEMBERS+=("${_system}")
     elif [ "${PERSIST_SYSTEM_ROOT}" != "${PERSIST_DATA_ROOT}/${_system}" ]; then
         die "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，tar 打包覆盖不到系统层（含面板账号、用户装的环境）；请改用 --rsync，或把系统层指回数据层内"
@@ -360,6 +391,14 @@ verify_archive() {
             *)              echo "  ❌ 缺少 ${pattern}"; missing=$((missing + 1)) ;;
         esac
     done
+
+    # 镜像模式下系统层是镜像文件：不在包里 = 恢复后面板账号、apt 软件、组件全丢
+    if [ -n "${SYSTEM_IMAGE_REL}" ]; then
+        case "${listing}" in
+            *"${SYSTEM_IMAGE_REL}"*) echo "  ✅ 含 ${SYSTEM_IMAGE_REL}（系统层镜像）" ;;
+            *) echo "  ❌ 缺少 ${SYSTEM_IMAGE_REL}（系统层镜像）"; missing=$((missing + 1)) ;;
+        esac
+    fi
 
     # 自包含检查：备份包不应把业务备份目录（data/www/backup/*）里的产物装进来
     case "${listing}" in
@@ -455,6 +494,11 @@ rsync_sync() {
     for _e in "${EXCLUDES[@]}"; do
         rargs+=( "--exclude=${_e}" )
     done
+    # 镜像模式下 .system 是挂载点：其内容会被镜像挂载遮挡，只同步镜像文件本身
+    # （不同步内容，恢复时以镜像文件为准）
+    if [ -n "${SYSTEM_IMAGE_REL}" ]; then
+        rargs+=( "--exclude=/${SYSTEM_MEMBER}" )
+    fi
 
     # --rsync 整层同步 data 卷（业务与面板状态 data/www + 系统层 data/.system/<dir>
     # 都在里面），一条命令覆盖全部。

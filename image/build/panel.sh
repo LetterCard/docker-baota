@@ -84,15 +84,17 @@ install_panel() {
 }
 
 # ==============================================================================
-#  1.5 面板代码补丁（构建期固化；运行期面板只读无法改）
+#  1.5 面板代码补丁（构建期固化；只适配我们自己的执行入口包装，不改面板功能）
 #  1.5b patch_task_watchdog：看门狗只查 comm 要求含 'BT-Task'，shim 改名
 #       python-real 致 comm 永远不含，误杀安装任务；补查 cmdline 并打守卫副本。
 #  1.5c patch_panel_start_idempotent：init.sh 用 `runserver:app` 判面板是否运行，
 #       但容器内进程为 python-real 拉起的面板主程序、命令行不含 runserver:app，
 #       看门狗每 10 秒误判未运行、反复执行 init_db.py 吃满 CPU；补幂等短路。
+#  运行期面板目录可写（写入落容器可写层、不落持久化层），由守卫在执行前换回
+#  镜像版本 —— 所以这两处补丁必须构建期打进镜像、并同步打进 /baota/origin 副本。
 # ==============================================================================
 patch_task_watchdog() {
-    log '1.5b/5 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
+    log '1.5b 任务看门狗兼容 shim 改名（comm 判定补查 cmdline）—— 软件安装失败真根因'
 
     # 用 glob 绕开 "BT-Panel" 字面量（bt7.init 用 ps|grep 该字面量判运行，见上）；
     # 不用 ls：构建期 /baota/origin 可能尚无副本，ls 无匹配会在 pipefail+set -e 下让脚本退出。
@@ -134,7 +136,7 @@ PY
 #  1.5c/5 panel_start 幂等化（避免看门狗反复 init_db 吃满 CPU）
 # ==============================================================================
 patch_panel_start_idempotent() {
-    log '1.5c/5 panel_start 幂等化（面板主程序进程判定）—— 反复 init_db 真根因'
+    log '1.5c panel_start 幂等化（面板主程序进程判定）—— 反复 init_db 真根因'
 
     _patch_init_one() {
         "${PANEL_PY_BIN}" - "$1" <<'PY' || warn "panel_start 幂等补丁失败（$1）"

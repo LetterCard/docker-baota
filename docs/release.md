@@ -3,7 +3,7 @@
 ## 线声明表（唯一的差异来源）
 
 各条线（线）的差异**只写在** [image/lines.conf](../image/lines.conf) 里，
-成对排列、一眼能对照；Dockerfile 与流水线都只有一份：
+成对排列、一眼能对照；12/13 两条线共用一份 Dockerfile 与流水线：
 
 ```
 line         display  version                    install                                             probe   tag     base
@@ -88,6 +88,11 @@ buildx 一次调用里没法做到「推送发生在验证之后」，所以拆�
 
 需要的仓库权限（Settings → Actions → General → Workflow permissions）：
 勾选 **Read and write permissions**（发布成功后要把版本号回写进 VERSION 文件）。
+
+> **`pro` 线不走上面的共享流水线**：它有专属的 `.github/workflows/build-pro.yml`
+> 与 `image/versions/pro/Dockerfile`，只手动触发、标签固定为字面量 `pro`，
+> 授权补丁在 `image/versions/pro/build/patch_pro_license.sh`。
+> 12/13 线的任何改动都不会触发 pro 的构建，反之亦然。
 
 ---
 

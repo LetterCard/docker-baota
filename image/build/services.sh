@@ -6,8 +6,8 @@
 #  「不可变面板」下本阶段不打任何面板补丁 —— 面板代码原样来自镜像，不需要
 #  保存启动器副本，也不需要顶层目录基线（运行期不巡检上游落点）。
 #
-#  本阶段只做三件事：① 运行期脚本权限 ② 开机自启与 systemd 复位
-#  ③ 执行入口守卫装配（解释器包装 + /baota/origin 代码副本）
+#  本阶段做五件事：① 运行期脚本权限 ② 开机自启与 systemd 复位 ③ 安装运行期
+#  脚本、版本信息与持久化骨架 ④ 执行入口守卫装配 ⑤ 移除构建期脚本
 #
 #  入参（Dockerfile 的 ARG / ENV 在 RUN 中即为环境变量）：
 #    IMAGE_VERSION / PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT / PERSIST_SYSTEM_DIRS
@@ -102,8 +102,9 @@ install_runtime_files() {
     printf '%s\n' "${IMAGE_VERSION:-unknown}" > "${BAOTA_DIR}/VERSION"
 
     # 持久化目录骨架：预建业务与面板状态的父目录，以及系统层各 upper。
-    # 运行期 init.sh 会逐个 bind 进来；目录先建好，既能省一次 mkdir，
-    # 也能让「持久化根不可写」在建目录这一步就暴露出来。
+    # bind 挂载（compose 的 ./data:/data）下这些目录被宿主目录遮住，由 init.sh
+    # 的 mkdir -p 负责；匿名卷（VOLUME 语义）会把镜像里的 /data 拷进去，先建好
+    # 就省一次首启创建。两条路都不依赖对方，也不替代运行期的可写性实测。
     # 只建父目录，不建具体子目录 —— 子目录由 WWW_DATA_SUBDIRS /
     # PANEL_STATE_SUBDIRS 决定，真源在 defaults.env，这里不重复编码一份
     mkdir -p "${PERSIST_DATA_ROOT}/www" "${PANEL_STATE_ROOT}"

@@ -3,7 +3,8 @@
 ## 硬约束（不满足会静默丢数据）
 
 - **`/data` 必须在 ext4 / btrfs / xfs 上**。SMB / NFS 网络共享、exFAT / NTFS 移动盘、
-  macOS / Windows 的宿主机目录，都会让 overlay「挂载成功但只读」，之后所有写入静默失败
+  macOS / Windows 的宿主机目录，都会让 overlay「挂载成功但只读」，之后所有写入静默失败。
+  实在换不了位置，用 opt-in 的[系统层 ext4 镜像兜底](persistence.md#系统层-ext4-镜像兜底opt-in)
 - **`/data` 不能放在容器可写层里**。overlay 的 upperdir 不能位于 overlay 之上，
   必须用 bind mount（compose 里的 `./data:/data` 就是 bind）
 - **容器必须 `privileged`**。要 mount overlay、要跑 systemd，缺一不可
@@ -19,7 +20,7 @@
 | 手动改、删 `data/.system/.baota/` | 项目元数据目录（工作目录、锁、版本记录、启动历史），删了会自动重建，改它可能导致下次挂载异常或丢锁 |
 | 运行中直接拷贝 `data/` 当备份 | 数据库文件可能处于半写状态，恢复后表损坏 |
 | 用图形界面「压缩 / 复制」备份 `data/` | 丢 overlay 扩展属性，详见[备份与恢复](backup.md) |
-| 把 `data/` 放在网络共享上跑 | 见硬约束第一条 |
+| 把 `data/` 放在网络共享上跑 | 见硬约束第一条（要用得先上镜像兜底） |
 | 面板里改了端口却忘了同步 compose 映射 | 端口生效但没映射出来，面板连不上 |
 | 两份 compose 共用同一个 `data/` | 内核禁止两个 overlay 共用 upper，启动时会被独占锁拦下并中止 |
 
@@ -74,7 +75,7 @@ docker exec baota bt status             # 面板 + 任务进程
 make reset-system CONFIRM=yes      # 必须显式确认，避免误操作
 ```
 
-| | 内容 |
+| 方向 | 内容 |
 |---|---|
 | **会丢** | apt 装的软件、手工改过的 `/etc`、计划任务（`/var/spool/cron`）、root 家目录（含 `.ssh/authorized_keys`）、`/var/log` 历史日志 |
 | **不会丢** | 面板账号与配置、站点文件、数据库、备份、站点证书与伪静态、面板自身证书、面板设置 —— 全在数据层 `data/`；**面板里装的组件**（PHP / nginx / MySQL…，在 `data/.system/www/server`）也刻意保留 —— 清掉它等于让用户重装一遍环境，与项目目的相反（真要清就手动删 `data/.system/www/server`） |

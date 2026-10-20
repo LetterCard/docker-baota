@@ -39,9 +39,11 @@ FUTURE_VERSION='999.0.0'
 PERSIST_DATA_ROOT=$(read_default PERSIST_DATA_ROOT)
 PERSIST_SYSTEM_ROOT=$(read_default PERSIST_SYSTEM_ROOT)
 META_VERSION_FILE=$(read_default META_VERSION_FILE)
+META_DIGEST_FILE=$(read_default META_DIGEST_FILE)
 [ -n "${PERSIST_DATA_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_DATA_ROOT"; exit 1; }
 [ -n "${PERSIST_SYSTEM_ROOT}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 PERSIST_SYSTEM_ROOT"; exit 1; }
 [ -n "${META_VERSION_FILE}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 META_VERSION_FILE"; exit 1; }
+[ -n "${META_DIGEST_FILE}" ] || { echo "::error::无法从 image/conf/defaults.env 解析 META_DIGEST_FILE"; exit 1; }
 
 # start_container 见 lib.sh
 
@@ -76,7 +78,11 @@ assert_no_degraded
 RECORDED=$(inside_cat "${PERSIST_SYSTEM_ROOT}/.baota/${META_VERSION_FILE}")
 [ "${RECORDED}" = "${EXPECT_VERSION}" ] \
     || fail "首次启动未正确记录镜像版本：期望 ${EXPECT_VERSION}，实际 ${RECORDED}"
-pass "首次启动已记录镜像版本 ${RECORDED}（首次不生成快照，因为没有可回滚的旧数据）"
+# 代码指纹与版本一起记录：同版本号镜像被重新构建时，只靠版本号判不出变化
+RECORDED_DIGEST=$(inside_cat "${PERSIST_SYSTEM_ROOT}/.baota/${META_DIGEST_FILE}")
+[ -n "${RECORDED_DIGEST}" ] \
+    || fail "首次启动未记录面板代码指纹：${PERSIST_SYSTEM_ROOT}/.baota/${META_DIGEST_FILE}"
+pass "首次启动已记录镜像版本 ${RECORDED} 与代码指纹（首次不生成快照，因为没有可回滚的旧数据）"
 
 # ==============================================================================
 #  B) 升级分支：把记录改低，重新启动

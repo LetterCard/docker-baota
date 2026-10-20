@@ -164,6 +164,15 @@ inside test -e /run/baota/panel-isolated \
     || fail "缺少面板隔离标记 /run/baota/panel-isolated：面板代码可能落进持久化层"
 pass "面板隔离标记存在（隔离结论与真实挂载结果一致）"
 
+# pyenv 覆盖层：pip 包持久化 + 解释器随镜像更新（init.sh 在面板 bind 回之后挂）。
+# 少它一层的表现是「插件代码在、pip 依赖丢」，而面板不会提示重装 ——
+# 这种静默坏功能必须拦在发布前
+inside_sh "mount | grep -q ' on /www/server/panel/pyenv type overlay '" \
+    || fail "pyenv 未挂覆盖层：插件 pip 包重建后会丢（期望 upper 在 ${PANEL_STATE_ROOT}/pyenv）"
+inside test -d "${PANEL_STATE_ROOT}/pyenv" \
+    || fail "pyenv 覆盖层 upper 缺失：${PANEL_STATE_ROOT}/pyenv"
+pass "pyenv 覆盖层已挂载（pip 包持久化，解释器随镜像更新）"
+
 # 并发保护：同一份 data 不能被两个实例同时挂载（内核 EBUSY / 行为未定义）。
 # 第二实例必须被独占锁拦下并中止 —— 这是数据安全性质，要在推送前就拦住
 # （判据是「它退出了」，不依赖日志文案）
@@ -187,6 +196,38 @@ if inside_sh 'grep -q " /tmp " /proc/mounts'; then
     fail "/tmp 被单独挂载（应留在容器可写层）"
 fi
 pass "/tmp 未被 tmpfs 化"
+
+step "A2b) 校验 overlay metacopy 参数（内核支持时才要求生效）"
+# metacopy=on 让「只改元数据」的 copy-up（chmod / chown）不再复制文件内容，
+# 面板对镜像里的小配置文件大量 chmod，开了能明显减少 upper 体积与 I/O。
+# 内核 <4.19 或文件系统不支持时 init.sh 会自动去掉该参数重挂，所以门禁先探
+# 内核支持（在数据层上挂一个一次性 overlay），支持了才断言生产挂载真的生效。
+# 行为判据：chmod 一个只存在于镜像里的大文件（bash 约 1.2MB）——metacopy
+# 生效时 upper 只落元数据（几乎不占块），未生效时是整文件 copy-up（≈1.2MB）
+_probe="${PERSIST_DATA_ROOT}/.baota/.metacopy-probe"
+_mc=0
+if inside_sh "mkdir -p ${_probe}/low ${_probe}/up ${_probe}/work ${_probe}/mnt && \
+    mount -t overlay overlay -o lowerdir=${_probe}/low,upperdir=${_probe}/up,workdir=${_probe}/work,metacopy=on ${_probe}/mnt"; then
+    _mc=1
+fi
+inside_sh "umount ${_probe}/mnt 2>/dev/null; rm -rf ${_probe}" || true
+if [ "${_mc}" = 1 ]; then
+    inside test -f /usr/bin/bash || fail "metacopy 行为判据需要 /usr/bin/bash（镜像里没有？）"
+    _mode=$(inside_sh "stat -c %a /usr/bin/bash")
+    inside_sh 'chmod 0600 /usr/bin/bash'
+    _blocks=$(inside_sh "du -k ${PERSIST_SYSTEM_ROOT}/usr/bin/bash 2>/dev/null | cut -f1" || true)
+    inside_sh "chmod ${_mode} /usr/bin/bash"
+    case "${_blocks}" in
+        ''|*[!0-9]*) fail "无法测量 upper 体积：chmod 后 ${PERSIST_SYSTEM_ROOT}/usr/bin/bash 不在？" ;;
+    esac
+    if [ "${_blocks}" -lt 64 ]; then
+        pass "metacopy=on 生效：chmod 元数据 copy-up 未复制文件内容（upper ${_blocks}KB）"
+    else
+        fail "内核支持 metacopy 但生产 overlay 未启用（chmod 后 upper 占 ${_blocks}KB，疑似整文件 copy-up）"
+    fi
+else
+    pass "内核不支持 metacopy=on，运行期已自动回退（不阻断发布）"
+fi
 
 # compose 的 healthcheck 判据已收口到镜像内 /baota/healthcheck.sh，
 # 这里直接执行它，等于在真实容器里跑一遍生产健康检查（降级标记 / 磁盘水位 / 端口）
@@ -336,7 +377,12 @@ inside test -f "${PERSIST_SYSTEM_ROOT}/www/server/cron/_marker" \
     || fail "计划任务脚本未落盘（应为 ${PERSIST_SYSTEM_ROOT}/www/server/cron）"
 inside test -f "${PERSIST_SYSTEM_ROOT}/www/server/total/logs/_marker" \
     || fail "插件数据未落盘（应为 ${PERSIST_SYSTEM_ROOT}/www/server/total/logs）"
-pass "写入分别落到系统层、面板状态、业务目录与 /www/server（组件 / cron / 插件数据）"
+# 插件 pip 进来的包：经 pyenv 覆盖层落到 upper（data/www/server/panel/pyenv）。
+# 这是「面板里装插件 → 重建 → 插件还能跑」的关键一环，B 阶段断言它重建后仍在
+inside_sh 'for d in /www/server/panel/pyenv/lib/python3.*/site-packages; do mkdir -p "$d/_gate_pkg"; echo gate > "$d/_gate_pkg/__init__.py"; done'
+inside_sh 'ls /www/server/panel/pyenv/lib/python3.*/site-packages/_gate_pkg/__init__.py' \
+    || fail "无法在 pyenv site-packages 写入测试包（pyenv 布局与预期不符）"
+pass "写入分别落到系统层、面板状态、业务目录与 /www/server（组件 / cron / 插件数据 / pip 包）"
 
 step "A10) 校验面板服务开机自启与运行态"
 inside systemctl is-enabled btpanel >/dev/null 2>&1 \
@@ -509,7 +555,15 @@ inside test -f "${PERSIST_SYSTEM_ROOT}/var/spool/cron/_marker" || fail "/var 计
 inside test -f /www/server/php/_marker             || fail "面板里装的组件在重建后丢失"
 inside test -f /www/server/cron/_marker            || fail "计划任务脚本在重建后丢失"
 inside test -f /www/server/total/logs/_marker      || fail "插件数据在重建后丢失"
-pass "系统配置、面板状态、业务数据、计划任务、组件与插件数据均已保留"
+# pip 包必须来自持久化 upper：重建后还在，且镜像里本来没有（否则这条断言
+# 测到的只是镜像自带内容，失去意义）
+inside_sh 'ls /www/server/panel/pyenv/lib/python3.*/site-packages/_gate_pkg/__init__.py >/dev/null 2>&1' \
+    || fail "pip 包（测试）在重建后丢失：pyenv 覆盖层没生效"
+if docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    'ls /www/server/panel/pyenv/lib/python3.*/site-packages/_gate_pkg >/dev/null 2>&1'; then
+    fail "测试包来自镜像而非持久化 upper（pyenv 覆盖层断言失去意义）"
+fi
+pass "系统配置、面板状态、业务数据、计划任务、组件、插件数据与 pip 包均已保留"
 
 SAFE_AFTER=$(inside_cat /www/server/panel/data/admin_path.pl)
 PORT_AFTER=$(inside_cat /www/server/panel/data/port.pl)

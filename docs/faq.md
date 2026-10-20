@@ -36,7 +36,21 @@ docker exec -it baota bt 5         # 重置面板口令
 
 `docker compose ps` 显示 unhealthy，或日志里出现「持久化层挂载成功但不可写」时，
 说明 `/data` 落在了不支持的文件系统上 —— 挪到 ext4 / btrfs / xfs 即可，
-原因见[硬约束](persistence.md#硬约束)。
+原因见[硬约束](persistence.md#硬约束)。实在挪不了（比如只能挂 SMB / NTFS 硬盘），
+用 opt-in 的[系统层 ext4 镜像兜底](persistence.md#系统层-ext4-镜像兜底opt-in)：
+设 `PERSIST_SYSTEM_IMAGE=/data/.system.img` 即可，业务数据不受影响。
+
+## 重建容器后插件报错 / 面板里显示已装却用不了
+
+插件代码本身是持久化的（`data/www/server/panel/plugin`），重建后面板仍显示已安装；
+缺的是插件的 **pip 依赖**。现在的默认行为下 pip 包也持久化 —— pyenv 走独立覆盖层
+（lower = 镜像 pyenv、upper = `data/www/server/panel/pyenv`），见
+[pyenv 覆盖层](persistence.md#pyenv-覆盖层pip-包与解释器各得其所)。
+
+仍出现该症状时确认两点：① `docker compose ps` 是否 unhealthy（`/run/baota/critical`
+说明 pyenv 覆盖层没挂上，先看 `[init][WARN]` 日志）；② 你是否把 `PANEL_PYENV_OVERLAY`
+关掉了，或历史上把 `pyenv` 整个持久化过（那份旧拷贝会遮住镜像 pyenv，
+停容器删 `data/www/server/panel/pyenv` 再启动）。
 
 ## 面板里装软件全失败 / error.log 报 json.loads(bool)
 

@@ -10,6 +10,64 @@
 
 ---
 
+## [未发布] · 持久化补齐：pyenv 覆盖层 / btrfs 快照 / ext4 镜像兜底
+
+### pyenv 独立覆盖层：pip 包持久化 + 解释器随镜像更新（`PANEL_PYENV_OVERLAY`，默认 `on`）
+
+面板的 Python 环境里混着「解释器与镜像自带依赖」（该随镜像更新）和「插件 pip 装进来
+的包」（重建后必须还在）。整目录持久化会把前者钉死在首启版本，整目录不持久化又会丢掉
+后者 —— 现在给它单独挂一层 overlay：lower = 镜像 pyenv（经 `/run/baota/panel` 钉桩），
+upper = `data/www/server/panel/pyenv`。
+
+- 插件在面板里装的 pip 包**销毁重建、换镜像后都在**，不再出现「面板显示已装、
+  点开却报错」的分裂状态；
+- 解释器与镜像自带依赖**仍随镜像更新**，升级面板 = 换镜像的语义不变；
+- `PANEL_STATE_SUBDIRS` 回到纯状态语义（`data plugin vhost ssl config`）；
+  历史上把 `pyenv` 加进去的用户，那份全量拷贝会自动变成 upper（内容不丢，
+  但会遮住新镜像的 pyenv，清理指引见[升级与迁移](docs/upgrade.md)）；
+- upper 刻意放数据层而非 `.system`：镜像模式下 `.system` 是另一个文件系统，
+  而内核硬性要求 overlay 的 workdir 与 upperdir 同盘；
+- 挂载失败写 `degraded` + `critical`（pip 包即将丢失，必须在容器状态里可见）。
+
+### 升级前快照支持 btrfs 只读子卷快照（`AUTO_SNAPSHOT_MODE=auto`）
+
+宿主持 btrfs 且 `data/www/server/panel/data` 是子卷时，快照改用
+`btrfs subvolume snapshot -r`：O(1)、与目录大小无关；过期清理用
+`btrfs subvolume delete`（只读子卷 `rm -rf` 删不掉）。任何时候不满足条件都自动
+回退 `cp -a`，快照失败不阻断启动。
+
+### 系统层 ext4 镜像兜底（`PERSIST_SYSTEM_IMAGE`，opt-in）
+
+`data/` 只能放 SMB / NFS / exFAT / NTFS 时，overlay 的 upper 会「挂载成功但只读」、
+写入静默失败。设一个镜像路径即把系统层装进 data 卷里的 ext4 镜像（loop 挂载到
+`PERSIST_SYSTEM_ROOT`）：业务层 `data/www` 仍是普通 bind，任何文件系统都能工作。
+每次启动先 `e2fsck -p` 再挂载（修不好则拒绝启动）；`baota-backup` 自动改拿镜像
+文件当归档成员（挂载点内容不进包，否则恢复后会被遮挡）；`make reset-system`
+在镜像模式下禁用并给出提示。需要 loop 设备（Docker Desktop 的虚拟机里通常没有）。
+
+### overlay `metacopy=on`（`PERSIST_OVERLAY_METACOPY`，默认 `on`）
+
+「只改元数据」的 copy-up（chmod / chown）不再复制文件内容 —— 面板对镜像里的小配置
+文件大量 chmod，开了 upper 更小、I/O 更少。老内核或不支持的文件系统上 init.sh
+会自动去掉该参数重挂；CI 门禁（core.sh A2b）先探内核支持，支持了就断言生产挂载
+真的生效（行为判据：chmod 镜像里的大文件后 upper 不占数据块）。
+
+### 版本记录增加面板代码指纹（`data/.system/.baota/digest`）
+
+与 `version` 一起回答「代码是不是真的变了」：同版本号镜像被重新构建（换基础镜像、
+改构建脚本）时只比版本号会漏过，指纹变化同样触发升级前快照。指纹只含内容、
+不含 mtime，同代码重复构建结果一致。
+
+### 其它
+
+- 镜像补装 `e2fsprogs`（mkfs.ext4 / e2fsck）与 `btrfs-progs`（子卷快照）；
+- 门禁扩展：`core.sh` 新增 pyenv 覆盖层挂载断言、metacopy 生效断言、pip 包
+  「写入 → 重建 → 仍在 → 镜像里本来没有」闭环断言；`upgrade.sh` 断言首启记录代码指纹；
+- 文档同步：持久化原理（pyenv 专节 / 镜像兜底专节 / 快照与指纹）、编排配置、
+  备份、FAQ、升级迁移、命名约定（§2 落点表、§3 元数据清单）。
+
+---
+
 ## [1.0.0] — 2026-09-14 · 首个公开版本：不可变面板 + 分层持久化
 
 ### 不可变面板：执行入口守卫（面板内更新不生效，库不可能「比代码新」）

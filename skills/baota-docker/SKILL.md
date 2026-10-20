@@ -26,7 +26,9 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 三个最容易搞错的点（细节一律看上面两篇文档，这里不复述）：
 
 - **面板代码 `/www/server/panel` 来自镜像、不持久化**；持久化的只是它的
-  `data / plugin / vhost / ssl / config` 五个子目录（落在 `data/www/server/panel/`）
+  `data / plugin / vhost / ssl / config` 五个子目录（落在 `data/www/server/panel/`）；
+  它的 `pyenv` 走独立 overlay（lower = 镜像 pyenv、upper = 同路径数据层目录）——
+  pip 包持久化、解释器随镜像更新，别再把 `pyenv` 加进 `PANEL_STATE_SUBDIRS`
 - **`/www/server` 走 overlay**（upper 在 `data/.system/www/server`），不进 `data/www` ——
   否则 MySQL 与面板状态的 bind 源会落进 upperdir 内部，形成自引用
 - **可选模块（`vmail` / `dk_project`）不预建**：装了面板里对应模块才出现
@@ -53,23 +55,23 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 5. **判据用标记文件，不用日志文案**。`/run/baota/degraded`、
    `/run/baota/critical`、`/run/baota/panel-isolated` 都是门禁读取的对象，
    改告警文案不能影响门禁。
-5. **持久化层每次写入都不可逆**：新增「每次启动都做的事」时，必须先判断结果是否真的
+6. **持久化层每次写入都不可逆**：新增「每次启动都做的事」时，必须先判断结果是否真的
    需要变化，变了才写（`cmp` / 符号链接检查 / 文件存在性检查）。
-6. **`init.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。
+7. **`init.sh` 只能用 POSIX 语法**（由 busybox sh 执行）。
    函数内「局部变量」用下划线前缀 `_dir` / `_upper` / `_work` —— 不加前缀会覆盖调用方的循环变量。
-7. **清理必须写在产生垃圾的那一层内**。Docker 分层特性下，后续 `RUN` 删前面层的文件不减小体积。
-8. **CI 回写仓库时，`git rebase` 必须在「生成 / 修改任何文件」之前完成**。
+8. **清理必须写在产生垃圾的那一层内**。Docker 分层特性下，后续 `RUN` 删前面层的文件不减小体积。
+9. **CI 回写仓库时，`git rebase` 必须在「生成 / 修改任何文件」之前完成**。
    `.github/reports/report.md` / `README.md` 一旦处于 modified，`git rebase` 会因 dirty tree 中止，
    导致回写步骤整体失败 —— 表现为「日志显示成功但文件没变」。
    正确顺序：checkout → rebase（clean）→ 生成文件 → 注入 → add → commit。
-9. **工作流 job 的 `name` 不能含 `${{ }}` 动态表达式**。Actions 在表达式未求值时
-   会 fallback 成英文 job key（`build` / `verify`），看不出在跑什么。
-   线 / 版本号放**步骤名**里（矩阵值可以），job 名用静态中文。
-10. **`.github/reports/report.md` / `.github/reports/drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
+10. **工作流 job 的 `name` 不能含 `${{ }}` 动态表达式**。Actions 在表达式未求值时
+    会 fallback 成英文 job key（`build` / `verify`），看不出在跑什么。
+    线 / 版本号放**步骤名**里（矩阵值可以），job 名用静态中文。
+11. **`.github/reports/report.md` / `.github/reports/drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
     不要手改 —— 下次巡检运行会被整体覆盖。
-11. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
+12. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
     本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
-12. **面板代码的执行入口只有一个：pyenv 解释器**。`services.sh` 的 `setup_guard`
+13. **面板代码的执行入口只有一个：pyenv 解释器**。`services.sh` 的 `setup_guard`
     把 `pyenv/bin/{python,python3}` 指向 `/baota/shim.sh`，真解释器挪到
     `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。改这块时三条铁律：
     包装必须 **fail-open**、恢复必须 **只覆盖不删除**、exec 真解释器必须用
@@ -80,10 +82,10 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 | 路径 | 作用 |
 |---|---|
 | `image/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
-| `image/build/panel.sh` | 官方脚本安装宝塔 + 防火墙复位 + 清 swap + 账号链路预热 |
-| `image/build/services.sh` | 运行期脚本权限、systemd 复位、删构建脚本 |
-| `image/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay + 业务/面板 bind → 交棒 |
-| `image/scripts/entrypoint.sh` | 阶段 1：版本护栏（含升级前快照）→ 首启初始化 → 启动报告归档 → exec systemd |
+| `image/build/panel.sh` | 官方脚本安装宝塔 + 两处适配补丁（看门狗 comm / panel_start 幂等）+ 防火墙复位 + 清 swap + 账号链路预热 |
+| `image/build/services.sh` | 运行期脚本权限、systemd 复位、版本与持久化骨架、守卫装配、删构建脚本 |
+| `image/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay（含 opt-in ext4 镜像兜底）→ 面板代码隔离 → pyenv 覆盖层 → 业务/面板 bind → 交棒 |
+| `image/scripts/entrypoint.sh` | 阶段 1：版本护栏（版本 + 代码指纹，含升级前快照）→ 首启初始化 → 启动报告归档 → exec systemd |
 | `image/scripts/healthcheck.sh` | 判据：降级标记 / 磁盘水位 / 守卫装配 / 面板版本一致 / 面板端口 |
 | `image/scripts/guard.sh` | 执行入口守卫：代码版本 ≠ 镜像版本就换回镜像副本（可用 rsync，缺则 tar） |
 | `image/scripts/shim.sh` | pyenv 解释器包装：先过守卫，再 exec 真解释器（fail-open） |
@@ -92,12 +94,12 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 | `image/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `image/lines.conf` | ★ 线声明表（各线的脚本地址、探测方式、标签策略、基础镜像） |
 | `image/versions/<主线号>/VERSION` | 各线「已发布」版本（发布流水线回写） |
-| `.github/scripts/check/*.sh` | 发布门禁三套：功能检查（core）/ 只读降级（degrade）/ 版本演进（upgrade） |
+| `.github/scripts/check/*.sh` | 发布门禁四套：功能检查（core）/ 只读降级（degrade）/ 版本演进（upgrade）/ 备份恢复（restore） |
 | `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑回归（含 PHP 扩展编译、二次初始化判定、不可变面板守卫） |
 | `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
 | `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
 | `.github/scripts/report.py` | 把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区 |
-| `.github/workflows/build.yml` | 构建发布：一份流水线跑所有线（矩阵从 lines.conf 生成） |
+| `.github/workflows/build.yml` | 构建发布：一份流水线跑 12/13 所有线（矩阵从 lines.conf 生成；pro 线另有 build-pro.yml） |
 | `.github/workflows/check.yml` | 每日巡检：prep → 各线**并行**验证 → collect 回写 |
 | `.github/workflows/drift.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
 | `.github/reports/report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
@@ -108,12 +110,12 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 ## 常用命令
 
 ```bash
-make build LINE=12_version     # 参数取自 image/lines.conf，Dockerfile 只有一份
-make up LINE=12.0.0            # 起容器
-make logs LINE=12.0.0          # 看日志（首次登录凭据在这里）
-make ps                           # 健康状态
-make health                       # 跑发布前健康检查
-make lint                         # shellcheck + bash -n + YAML（shellcheck 未装会跳过；CI 上 warning 即失败）
+make build LINE=12_version     # 参数取自 image/lines.conf，12/13 主线共用一份 Dockerfile
+make up                        # 起容器
+make logs                      # 看日志（首次登录凭据在这里）
+make ps                        # 健康状态
+make health                    # 跑发布前健康检查
+make lint                      # shellcheck + bash -n + YAML（shellcheck 未装会跳过；CI 上 warning 即失败）
 
 docker exec baota baota-backup            # 备份
 docker exec baota baota-backup --list     # 体积分布 + 磁盘水位
@@ -151,7 +153,7 @@ restart 不消失、销毁重建后即还原为镜像版本。想换面板版本
 - 只验 amd64 是设计如此：arm64 在 QEMU 下 overlay 结论不可信，
   arm64 的真实覆盖由两个构建工作流在原生 ARM runner 上负责
 
-更完整的排障清单见 `references/troubleshooting.md`，
+更完整的排障清单见 `docs/faq.md` 与 `docs/operations.md`，
 架构细节（为什么用 overlay、为什么 index=off、守卫怎么做）见 `docs/persistence.md`。
 
 ## References
