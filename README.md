@@ -318,6 +318,9 @@ Dockerfile 与流水线都只有一份）：
 
 ```yaml
     # 去掉 privileged，改为最小授权；systemd + overlay + 宝塔服务管理都靠这些
+    cap_drop:
+      - ALL             # 必须先行：否则 Docker 默认的 ~14 个 cap（MKNOD / DAC_OVERRIDE /
+                        # NET_RAW…）仍在，缩小的是假象
     cap_add:
       - SYS_ADMIN      # mount overlay / bind、systemd
       - SYS_RESOURCE   # systemd 设置资源上限
@@ -330,6 +333,10 @@ Dockerfile 与流水线都只有一份）：
       - /dev/loop0
 ```
 
+实测（OrbStack 上只能验证能力位，overlay 被其运行时整体禁止，见下方）：`cap_drop: ALL` + 三项 `cap_add` 后
+容器内 `CapEff = 0000000001201000`，恰好只有 `SYS_ADMIN + SYS_RESOURCE + NET_ADMIN` 三位，
+`mknod` 创建设备节点等默认危险操作已被拒；去掉 `cap_drop: ALL` 时会多出 Docker 默认那批 cap，缩小大打折扣。
+
 注意：
 
 - 这**没有消除**核心风险——`SYS_ADMIN` 已是内核级权限，仍等价于很大一部分 privileged；
@@ -337,6 +344,10 @@ Dockerfile 与流水线都只有一份）：
 - loop 镜像兜底（`PERSIST_SYSTEM_IMAGE`）必须额外挂 `/dev/loop*`，否则该模式挂不上。
 - 此路径**未经过本项目的 CI 门禁**（core/degrade/upgrade/restore 都在 privileged 下验证），
   不同宿主机（cgroup v1/v2、Docker 版本、AppArmor 配置）表现可能不一致，出问题需自行排查。
+- ⚠️ **不要拿 OrbStack / 其他 macOS 容器运行时当验证环境**：实测其运行时整体禁止在容器内挂
+  overlayfs（连 `privileged` 都报 `wrong fs type / bad superblock`），systemd 在非特权容器里也起不来；
+  这与「macOS 宿主目录不是 ext4/btrfs/xfs」是同一类硬约束的更彻底版本。最小集只在**真实 Linux 宿主**
+  （飞牛 / Debian / Ubuntu）上才有意义，且仍需你在那上面亲自验证。
 - 真要降到最低风险，更彻底的做法是**把容器放到独立、不存其他敏感数据的宿主机上**，
   而不是在 capability 上微调——隔离边界比权限裁剪更可靠。
 
