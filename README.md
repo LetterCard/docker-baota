@@ -28,6 +28,7 @@
 - [常见操作](#常见操作)
 - [与常见方案的差异](#与常见方案的差异)
 - [限制与风险](#限制与风险)
+- [特权模式（privileged）的取舍与规避](#特权模式privileged的取舍与规避)
 - [健康检查与每日验证](#健康检查与每日验证)
   - [部署后自检（验收）](#部署后自检验收)
 - [文档地图](#文档地图)
@@ -260,10 +261,86 @@ Dockerfile 与流水线都只有一份）：
 以下都是**设计取舍的结果**，不是待修的缺陷。部署前请确认都能接受：
 
 - **面板内「更新」不会生效**。写入落在容器可写层，且执行入口守卫会在代码被执行前换回镜像版本（UI 仍会显示「更新成功」）。升级 / 回退面板请换镜像标签。
-- **不支持 rootless Docker 与无特权的托管容器服务**。overlay 挂载与 systemd 都要求特权模式。
+- **不支持 rootless Docker 与无特权的托管容器服务**。overlay 挂载与 systemd 都要求特权模式；它的取舍、安全影响与规避清单见[特权模式（privileged）的取舍与规避](#特权模式privileged的取舍与规避)。
 - **持久化根不能是网络文件系统**。SMB / NFS / exFAT / NTFS 会「挂载成功但只读」，写入静默失败 —— 这是最危险的失效模式，启动时会被识别为 `critical` 并判 unhealthy。唯一的绕法是 opt-in 的[系统层 ext4 镜像兜底](docs/persistence.md#系统层-ext4-镜像兜底opt-in)：把系统层装进 data 卷里的一个镜像文件，业务层不受影响。
 - **同一份 `data/` 不能被两个容器同时挂载**。挂载时取排他锁，第二个实例会被阻止启动（避免并发写坏数据）；12.x 与 13.x 若指向同一个 `data/` 目录就会触发。
 - **跨架构搬移 `data/` 未经验证**。amd64 与 arm64 各自构建镜像，同一份 `data/` 在两种架构之间迁移不在门禁覆盖范围内。
+
+---
+
+## 特权模式（privileged）的取舍与规避
+
+`docker-compose.yml` 里用了 `privileged: true` 加 `security_opt: [seccomp:unconfined, apparmor:unconfined]`。
+这不是图省事，而是被本方案的三项硬需求共同决定的；下面说清它换来什么、代价是什么、以及怎么把代价压到最低。
+
+### 为什么必须 privileged
+
+| 需求 | 需要的特权 | 不授权会怎样 |
+|---|---|---|
+| 运行期 `mount -t overlay` 接系统目录 | `CAP_SYS_ADMIN` | 持久化层挂不上，写入落到容器可写层、重建即丢 |
+| 把业务/状态子目录 `mount -o bind` 进 `/www` | `CAP_SYS_ADMIN` | 同上 |
+| 以 systemd 作 PID1（停 nginx/MySQL/面板靠它） | `CAP_SYS_ADMIN` + 可写 `/sys/fs/cgroup` + `/run` tmpfs | 起不来或关机超时被强杀 |
+| 宝塔管服务、跑 `iptables`/防火墙 | `CAP_NET_ADMIN` | 面板里装软件、改防火墙失败 |
+| opt-in 的 ext4 镜像兜底（`PERSIST_SYSTEM_IMAGE`）挂 loop 设备 | `/dev/loop-control` + loop 设备节点 | 兜底模式挂不上盘 |
+
+逐项授权能做到，但要把上面这些 capability、设备节点、以及 systemd 依赖的 seccomp/apparmor 放开
+凑齐，几乎等于把 `privileged` 该给的都给了——这也是 compose 直接写 `privileged` 而不是一长串
+`cap_add` 的原因：更短、更不容易漏，且四套 CI 门禁（功能 / 降级 / 升级 / 恢复）都只在 privileged
+下验证过。
+
+### 安全影响
+
+`privileged` 等价于**把宿主机内核交给容器**：它拿到全部 Linux capabilities，能读写所有 `/dev`、
+加载内核模块、改宿主机 iptables、触及宿主网络命名空间。换言之，容器内一旦被攻破
+（来路不明的面板插件、站点里跑的 PHP 代码被利用，或镜像本身不可信），攻击者就约等于拿到了宿主机 root。
+
+所以这一条是**设计取舍，不是缺陷**，前提是「容器跑在可信边界内」。它不适合：
+
+- 多租户 / 共享的托管 Docker 服务（rootless 也不行，见上）；
+- 把 Docker socket 挂进容器的玩法；
+- 把面板、SSH、phpMyAdmin 端口直接暴露到公网。
+
+### 规避风险的清单
+
+1. **只在自己信任的内网 / 单机跑**，最好是独占的 NAS 或虚拟机，不与不可信负载混部。
+2. **端口别曝公网**：SSH（`2222`）非必要注释掉；phpMyAdmin（`888`）默认开放，不用就注释；
+   面板安全入口（随机 8 位）务必保留，别把 `/login` 直曝公网。
+3. **口令走 `.env` 不写进 `docker-compose.yml`**（它会进 Git）；首启凭据改完立即在面板里重设。
+4. **不在面板里装来路不明的插件、跑不可信的站点代码**——特权模式下它们等同宿主 root 权限。
+5. **设 `mem_limit`**：把故障域封在容器内，避免 MySQL 失控拖垮整机（见[编排配置详解](docs/configuration.md#资源上限与规划)）。
+6. **定期 `docker compose ps` 看 STATUS**：持久化降级会直接 `unhealthy`，别等数据静默丢才发现。
+
+### 想缩小攻击面：capability 最小化（备选，未经 CI 验证）
+
+若你接受「非特权化需自行验证、且失去部分能力」的代价，可把 `privileged: true` 换成：
+
+```yaml
+    # 去掉 privileged，改为最小授权；systemd + overlay + 宝塔服务管理都靠这些
+    cap_add:
+      - SYS_ADMIN      # mount overlay / bind、systemd
+      - SYS_RESOURCE   # systemd 设置资源上限
+      - NET_ADMIN      # 宝塔 iptables / 防火墙
+    security_opt:
+      - apparmor:unconfined
+      - seccomp:unconfined
+    devices:
+      - /dev/loop-control   # 仅启用 PERSIST_SYSTEM_IMAGE 兜底时才需要
+      - /dev/loop0
+```
+
+注意：
+
+- 这**没有消除**核心风险——`SYS_ADMIN` 已是内核级权限，仍等价于很大一部分 privileged；
+  它只是不再开放「所有设备 + 所有 capability + 内核模块加载」这一整包。
+- loop 镜像兜底（`PERSIST_SYSTEM_IMAGE`）必须额外挂 `/dev/loop*`，否则该模式挂不上。
+- 此路径**未经过本项目的 CI 门禁**（core/degrade/upgrade/restore 都在 privileged 下验证），
+  不同宿主机（cgroup v1/v2、Docker 版本、AppArmor 配置）表现可能不一致，出问题需自行排查。
+- 真要降到最低风险，更彻底的做法是**把容器放到独立、不存其他敏感数据的宿主机上**，
+  而不是在 capability 上微调——隔离边界比权限裁剪更可靠。
+
+> 结论：**默认保持 `privileged`**（项目支持且 CI 覆盖的路径）；上面的最小化方案仅作为
+> 你已评估过风险、且愿意自行维护时的可选项。两者都不解决「容器被攻破=宿主受威胁」这一根本问题，
+> 那只能靠前面的风险清单与网络隔离来兜底。
 
 ---
 
