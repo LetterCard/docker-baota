@@ -71,7 +71,6 @@ RUN bash /opt/baota/pro/patch_pro_license.sh
 COPY image/scripts/healthcheck.sh  /baota/healthcheck.sh
 COPY image/scripts/common.sh       /baota/common.sh
 COPY image/scripts/backup.sh       /baota/backup.sh
-COPY image/scripts/guard.sh        /baota/guard.sh
 COPY image/scripts/shim.sh         /baota/shim.sh
 
 COPY image/conf/defaults.env       /baota/defaults.env

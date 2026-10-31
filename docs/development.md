@@ -43,8 +43,7 @@ baota-docker/
 │       ├── entrypoint.sh      阶段 1：版本护栏（版本 + 代码指纹）/ 快照（cp -a 或
 │       │                      btrfs 子卷）/ 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
-│       ├── guard.sh           执行入口守卫（版本不一致就换回 /baota/origin 副本）
-│       ├── shim.sh            pyenv 解释器包装（每次执行都先过守卫）
+│       ├── shim.sh            pyenv 解释器包装 + 执行入口守卫（每次执行都先过守卫，版本不一致就换回 /baota/origin 副本）
 │       └── backup.sh          备份工具（软链到 /usr/local/bin/baota-backup）
 │
 ├── docker-compose.yml         编排文件（只挂一个 data 目录）
@@ -71,7 +70,7 @@ baota-docker/
 - **面板代码的执行入口只有一个**：pyenv 解释器。`image/build/services.sh` 的
   `setup_guard` 把 `pyenv/bin/{python,python3}` 指向 `/baota/shim.sh`、
   真解释器挪到 `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。
-  改这块前先读 `image/scripts/guard.sh` 的头部注释：包装必须 fail-open、
+  改这块前先读 `image/scripts/shim.sh` 的头部注释：包装必须 fail-open、
   恢复必须「只覆盖不删除」、执行真解释器必须用 **venv 内的路径**（用解析后的
   `/usr/bin/python3.x` 会丢 venv）
 - **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` /
@@ -176,7 +175,7 @@ baota-docker/
 
 面板代码来自镜像层、不持久化，且**面板内更新不会生效**：
 
-- 面板代码的每一次执行都先过执行入口守卫（`image/scripts/guard.sh`），
+- 面板代码的每一次执行都先过执行入口守卫（`image/scripts/shim.sh`），
   发现代码版本与镜像不一致就用镜像里的副本换回去 —— 不做只读挂载、
   也不跟踪上游脚本名与执行路径，因此不存在「禁用更新补丁」那套维护；
 - 由此得到的性质：面板的 `init_db` 永远由镜像版本代码执行，持久层的库不可能

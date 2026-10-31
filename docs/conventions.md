@@ -189,7 +189,7 @@ skills/     AI 助手技能包，只引用 docs，不复述正文
 | 面板状态 | `data/www/server/panel` 下 bind 的状态（`data plugin vhost ssl config`） |
 | 可选模块 | `data/www` 下**装了才出现**的目录（`vmail`、`dk_project`），不预建 |
 | 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
-| 守卫 / 垫片 | `guard.sh`（执行入口守卫）与 `shim.sh`（pyenv 解释器包装） |
+| 守卫 / 垫片 | `shim.sh`：pyenv 解释器包装，内置执行入口守卫（两职责已合并为一个文件） |
 | 镜像副本 | `/baota/origin`：构建期生成的面板副本（排除 pyenv），守卫用它把代码换回镜像版本 |
 
 ## 8. 变更检查清单

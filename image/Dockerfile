@@ -11,7 +11,7 @@
 #    · 系统层仅持久化 /www/server（overlay，upper 在 data/.system/www/server）；/etc /usr /var 等不持久化
 #    · /www/server/panel 由 init.sh 用镜像绑定盖回：面板代码来自镜像、不落盘
 #    · 业务与面板状态逐子目录 bind（在 data/www 下，与容器内路径同名）
-#    · panel 内「更新」的新代码不会被执行（guard.sh）：面板版本真源 = 镜像
+#    · panel 内「更新」的新代码不会被执行（shim.sh）：面板版本真源 = 镜像
 # ==============================================================================
 
 ARG BASE_IMAGE=debian:12
@@ -71,7 +71,6 @@ RUN bash /opt/baota/build/panel.sh
 COPY image/scripts/healthcheck.sh  /baota/healthcheck.sh
 COPY image/scripts/common.sh       /baota/common.sh
 COPY image/scripts/backup.sh       /baota/backup.sh
-COPY image/scripts/guard.sh        /baota/guard.sh
 COPY image/scripts/shim.sh         /baota/shim.sh
 
 COPY image/conf/defaults.env       /baota/defaults.env

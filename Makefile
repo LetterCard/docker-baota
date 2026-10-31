@@ -162,7 +162,7 @@ version: ## 打印各条线记录的已发布宝塔版本
 lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@echo '--- bash -n ---'
 	@for f in image/build/*.sh image/scripts/entrypoint.sh \
-	          image/scripts/backup.sh image/scripts/guard.sh \
+	          image/scripts/backup.sh \
 	          image/scripts/shim.sh \
 	          .github/scripts/check/*.sh \
 	          .github/scripts/lint/*.sh \

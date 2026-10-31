@@ -87,8 +87,7 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 | `image/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay（含 opt-in ext4 镜像兜底）→ 面板代码隔离 → pyenv 覆盖层 → 业务/面板 bind → 交棒 |
 | `image/scripts/entrypoint.sh` | 阶段 1：版本护栏（版本 + 代码指纹，含升级前快照）→ 首启初始化 → 启动报告归档 → exec systemd |
 | `image/scripts/healthcheck.sh` | 判据：降级标记 / 守卫装配 / 面板版本一致（磁盘水位与端口存活归宝塔监控） |
-| `image/scripts/guard.sh` | 执行入口守卫：代码版本 ≠ 镜像版本就换回镜像副本（可用 rsync，缺则 tar） |
-| `image/scripts/shim.sh` | pyenv 解释器包装：先过守卫，再 exec 真解释器（fail-open） |
+| `image/scripts/shim.sh` | pyenv 解释器包装 + 执行入口守卫：先比对版本、不一致就换回镜像副本，再 exec 真解释器（fail-open） |
 | `image/scripts/backup.sh` | `baota-backup`：全量备份、校验、体积分布 |
 | `image/conf/defaults.env` | ★ 运行期配置真源 |
 | `image/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |

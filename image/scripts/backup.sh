@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# 配置真源：/baota/defaults.env（与 init.sh / entrypoint.sh / guard.sh /
+# 配置真源：/baota/defaults.env（与 init.sh / entrypoint.sh / shim.sh /
 # healthcheck.sh 共用同一份闸门）；log/warn/die 见 /baota/common.sh
 # ------------------------------------------------------------------------------
 LOG_PREFIX='📦 [backup]'

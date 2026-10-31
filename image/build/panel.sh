@@ -164,7 +164,7 @@ PY
 
     _patch_init_one "${PANEL_DIR}/init.sh"
 
-    # 守卫基准副本也要打：guard.sh 用 /baota/origin 做回滚来源，
+    # 守卫基准副本也要打：shim.sh 用 /baota/origin 做回滚来源，
     # 若 origin 里还是未修版，版本比对时会把运行态 init.sh 还原成问题版本。
     # services.sh 在 guard 装配之后才生成 origin，但这里也防一手手工重建 origin。
     local init_origin

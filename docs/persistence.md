@@ -193,7 +193,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
   pyenv/bin/python{,3}  → /baota/shim.sh（符号链接）
 
 运行期（每次面板代码被拉起都会经过）
-  shim.sh → guard.sh → 比较「面板目录里的代码版本」与 /baota/VERSION
+  shim.sh（内置守卫）→ 比较「面板目录里的代码版本」与 /baota/VERSION
       一致            → 直接 exec 真解释器（常态零开销、零写入）
       不一致 / 读不到 → 用 /baota/origin 把代码换回镜像版本，再 exec
 ```

@@ -406,7 +406,7 @@ def main():
 main()
 PY
 
-# 打过的补丁要在 /baota/origin 里同步：guard.sh 用它做回滚来源，
+# 打过的补丁要在 /baota/origin 里同步：shim.sh 用它做回滚来源，
 # 若两边不一致，守卫会把运行态还原成旧版本。
 if [ -d /baota/origin ]; then
     ( cd "${PANEL_DIR}" && find class script -maxdepth 1 -type f \

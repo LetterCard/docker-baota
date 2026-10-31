@@ -2,7 +2,7 @@
 # ==============================================================================
 #  🧰 共享运行期函数（POSIX sh）
 #
-#     init.sh / entrypoint.sh / backup.sh / guard.sh / healthcheck.sh 共同 source，
+#     init.sh / entrypoint.sh / backup.sh / shim.sh / healthcheck.sh 共同 source，
 #     消掉「每个脚本各写一份 defaults.env 闸门 + log/warn/die」的样板重复 ——
 #     抄 6 遍的必然结局是漂移，而漂移的表现是「运行期按旧值算路径」，离原因很远
 #

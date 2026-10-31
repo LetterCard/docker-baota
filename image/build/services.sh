@@ -113,7 +113,7 @@ install_runtime_files() {
 
 # ==============================================================================
 #  4. 执行入口守卫：包装 pyenv 解释器 + 生成镜像代码副本
-#  原理见 guard.sh 头部，这里只做装配：
+#  原理见 shim.sh 头部，这里只做装配：
 #    1) pyenv/bin/python{,3} → /baota/shim.sh（包装器），真解释器挪到 python-real
 #    2) /baota/origin = 面板目录的实体副本（排除 pyenv），作「换回镜像版本」的来源
 #  ★ 不用 cp -al 硬链接：面板目录在更早的构建层，overlayfs 跨层 link 只退化成复制
@@ -124,7 +124,7 @@ install_runtime_files() {
 setup_guard() {
     log '4/5 装配执行入口守卫（解释器包装 + 镜像代码副本）'
 
-    chmod 0755 "${BAOTA_DIR}/guard.sh" "${BAOTA_DIR}/shim.sh"
+    chmod 0755 "${BAOTA_DIR}/shim.sh"
 
     if [ ! -x "${PANEL_DIR}/pyenv/bin/python3" ]; then
         warn "未找到 ${PANEL_DIR}/pyenv/bin/python3，跳过守卫装配（面板按上游默认行为运行）"
