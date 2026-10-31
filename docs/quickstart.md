@@ -12,7 +12,7 @@
 `data/www/` 就是你在容器里看到的 `/www`：站点在 `data/www/wwwroot/`、数据库在
 `data/www/server/data/`、备份在 `data/www/backup/`、面板自己的配置与插件在
 `data/www/server/panel/` —— 找什么按容器里的路径找，你日常要管理的都在这里。
-`data/.system/` 是系统层（etc usr var root opt home srv 的 overlay 上层与项目元数据，
+`data/.system/` 是系统层（www/server 的 overlay 上层与项目元数据，
 隐藏目录：它是相对镜像的改动，一般不用翻）。
 
 ## 其它 Linux 服务器
@@ -31,7 +31,7 @@ docker compose ps             # STATUS 应为 Up (healthy)
 docker exec baota bt status   # 面板 + 任务进程都应在运行
 ```
 
-`healthy` 的判定包含「持久化是否完整」与「磁盘水位」，
+`healthy` 的判定只针对封装自身不变量（持久化降级标记、执行入口守卫、面板版本钉死），
 不是单纯的进程探活，见[编排配置详解](configuration.md#健康检查与日志)。
 
 首次启动生成的面板地址与账号口令打印在启动日志里（`docker compose logs baota`）。

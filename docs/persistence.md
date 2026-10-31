@@ -17,21 +17,20 @@
 | `root` | 1781 | `.pip`、`.cache`、`.config` |
 | `var` | 1092 | 计划任务、日志、dpkg 数据库、systemd 状态 |
 | `etc` | 345 | 系统与服务配置 |
-| `opt` / `home` / `srv` | 0 | 安装时不写，但仍纳入持久化：`opt` 供堡塔 RASP 写日志、`home` 面板会建 `/home/www`、`srv` 是面板危险目录黑名单成员（保留成本为零） |
+| `opt` / `home` / `srv` | 0 | 安装+运行期实测**零写入**（`/home` 仅空目录 `/home/www` 占位）；2026-10-28 实测后已从覆盖集移除，跟镜像走、重建即重置，标准用法零影响 |
 
 **安装后唯一新增的顶层目录是 `/www`**，其余都是往已有目录里加内容。
-没有任何写入落到这 8 个目录之外 —— 这就是持久化目录集合的实测依据：
-`etc usr var root opt home srv` 七个走 overlay，`/www` 走逐子目录 bind（见下）。
+实测写入只落在 `/www` 与系统目录（`/etc` `/usr` `/var` `/root`）内，这是当初「持久化哪些目录」的实测依据；
+**当前默认只持久化 `/www/server` 一个 overlay**（面板组件），`/etc` `/usr` `/var` `/root` 不持久化、随镜像重建。业务与面板状态走 `/www` 逐子目录 bind（见下）。
 
 > ⚠️ 持久化是**两套独立机制**，不要从单一清单反推「某路径存不存在」：
-> - **系统层 overlay**（`PERSIST_SYSTEM_DIRS` = `etc usr var root opt home srv www/server`）：
->   把整个目录盖成 overlay，增量落 `data/.system/<同名>`。`/usr/local` 属于 `/usr`，
->   **走这套**，与下面的 /www 绑定清单毫无关系。
-> - **/www 子目录 bind / overlay**（`WWW_DATA_SUBDIRS` / `PANEL_STATE_SUBDIRS` /
+> - **系统层 overlay**（`PERSIST_SYSTEM_DIRS` = `www/server`）：
+>   把整个 `/www/server` 盖成 overlay，增量落 `data/.system/www/server`；
+>   面板里装的组件与环境库都在它下面，重建 / 换镜像后照样在。
+> - **/www 子目录 bind**（`WWW_DATA_SUBDIRS` / `PANEL_STATE_SUBDIRS` /
 >   `WWW_OPTIONAL_SUBDIRS`）：只覆盖 `/www` 下的面板状态与业务数据。
-> 宝塔环境库（curl / openssl / freetype / libiconv）装在 `/usr/local/*`，归属系统层
-> overlay，**重建 / 换镜像后照样在**；别因为 `PANEL_STATE_SUBDIRS` 里没有 `/usr/local`
-> 就误判「会丢、要重装」—— 那套清单只管面板状态，管不到系统层。
+> - 系统目录 `/etc` `/usr` `/var` `/root` 等**均不持久化**（随镜像重建），
+>   不要指望在里面手动改动能保留。
 
 ---
 
@@ -57,7 +56,7 @@ data/                        （./data:/data）
 │   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库，装了才出现）
 │   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录，装了才出现）
 ├── .system/                  系统层（隐藏：overlay upper 是「相对镜像的改动」）
-│   ├── etc usr var root opt home srv   ← 各目录 overlay upper
+
 │   ├── www/server/    ← /www/server 的 overlay upper（面板里装的组件、
 │   │                     计划任务脚本 /www/server/cron、插件数据 total/btwaf…）
 │   └── .baota/        ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
@@ -70,7 +69,7 @@ data/                        （./data:/data）
 
 > 两棵树按**持久化机制**分，不按路径分：`data/www` 是 bind 直通（内容完整、
 > 宿主可直改），`data/.system` 是 overlay upper（相对镜像的增量）。两棵树内部都
-> 与容器路径同名，所以 `/etc` → `data/.system/etc`、`/www/wwwroot` → `data/www/wwwroot`。
+> 与容器路径同名，所以 `/www/wwwroot` → `data/www/wwwroot`、`/www/server` → `data/.system/www/server`。
 >
 > **为什么 `/www/server` 在 `.system` 而不在 `data/www` 下**：它走 overlay —— 只有
 > overlay 才能「没动过的组件跟新镜像更新、动过的留在 upper」；改成整目录 bind 会让
@@ -82,7 +81,7 @@ data/                        （./data:/data）
 >
 > 系统层收进隐藏目录 `.system`，是为了让顶层只剩 `www` 一个可见目录：它是
 > overlay 的 upper（增量），与「内容完整、可直接读写」的 `data/www` 不是一回事，
-> 不该拿来当文件浏览。找系统配置请按容器路径想：容器 `/etc` → `data/.system/etc`。
+> 不该拿来当文件浏览。注意系统目录（`/etc` `/usr` `/var` `/root`）不持久化、随镜像重建，没有对应的持久化路径；只有 `/www/server` 走 overlay（上层在 `data/.system/www/server`）。
 
 ## 为什么这样分（不可变面板）
 
@@ -113,7 +112,7 @@ data/                        （./data:/data）
 - 面板状态（`data`、`plugin`、`vhost`、`ssl`、`config`）逐个 **bind** 到
   `data/www/server/panel/` 下 —— 与容器内的位置同名
 - 站点 / 备份 / MySQL 逐个 **bind** 到 `data/www/` 下
-- 系统目录 `etc usr var root opt home srv` 各自 overlay，upper 在 `data/.system/<同名>`
+- 系统目录当前只持久化 `/www/server` 一个 overlay（upper 在 `data/.system/www/server`）；原设计的 etc/usr 实测可丢已移除
 
 > ✅ **面板里安装的组件（PHP / nginx / MySQL / redis…）会持久化。**
 > 它们落在 `/www/server/<组件>`，而 `/www/server` 整层是 overlay（upper =
@@ -123,7 +122,7 @@ data/                        （./data:/data）
 >
 > 这里刻意**不**按组件逐个列清单（那要求跟着上游和用户的安装选择走）：
 > 「面板代码」用一条明确的绑定点隔离出去，其余整层持久化，两个集合都不需要维护。
-> `apt install` 装的软件走 `/usr` overlay，本来就保得住。
+> `apt install` 装在 `/usr`（镜像层），重建/换镜像即随镜像刷新，不会留在持久化层。
 
 > ⚠️ 面板代码不持久化，且**面板内更新不会生效**：写入落在容器可写层，而面板
 > 代码的每一次执行都会先过执行入口守卫（见下文），发现版本与镜像不一致就用镜像
@@ -137,7 +136,7 @@ data/                        （./data:/data）
 ### 挂载原理
 
 ```
-/etc usr …      ←overlay→  upper = data/.system/<同名>，work = data/.system/.baota/<同名>.work
+/www/server     ←overlay→  upper = data/.system/www/server，work = data/.system/.baota/www/server.work
 /www/wwwroot     ←bind→    源 = data/www/wwwroot
 /www/backup      ←bind→    源 = data/www/backup
 /www/server/data ←bind→    源 = data/www/server/data
@@ -174,7 +173,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 | 面板配置、插件、站点配置与证书、面板设置 | bind 目录（`data/www/server/panel/`），完全不受影响 |
 | 面板里装的组件（PHP / nginx / MySQL…）、插件数据、计划任务脚本 | overlay upper（`data/.system/www/server`），完全不受影响，**不用重装** |
 | 站点 / MySQL / 备份 | bind 目录（`data/www/`），完全不受影响 |
-| 系统目录 | overlay lower 换新，你改过的部分保留在 upper |
+| `/www/server`（组件） | overlay lower 换新，你改过的部分保留在 upper |
 
 ### 执行入口守卫（不可变面板的兜底）
 
@@ -261,11 +260,10 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 ## 自检护栏
 
 - 任何持久化失败 / 只读降级写 `/run/baota/degraded`；`CRITICAL_DIRS` 里的目录
-  （默认为 `/etc /usr /var /www/wwwroot /www/server/data` 与
+  （默认为 `/www/server /www/wwwroot /www/server/data` 与
   `/www/server/panel/{data,plugin,vhost,ssl,config}`）额外写 `critical`，
   让 healthcheck 把容器判为 unhealthy
 - 降级记录追加到 `data/.system/.baota/boot.log`
-- 磁盘水位实时查持久化根（`data` 卷）
 - 镜像版本记录（`.baota/version`）旁边多一份面板代码指纹（`.baota/digest`）：
   版本号相同但代码变了（同标签镜像被重新构建）也按升级处理，先快照再启动
 
@@ -330,7 +328,7 @@ chown）在 upper 落下**零数据的元数据副本**，而备份打包的是 
 |---|---|---|
 | 持久化层里存什么 | **全量快照**（首启那一刻的完整副本） | **增量**（只有你新建或改过的文件） |
 | 换镜像后 | 视图仍来自旧快照：新镜像在这些目录里**新增或修改的文件永远看不见** | lower 换成新镜像自动合并：没动过的跟镜像走、改过的保留 |
-| 覆盖范围 | 通常只覆盖 `/etc` `/usr` 等几个目录 | 系统目录 + `/www/server` + 业务与面板状态，`/var`（计划任务）、`/root`（SSH 密钥）也保住 |
+| 覆盖范围 | 通常只覆盖 `/etc` `/usr` 等几个目录 | 面板组件 `/www/server`（overlay）+ 业务与面板状态（bind）+ pip 包（pyenv overlay）；`/etc` `/usr` `/var` `/root` 不持久化、随镜像重建 |
 | 首次启动 | `cp -a /usr/*` 全量复制，分钟级、立刻吃掉一份空间 | upper 初始为空，零复制、秒级、按需占用 |
 | Docker 注入的 `/etc/{hosts,resolv.conf,hostname}` | 整目录挂载会盖掉它们，DNS 失效且很难定位 | 本项目在挂载前暂存、挂载后写回（`image/scripts/init.sh`） |
 

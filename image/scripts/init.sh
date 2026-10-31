@@ -18,15 +18,12 @@ set -eu
 
 # ------------------------------------------------------------------------------
 # 配置真源：/baota/defaults.env（镜像自有，不在任何持久化目录内）。
-# ★ 只在这里取配置，脚本里不再写默认值副本 —— 副本必然漂移，而漂移的表现
-#   是「构建期按旧值建目录 / 运行期按旧值算路径」，离原因很远
+# 存在性闸门 + log/warn/die 收敛在 /baota/common.sh，全脚本共用一份 ——
+# 抄 6 遍的必然结局是漂移，而漂移的表现是「运行期按旧值算路径」，离原因很远
 # ------------------------------------------------------------------------------
-if [ ! -f /baota/defaults.env ]; then
-    echo '❌ [init][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整，拒绝启动' >&2
-    exit 1
-fi
-# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
-. /baota/defaults.env
+LOG_PREFIX='⚙️ [init]'
+. /baota/common.sh
+load_defaults || exit 1
 
 # init.sh 自己的运行参数（不属于配置真源）
 STAGE1="${STAGE1:-/baota/entrypoint.sh}"
@@ -39,11 +36,6 @@ PANEL_PIN_DIR="${PANEL_PIN_DIR:-/run/baota/panel}"
 
 # 业务数据与面板状态：逐个 bind 到 data 下（清单见 defaults.env）
 # 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层
-
-# Docker 在 entrypoint 之前把它们 bind mount 到 /etc 下，
-# 稍后 overlay 盖到 /etc 上会遮住这些子挂载，所以先取出内容、稍后写回
-STAGING_DIR=/run/staging
-DOCKER_FILES="hosts resolv.conf hostname"
 
 # 可写性探测文件名（同时用于 lower 与 upper 两侧）
 PROBE=.probe
@@ -70,11 +62,8 @@ CRITICAL="${RUNTIME_DIR}/critical"
 PANEL_ISOLATED="${RUNTIME_DIR}/panel-isolated"
 
 # ------------------------------------------------------------------------------
-# 日志与降级标记
+# 降级标记（log/warn 由 common.sh 提供，前缀见 LOG_PREFIX）
 # ------------------------------------------------------------------------------
-log()  { echo "⚙️ [init] $(date '+%H:%M:%S') - $*"; }
-warn() { echo "⚠️ [init][WARN] $(date '+%H:%M:%S') - $*" >&2; }
-
 mark_degraded() {
     mkdir -p "${RUNTIME_DIR}" 2> /dev/null || return 0
     printf '%s\n' "$1" >> "${DEGRADED}" 2> /dev/null || true
@@ -92,6 +81,18 @@ is_critical() {
         *" $1 "*) return 0 ;;
         *)        return 1 ;;
     esac
+}
+
+# 挂载成功 ≠ 可写（virtiofs / NFS / 9p 会降级只读）：实测一次写入，
+# 成功则在 upper 看到探测文件。返回 0 = 可写，1 = 只读。
+# $1 = 挂载点（写探测文件处），$2 = upperdir（应出现探测文件处）
+probe_writable() {
+    if ( exec 2>/dev/null; : > "$1/${PROBE}" ) && [ -e "$2/${PROBE}" ]; then
+        rm -f "$1/${PROBE}"
+        return 0
+    fi
+    rm -f "$1/${PROBE}" 2> /dev/null || true
+    return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -127,7 +128,9 @@ print_mount_tree() {
     if [ -f "${RUNTIME_DIR}/.seeded" ]; then
         _seeded_list=$(cat "${RUNTIME_DIR}/.seeded" 2> /dev/null | tr '\n' ' ')
     fi
-    # _dev _mp _fstype _opts …：overlay 看 upperdir，bind 看源路径
+    # _dev _mp _fstype _opts：overlay 看 upperdir，bind 看源路径。
+    # 末尾 _f _p 是**故意留的占位** —— 吸掉 /proc/mounts 的第 5、6 列
+    # （dump / fsck 顺序），去掉会让 _opts 连带吸进这两个字段
     while read -r _dev _mp _fstype _opts _f _p; do
         case "${_fstype}" in
             overlay)
@@ -160,7 +163,7 @@ print_mount_tree() {
     _emit_group "├─ 系统层  ${PERSIST_SYSTEM_ROOT}" "${_sys}" "│   "
     _emit_group "├─ 数据层  ${PERSIST_DATA_ROOT}/www" "${_www}" "│   "
     if [ "${_pyenv}" = 1 ]; then
-        echo "├─ pyenv 覆盖层  ${PANEL_STATE_ROOT}/pyenv（pip 包持久化，解释器随镜像）"
+        echo "├─ 覆盖层  ${PANEL_STATE_ROOT}/pyenv（pip 包持久化，解释器随镜像）"
     fi
     _emit_group "└─ 面板状态  ${PERSIST_DATA_ROOT}/www/server/panel" "${_panel}" "    " "${_seeded_list}"
     if [ -e "${PANEL_ISOLATED}" ]; then
@@ -204,10 +207,13 @@ attach_system_image() {
     # 通常没有 loop 设备，那条路用不了本兜底）
     # 上一个容器异常退出时 loop 设备可能没释放：先解掉**本镜像名下**的旧绑定再挂，
     # 否则每重启一次就漏一个 loop 设备（只动本文件的绑定，不碰宿主机其它 loop）
-    for _old in $(losetup -j "${_img}" 2> /dev/null || true); do
+    # BusyBox losetup 无 -j；改用 -a 解析（util-linux 同样兼容）
+    for _old in $(losetup -a 2> /dev/null | grep -F "${_img}" | cut -d: -f1); do
         losetup -d "${_old}" 2> /dev/null || true
     done
-    _loop=$(losetup -f --show "${_img}" 2> /dev/null || true)
+    # BusyBox 内建 losetup 不支持 util-linux 的 --show，改用两步法（util-linux 同样兼容）
+    _loop=$(losetup -f 2> /dev/null || true)
+    [ -n "${_loop}" ] && losetup "${_loop}" "${_img}" >/dev/null 2>&1 || _loop=""
     [ -n "${_loop}" ] || die_image "无法把 ${_img} 绑定到 loop 设备（losetup 缺失或无空闲 loop 设备）"
 
     if [ "${_fresh}" = 1 ]; then
@@ -273,11 +279,10 @@ _lock_layer() {
     # 进程退出）；拿不到 → flock 立即非零退出。通过 kill -0 观察其生死来判定。
     /usr/bin/flock -n "${_lock}" -c 'exec sleep infinity' &
     _holder=$!
-    _tries=0
-    while kill -0 "${_holder}" 2> /dev/null && [ "${_tries}" -lt 3 ]; do
-        _tries=$((_tries + 1))
-        sleep 1
-    done
+    # flock -n 是**立刻**返回（抢到 / 失败），所以只需等它表态的短暂稳定期。
+    # ★ 不能把「holder 还活着」当成继续等的理由 —— 那样每次成功启动
+    #   都会固定多等 3 秒（原写法正是如此，判据写反了）
+    sleep 1
     if ! kill -0 "${_holder}" 2> /dev/null; then
         wait "${_holder}" 2> /dev/null || true
         _owner=$(cat "${_lock}" 2> /dev/null || echo '未知')
@@ -308,7 +313,7 @@ acquire_lock() {
 
 # ==============================================================================
 #  1. overlay 分层持久化（仅系统层）
-#    /etc /usr /var … ←overlay→  upper = data/.system/<同名>；lowerdir 随镜像更新
+#   系统层只持久化 /www/server 一个目录：←overlay→  upper = data/.system/www/server；
 #  ★ 面板（/www）不再走 overlay：代码由镜像层直接提供、不持久化，
 #    只有业务与状态子目录走 bind（见 mount_www_layer）。
 #  ★ index=off 是必须的，不是优化（同 upper 换 lower 的升级语义需要它）
@@ -344,8 +349,7 @@ mount_persist() {
     fi
 
     # 挂载成功 ≠ 可写（virtiofs / NFS / 9p 会降级只读），实测写入
-    if ( exec 2> /dev/null; : > "${_lower}/${PROBE}" ) && [ -e "${_upper}/${PROBE}" ]; then
-        rm -f "${_lower}/${PROBE}"
+    if probe_writable "${_lower}" "${_upper}"; then
         return 0
     fi
 
@@ -448,28 +452,26 @@ seed_panel_state() {
 
 # 业务与面板状态的统一入口。失败记 degraded，关键目录额外记 critical
 mount_www_layer() {
-    _sub=''
+    # 注意：WWW_DATA_SUBDIRS 直接 bind，不像 PANEL_STATE_SUBDIRS 那样先从镜像 seed。
+    # 因此这些目录在镜像内必须为空（MySQL 等由容器首启初始化），否则首启会被空持久化源遮住镜像内容。
     for _sub in ${WWW_DATA_SUBDIRS}; do
         [ -n "${_sub}" ] || continue
         if ! bind_subdir "${PERSIST_DATA_ROOT}/www/${_sub}" "/www/${_sub}"; then
             mark_degraded "/www/${_sub}: 业务目录绑定失败"
             if is_critical "/www/${_sub}"; then
                 mark_critical "/www/${_sub}: 业务目录未持久化"
+                _failed=1
             fi
         fi
     done
 
     for _sub in ${PANEL_STATE_SUBDIRS}; do
         [ -n "${_sub}" ] || continue
-        # pyenv 有专属覆盖层（mount_pyenv_overlay）：它既不是纯状态、也不是纯代码，
-        # 走 bind 会让「pip 包持久化」与「解释器随镜像更新」二选一
-        case "${_sub}" in
-            pyenv) continue ;;
-        esac
         if ! seed_panel_state "${_sub}"; then
             mark_degraded "/www/server/panel/${_sub}: 面板状态绑定失败"
             if is_critical "/www/server/panel/${_sub}"; then
                 mark_critical "/www/server/panel/${_sub}: 面板状态未持久化"
+                _failed=1
             fi
         fi
     done
@@ -531,8 +533,7 @@ mount_pyenv_overlay() {
     fi
 
     # 挂载成功 ≠ 可写：实测一次（与 mount_persist 同一套判据）
-    if ( exec 2> /dev/null; : > "${_target}/${PROBE}" ) && [ -e "${_upper}/${PROBE}" ]; then
-        rm -f "${_target}/${PROBE}"
+    if probe_writable "${_target}" "${_upper}"; then
         log "pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新"
         return 0
     fi
@@ -559,16 +560,7 @@ main() {
     mkdir -p "${RUNTIME_DIR}" 2> /dev/null || true
     : > "${RUNTIME_DIR}/.seeded" 2> /dev/null || true
 
-    # ---- 1. 暂存 Docker 动态注入的文件（/etc 即将被 overlay 盖住）----
-    rm -rf "${STAGING_DIR}"
-    mkdir -p "${STAGING_DIR}"
-    for _f in ${DOCKER_FILES}; do
-        if [ -e "/etc/${_f}" ]; then
-            cp -f "/etc/${_f}" "${STAGING_DIR}/${_f}"
-        fi
-    done
-
-    # ---- 2. 系统层 overlay 持久化 ----
+    # ---- 1. 系统层 overlay 持久化 ----
     #     /www/server 也在这一层（组件、计划任务脚本、插件数据都在它下面），
     #     但面板代码必须先钉在 /run 上、挂完 overlay 再 bind 回去 —— 见下面
     _failed=0
@@ -630,17 +622,7 @@ main() {
         warn '存在未持久化的目录，容器仍会启动，但销毁后这些目录的数据会丢失'
     fi
 
-    # ---- 4. 还原 Docker 动态文件 ----
-    for _f in ${DOCKER_FILES}; do
-        if [ -f "${STAGING_DIR}/${_f}" ]; then
-            cp -f "${STAGING_DIR}/${_f}" "/etc/${_f}" \
-                || warn "无法写回 /etc/${_f}，容器 DNS / 主机名解析可能异常"
-            chmod 0644 "/etc/${_f}" 2> /dev/null || true
-        fi
-    done
-    rm -rf "${STAGING_DIR}"
-
-    # ---- 5. 交给阶段 1 ----
+    # ---- 4. 交给阶段 1 ----
     if [ -f "${STAGE1}" ] && [ -x /bin/bash ]; then
         exec /bin/bash "${STAGE1}" "$@"
     fi

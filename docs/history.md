@@ -50,7 +50,7 @@ data/                        （./data:/data）
 │   └── server/data/   ↔ /www/server/data（MySQL）
 ├── system/                   系统层
 │   ├── panel/         /www 面板 overlay upper（server/panel、wwwlogs 增量）
-│   ├── etc usr var root opt home srv
+│   ├── etc usr
 │   └── .baota/
 └── .baota/
 ```
@@ -75,7 +75,7 @@ data/                        （./data:/data）
   （阻断 / 阻断 / 仅检测）、3 条已知代码级旁路的触发条件、可选的网络层拦截配方
   （HTTP 路径精准匹配，不误伤插件市场；HTTPS 旁路靠版本一致性检测兜底）
 - **README / docs/quickstart.md 补边界说明与「已知限制」**：版本一致性告警是检测
-  而非阻断，处理方式为 `make reset-panel`
+  而非阻断，处理方式为 `make reset-system`
 - **`baota-backup` 备份工具**（`shared/scripts/backup.sh`，软链到
   `/usr/local/bin/baota-backup`）。在容器里 `docker exec baota baota-backup` 即可，
   替你绕开手工 tar 的三个坑：
@@ -92,7 +92,7 @@ data/                        （./data:/data）
   增量模式之后只传变化部分。用 `-aAX` 保留权限、ACL 与扩展属性，
   与全量打包的 `--xattrs` 等价；带 `--delete`，因此加了三重防误删护栏
   （拒绝目标是 `/`、持久化层自身、或不像本工具产物的非空目录）
-- **`make reset-system CONFIRM=yes`**：重置系统层（`etc usr var root opt home srv`）
+- **`make reset-system CONFIRM=yes`**：重置系统层（`etc usr`）
   回到当前镜像的状态，数据层（面板 / 站点 / 数据库 / 备份）完全不受影响。
   这是分层设计最大的红利，也是应对「系统层被搞坏 / upper 膨胀」的终极手段
 - **挂载与降级场景的 CI 门禁**（`.github/scripts/check/mounts.sh`，
@@ -102,7 +102,7 @@ data/                        （./data:/data）
 - **磁盘水位阈值可配置**：`DISK_MIN_AVAIL_MB`（默认 1024）与
   `DISK_MAX_USED_PCT`（默认 95）进入 `defaults.env`，
   几 TB 的大盘上可以把告警线调大（例如 10240 = 10GB）
-- **`make reset-panel CONFIRM=yes`**：面板代码被「面板内更新」污染后的一键修复
+- **`make reset-system CONFIRM=yes`**：面板代码被「面板内更新」污染后的一键修复
   （此前 `audit_panel_version` 只告警、没有修复手段）。只重置面板代码，
   保留 `panel/data`（配置与数据库）与 `panel/pyenv`（可选 `RESET_PYENV=yes` 一并重置）；
   已装插件需从软件商店重装。原理：容器停止后删掉持久化层里被改动的文件，

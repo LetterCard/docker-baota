@@ -94,12 +94,11 @@ services:
       # - "20-21:20-21"     # FTP 主动+被动
       # - "39000-40000:39000-40000"
 
-    # 健康检查判据在镜像内 /baota/healthcheck.sh（五段）：
+    # 健康检查判据在镜像内 /baota/healthcheck.sh（三段）：
     #   1) /run/baota/critical 不存在（持久化失败/只读降级时 init.sh 写入，compose ps 直接可见）
-    #   2) /data 与 /data/.system 磁盘水位（可用<1GB 或已用≥95% → unhealthy，满盘前预警）
-    #   3) pyenv/bin/python3 → /baota/shim.sh（执行入口守卫在位）
-    #   4) 面板代码版本 == 镜像版本（点过「更新」而守卫没兜住时立刻可见）
-    #   5) 面板端口可访问（从 port.pl 现读，http 失败再试 https）
+    #   2) pyenv/bin/python3 → /baota/shim.sh（执行入口守卫在位）
+    #   3) 面板代码版本 == 镜像版本（点过「更新」而守卫没兜住时立刻可见）
+    # （磁盘水位与面板端口存活由宝塔内置监控负责，本检查只守封装自身不变量）
     # 探活命令绝不能出现面板进程名，否则被 bt 脚本 ps|grep 误判「面板已运行」而跳过启动；
     # 调整判据改脚本（可单独执行测试），compose 不动。
     healthcheck:

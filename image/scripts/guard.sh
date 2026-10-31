@@ -15,37 +15,36 @@
 set -u
 set -o pipefail
 
-log() { echo "🛡️ [guard] $*" >&2; }
+# ------------------------------------------------------------------------------
+# 配置真源：/baota/defaults.env（与 init / entrypoint / backup / healthcheck
+# 共用同一份闸门）；log/warn/die 见 /baota/common.sh。
+# ★ 守卫 fail-open：真源缺失时跳过守卫而非拒绝启动（红线见文件头）
+# ------------------------------------------------------------------------------
+LOG_PREFIX='🛡️ [guard]'
+. /baota/common.sh
+load_defaults || { log '缺少配置真源 /baota/defaults.env，无法确定排除项，跳过守卫'; exit 0; }
+
+# ★ 覆盖 common.sh 的 log：守卫由 shim 在每次 python 执行前调用，
+#   日志必须走 stderr —— 写 stdout 会混进面板自身的标准输出
+log() { echo "${LOG_PREFIX} $*" >&2; }
 
 PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 PANEL_ORIGIN_DIR=${PANEL_ORIGIN_DIR:-/baota/origin}
 IMAGE_VERSION_FILE=${IMAGE_VERSION_FILE:-/baota/VERSION}
 LOCK_FILE=${LOCK_FILE:-/run/baota/guard.lock}
 
-# 配置真源：/baota/defaults.env（与 init/entrypoint/backup/healthcheck 共用同一份）。
-# 排除项直接来自 PANEL_STATE_SUBDIRS —— 谁在持久化什么，只有一处定义
-if [ ! -f /baota/defaults.env ]; then
-    log '缺少配置真源 /baota/defaults.env，无法确定排除项，跳过守卫'
-    exit 0
-fi
-# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
-. /baota/defaults.env
 if [ -z "${PANEL_STATE_SUBDIRS:-}" ]; then
     log 'PANEL_STATE_SUBDIRS 为空，无法确定排除项，跳过守卫'
     exit 0
 fi
+# 排除项直接来自 PANEL_STATE_SUBDIRS —— 谁在持久化什么，只有一处定义
 EXCLUDES=${EXCLUDES:-"${PANEL_STATE_SUBDIRS} pyenv"}
-
-# 面板版本号的真源：面板自己也是从这里读的（class/common.py 的 g.version）
-read_version() {
-    sed -n "s/.*g\.version *= *'\([0-9][0-9.]*\)'.*/\1/p" "$1" 2> /dev/null | head -n1
-}
 
 # 镜像版本的判定基准优先取**副本里的代码版本**：副本就是镜像那份面板代码，
 # 两边天然一致；本地手工构建时 /baota/VERSION 可能是 dev/unknown，拿它比较会失真
 img_ver=''
 if [ -d "${PANEL_ORIGIN_DIR}" ]; then
-    img_ver=$(read_version "${PANEL_ORIGIN_DIR}/class/common.py")
+    img_ver=$(panel_version "${PANEL_ORIGIN_DIR}/class/common.py")
 fi
 [ -n "${img_ver}" ] || img_ver=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null | tr -d '[:space:]' || true)
 
@@ -56,7 +55,7 @@ case "${img_ver}" in
 esac
 [ -d "${PANEL_ORIGIN_DIR}" ] || { log "镜像代码副本不存在（${PANEL_ORIGIN_DIR}），跳过守卫"; exit 0; }
 
-cur_ver=$(read_version "${PANEL_DIR}/class/common.py")
+cur_ver=$(panel_version "${PANEL_DIR}/class/common.py")
 [ "${cur_ver}" = "${img_ver}" ] && exit 0
 
 # 面板启动时会同时拉起多个 python 进程（init_db / check_db / 面板 / 任务），
@@ -70,7 +69,7 @@ if command -v flock > /dev/null 2>&1; then
         flock -w 60 9 2> /dev/null || true
     fi
     # 等锁期间别人可能已经恢复好了，重新判断一次
-    cur_ver=$(read_version "${PANEL_DIR}/class/common.py")
+    cur_ver=$(panel_version "${PANEL_DIR}/class/common.py")
     [ "${cur_ver}" = "${img_ver}" ] && exit 0
 fi
 
@@ -98,7 +97,7 @@ else
     rc=$?
 fi
 
-after=$(read_version "${PANEL_DIR}/class/common.py")
+after=$(panel_version "${PANEL_DIR}/class/common.py")
 if [ "${rc}" -eq 0 ] && [ "${after}" = "${img_ver}" ]; then
     log "已恢复：${cur_ver:-未知} -> ${after}（排除：${EXCLUDES}）"
 else

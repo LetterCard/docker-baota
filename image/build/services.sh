@@ -23,20 +23,16 @@ set -euxo pipefail
 BAOTA_DIR=/baota
 
 # 面板安装路径（官方安装脚本固定在 /www/server/panel，全项目同此约定）
-PANEL_DIR=/www/server/panel
+PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 
-# ---- 配置真源：/baota/defaults.env（构建期已由 Dockerfile COPY 到位）----
-# 构建期也从这里取值，不再抄一份默认值：「真源改了、兜底没改」会让镜像里凭空
-# 建出 data/.system/www 空目录（用户会以为站点数据在那）
-if [ ! -f "${BAOTA_DIR}/defaults.env" ]; then
-    echo '❌ [build][ERROR] 缺少运行期配置真源 /baota/defaults.env，构建中止' >&2
-    exit 1
-fi
-# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
-. "${BAOTA_DIR}/defaults.env"
-
-log()  { echo "🔨 [build] $*"; }
-warn() { echo "⚠️ [build][WARN] $*" >&2; }
+# ------------------------------------------------------------------------------
+# 配置真源：/baota/defaults.env（与运行期脚本共用同一份闸门）；
+# log/warn 见 /baota/common.sh。构建期也从这里取值，不再抄一份默认值：
+# 「真源改了、兜底没改」会让镜像里凭空建出 data/.system/www 空目录
+# ------------------------------------------------------------------------------
+LOG_PREFIX='🔨 [build]'
+. /baota/common.sh
+load_defaults || exit 1
 
 # ==============================================================================
 #  1. 运行期脚本权限

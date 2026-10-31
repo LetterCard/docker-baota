@@ -66,7 +66,7 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 它替你绕开手工 tar 的三个坑：
 
 1. **自动排除** `.baota`、`www/backup/auto`、`www/backup/manual`、`www/backup/database`、
-   `www/backup/rsync`、`.system/var/log/journal` —— 漏掉 `auto` 会把上一次的升级快照
+   `www/backup/rsync`、`.system/var/log/journal`（历史残留排除项，当前为 no-op：journal 在容器可写层、不在 data/ 下）—— 漏掉 `auto` 会把上一次的升级快照
    打进本次备份，体积逐次翻倍（实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）；
    journal 目录是打包期间写入最活跃的地方（`file changed as we read it` 几乎都出自它），
    且由 systemd 自行管理、零恢复价值
@@ -90,7 +90,7 @@ docker compose down
 #     下面的 --exclude='www/backup/manual' 就匹配不上了（排除静默失效）。把输出包放在
 #     data/ 里时 tar 还会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
 #     与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
-#    .system 不能漏：面板账号、apt 装的软件、面板里装的组件都在里面
+#    .system 不能漏：面板里装的组件（PHP / nginx / MySQL…）的 overlay 上层都在里面
 #   （面板状态已归位在 www/server/panel 下，跟着 www 一起进包，不用单列）
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
@@ -112,7 +112,7 @@ docker compose up -d
   排除后启动时自动重建
 - `--exclude='www/backup/*'`：升级快照、本工具产物、面板备份、rsync 同步目标，
   都在 `data/www/backup/` 下，**必须排除**，否则自包含、体积逐次翻倍
-- `--exclude='.system/var/log/journal'`：journald 运行时日志，打包期间写得最凶
+- `--exclude='.system/var/log/journal'`：journald 运行时日志（历史残留排除项，当前 no-op：journal 在容器可写层、不在 data/ 下），打包期间写得最凶
   （热备份的「file changed as we read it」几乎都出自它），恢复价值为零
 - 站点多、数据库大时，耗时主要花在 `data/www/server/data`（MySQL 数据目录），属正常
 - 想看体积分布：`docker exec baota baota-backup --list`

@@ -69,6 +69,7 @@ RUN bash /opt/baota/pro/patch_pro_license.sh
 # 运行期脚本一律放 /baota（rootfs 根部，不属于任何持久化目录）：
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖
 COPY image/scripts/healthcheck.sh  /baota/healthcheck.sh
+COPY image/scripts/common.sh       /baota/common.sh
 COPY image/scripts/backup.sh       /baota/backup.sh
 COPY image/scripts/guard.sh        /baota/guard.sh
 COPY image/scripts/shim.sh         /baota/shim.sh

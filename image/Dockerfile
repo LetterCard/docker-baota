@@ -8,7 +8,7 @@
 #  构建上下文是仓库根：docker build -f image/Dockerfile --build-arg INSTALL_URL=... .
 #
 #  持久化与不可变面板（原理见 docs/persistence.md）：
-#    · /etc /usr /var /root /opt /home /srv 与 /www/server 各自 overlay
+#    · 系统层仅持久化 /www/server（overlay，upper 在 data/.system/www/server）；/etc /usr /var 等不持久化
 #    · /www/server/panel 由 init.sh 用镜像绑定盖回：面板代码来自镜像、不落盘
 #    · 业务与面板状态逐子目录 bind（在 data/www 下，与容器内路径同名）
 #    · panel 内「更新」的新代码不会被执行（guard.sh）：面板版本真源 = 镜像
@@ -69,6 +69,7 @@ RUN bash /opt/baota/build/panel.sh
 # 运行期脚本一律放 /baota（rootfs 根部，不属于任何持久化目录）：
 # 永远跟随当前镜像，不会被用户数据屏蔽，也不会被备份还原覆盖
 COPY image/scripts/healthcheck.sh  /baota/healthcheck.sh
+COPY image/scripts/common.sh       /baota/common.sh
 COPY image/scripts/backup.sh       /baota/backup.sh
 COPY image/scripts/guard.sh        /baota/guard.sh
 COPY image/scripts/shim.sh         /baota/shim.sh

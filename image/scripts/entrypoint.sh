@@ -14,22 +14,18 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# 配置真源：/baota/defaults.env（与 init.sh 共用同一份）。
-# ★ 只在这里取配置：脚本里不再写默认值副本（副本会漂移，改真源的人不会想到
-#   还要改另外几个文件）。真源缺失说明镜像不完整，直接拒绝启动
+# 配置真源：/baota/defaults.env（与 init.sh / backup.sh / guard.sh /
+# healthcheck.sh 共用同一份闸门）；log/warn/die 见 /baota/common.sh
 # ------------------------------------------------------------------------------
-if [ ! -f /baota/defaults.env ]; then
-    echo '❌ [entrypoint][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整，拒绝启动' >&2
-    exit 1
-fi
-# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
-. /baota/defaults.env
+LOG_PREFIX='🚀 [entrypoint]'
+. /baota/common.sh
+load_defaults || exit 1
 
-PANEL_DIR=/www/server/panel
+PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
 # 镜像里的面板代码副本（构建期生成，排除 pyenv）：代码指纹与守卫都从它取，
 # 保证「指纹」与「守卫换回去的那份」是同一份代码
-PANEL_ORIGIN_DIR=/baota/origin
+PANEL_ORIGIN_DIR=${PANEL_ORIGIN_DIR:-/baota/origin}
 
 # 首次启动标记。它在 /www 持久化层里，所以「首次」= 这份 /data 第一次被使用
 FIRST_BOOT_MARKER="${PANEL_DIR}/data/.initialized"
@@ -41,7 +37,7 @@ BOOT_LOG_FILE="${STATE_DIR}/${META_BOOT_FILE}"
 BOOT_LOG_MAX_LINES=200
 
 # 镜像自有的版本信息（/baota 不在任何持久化目录内，永远跟随当前镜像）
-IMAGE_VERSION_FILE=/baota/VERSION
+IMAGE_VERSION_FILE=${IMAGE_VERSION_FILE:-/baota/VERSION}
 
 # 启动期降级标记（由 init.sh 写入 /run，tmpfs，重启即失效）
 RUNTIME_DIR=/run/baota
@@ -52,10 +48,6 @@ CRITICAL="${RUNTIME_DIR}/critical"
 NEW_PANEL_USER=''
 NEW_PANEL_PASSWORD=''
 NEW_ROOT_PASSWORD=''
-
-log()  { echo "🚀 [entrypoint] $(date '+%H:%M:%S') - $*"; }
-warn() { echo "⚠️ [entrypoint][WARN] $(date '+%H:%M:%S') - $*" >&2; }
-die()  { echo "❌ [entrypoint][ERROR] $(date '+%H:%M:%S') - $*" >&2; exit 1; }
 
 # 生成 2N 位十六进制随机串。
 # 不用 `tr -dc ... | head -c N`：head 提前关闭管道会触发 SIGPIPE，
@@ -82,7 +74,7 @@ check_panel_files() {
     ls ${PANEL_DIR}/BT-P* > /dev/null 2>&1 \
         || die "找不到面板主程序 ${PANEL_DIR}/BT-P*，镜像可能不完整；面板代码来自镜像层（不持久化），请重新拉取镜像"
     [ -x "${PANEL_PY_BIN}" ] \
-        || die "找不到面板 Python 运行环境 ${PANEL_PY_BIN}；若已把 pyenv 加入 PANEL_STATE_SUBDIRS，请检查 ${PANEL_STATE_ROOT}/pyenv"
+        || die "找不到面板 Python 运行环境 ${PANEL_PY_BIN}；pyenv 由独立 overlay 提供（见 mount_pyenv_overlay），请检查 ${PANEL_STATE_ROOT}/pyenv 是否挂载成功"
 }
 
 # ==============================================================================
@@ -103,8 +95,8 @@ prepare_runtime_dirs() {
     mkdir -p /run/lock /run/sshd /run/dbus "${RUNTIME_DIR}"
     rm -f /var/lib/systemd/random-seed 2> /dev/null || true
 
-    # /var 已被持久化，这两个必须回到 tmpfs 化的 /run，
-    # 否则 systemd 会读到上一次运行的 pid / socket 残留而起不来
+    # /var 不持久化（已移出系统层覆盖集），但 /var/run、/var/lock 仍需指向
+    # tmpfs 的 /run，否则 systemd 会读到上一次运行的 pid / socket 残留而起不来
     if [ ! -L /var/run ]; then
         rm -rf /var/run
         ln -s /run /var/run
@@ -115,7 +107,7 @@ prepare_runtime_dirs() {
     fi
     rm -rf /var/tmp/* 2> /dev/null || true
 
-    # journald：/var/log/journal 在持久化层里，日志可跨重启保留
+    # journald：/var/log/journal 在容器可写层，restart 保留、recreate 不保留（非持久化层）
     mkdir -p /var/log/journal
 }
 
@@ -151,7 +143,7 @@ refresh_consistency() {
 #  两者都一致则零写入；任一个变化（升高 / 降低 / 同版本号镜像被重新构建）都先
 #  快照再启动 —— 降级只告警不阻断（出故障要先能起来）。
 #  快照在此刻做是有意的：systemd 尚未拉起面板与数据库，数据静止、天然一致。
-#  ★ 只快照 /www/server/panel/data：站点 / MySQL / 备份都是 bind 目录，换镜像
+#  ★ 只快照 ${PANEL_STATE_ROOT}/data：站点 / MySQL / 备份都是 bind 目录，换镜像
 #    动不到；唯一「对不上」的是新版代码 + 旧版 SQLite。推导见 docs/persistence.md
 # ==============================================================================
 prune_snapshots() {
@@ -166,13 +158,17 @@ prune_snapshots() {
     ls -1td "${dir}"/baota-* 2> /dev/null | tail -n "$((n - keep))" | while read -r f; do
         # btrfs 只读子卷删不掉（rm -rf 报 Read-only file system），必须用
         # subvolume delete；判据是 inode 256（子卷根的固定 inode）
-        if [ "$(stat -c %i "${f}" 2> /dev/null || echo 0)" = '256' ] \
-           && command -v btrfs > /dev/null 2>&1 \
-           && btrfs subvolume delete "${f}" > /dev/null 2>&1; then
-            log "已清理过期快照（btrfs 子卷）：$(basename "${f}")"
+        _is_subvol=0
+        [ "$(stat -c %i "${f}" 2> /dev/null || echo 0)" = '256' ] && _is_subvol=1
+        if [ "${_is_subvol}" = 1 ]; then
+            # 只读 btrfs 子卷不能用 rm -rf 删（会静默失败），必须用 btrfs subvolume delete
+            if command -v btrfs > /dev/null 2>&1 && btrfs subvolume delete "${f}" > /dev/null 2>&1; then
+                log "已清理过期快照（btrfs 子卷）：$(basename "${f}")"
+            else
+                warn "快照 $(basename "${f}") 是 btrfs 只读子卷但无法删除（缺 btrfs 命令或删除失败），跳过以避免误报已清理"
+            fi
         else
-            rm -rf "${f}"
-            log "已清理过期快照：$(basename "${f}")"
+            rm -rf "${f}" && log "已清理过期快照：$(basename "${f}")"
         fi
     done || true
 }
@@ -181,13 +177,18 @@ prune_snapshots() {
 # （inode 256）才用只读子卷快照 —— O(1)，与目录大小无关；其余情况 cp -a。
 # 子卷是一次性宿主机动作（btrfs subvolume create），见 docs/persistence.md
 snapshot_backend() {
-    case "${AUTO_SNAPSHOT_MODE}" in
-        copy) echo copy; return 0 ;;
-    esac
+    local mode="${AUTO_SNAPSHOT_MODE:-auto}"
+    [ "${mode}" = 'copy' ] && { echo copy; return 0; }
+    # btrfs 模式但宿主不满足时，按 defaults.env 的承诺告警并回退 cp -a（快照失败不阻断启动）
+    if [ "${mode}" = 'btrfs' ] && ! command -v btrfs > /dev/null 2>&1; then
+        warn "AUTO_SNAPSHOT_MODE=btrfs 但宿主无 btrfs 命令，回退 cp -a"
+    fi
+    [ "${mode}" != 'btrfs' ] && [ "${mode}" != 'auto' ] \
+        && warn "AUTO_SNAPSHOT_MODE=${mode} 非法，按 auto 处理"
     command -v btrfs > /dev/null 2>&1 || { echo copy; return 0; }
-    [ "$(stat -f -c %T /www/server/panel/data 2> /dev/null || true)" = 'btrfs' ] \
+    [ "$(stat -f -c %T ${PANEL_STATE_ROOT}/data 2> /dev/null || true)" = 'btrfs' ] \
         || { echo copy; return 0; }
-    [ "$(stat -c %i /www/server/panel/data 2> /dev/null || true)" = '256' ] \
+    [ "$(stat -c %i ${PANEL_STATE_ROOT}/data 2> /dev/null || true)" = '256' ] \
         || { echo copy; return 0; }
     echo btrfs
 }
@@ -199,7 +200,7 @@ take_snapshot() {
     case "${keep}" in
         ''|*[!0-9]*)
             # 护栏开关填错（如「3份」）不能静默当成 0 禁用快照 —— 那是这类
-            # 开关最危险的失效方式；与 healthcheck 的 DISK_* 阈值一样退回默认
+            # 开关最危险的失效方式；同样退回默认 3 而非禁用
             warn "AUTO_SNAPSHOT_KEEP=${keep} 不是正整数，按默认 3 继续"
             keep=3
             ;;
@@ -209,8 +210,8 @@ take_snapshot() {
             ;;
     esac
 
-    # 只快照 /www/server/panel/data —— 升级时唯一会「对不上」的地方
-    if [ ! -d /www/server/panel/data ]; then
+    # 只快照 ${PANEL_STATE_ROOT}/data —— 升级时唯一会「对不上」的地方
+    if [ ! -d ${PANEL_STATE_ROOT}/data ]; then
         log '面板数据目录不存在（面板尚未初始化），跳过快照'
         return 0
     fi
@@ -225,7 +226,7 @@ take_snapshot() {
     rm -rf "${out}" 2> /dev/null || true
 
     if [ "${backend}" = 'btrfs' ]; then
-        if btrfs subvolume snapshot -r /www/server/panel/data "${out}" > /dev/null 2>&1; then
+        if btrfs subvolume snapshot -r ${PANEL_STATE_ROOT}/data "${out}" > /dev/null 2>&1; then
             log "升级前快照已保存（btrfs 只读子卷，秒级）：${out}"
             prune_snapshots "${dir}" "${keep}"
             return 0
@@ -241,7 +242,7 @@ take_snapshot() {
     #      （含 overlay 的 trusted.overlay.opaque 标记），与 tar --xattrs 效果相同，
     #      而且不必维护 --xattrs-include 白名单
     #   3) 恢复就是反向 cp -a，比解 tar 更直观
-    if cp -a /www/server/panel/data "${out}" 2> /dev/null; then
+    if cp -a ${PANEL_STATE_ROOT}/data "${out}" 2> /dev/null; then
         log "升级前快照已保存：${out}（$(du -sh "${out}" 2> /dev/null | cut -f1)）"
         prune_snapshots "${dir}" "${keep}"
         return 0
@@ -306,15 +307,6 @@ version_guard() {
     # 否则「记录里有、现在算不出」会被判成代码变化，每次启动都快照一次
     [ -n "${img_digest}" ] || prev_digest=''
 
-    # 旧数据没有指纹：补记一份，不当成「代码变了」—— 没有可比较的基准，
-    # 为一个不存在的差异生成快照只会让人困惑
-    if [ -z "${prev_digest}" ] && [ -n "${img_digest}" ]; then
-        log "补记面板代码指纹（旧版本数据未记录）"
-        printf '%s\n' "${img_digest}" > "${digest_file}" 2> /dev/null \
-            || warn "无法写入面板代码指纹：${digest_file}"
-        prev_digest="${img_digest}"
-    fi
-
     if [ "${prev}" = "${img_ver}" ] && [ "${prev_digest}" = "${img_digest}" ]; then
         # 版本与代码指纹都没变：什么都不写，避免每次启动都产生无意义的持久化层写入
         return 0
@@ -365,10 +357,15 @@ init_first_boot() {
 
     log '首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令'
 
-    # 端口 / 安全入口是纯文本文件，写完即生效，不依赖面板内部 API，先写稳
-    echo "${port}" > "${PANEL_DIR}/data/port.pl"
+    # 端口 / 安全入口是纯文本文件，写完即生效，不依赖面板内部 API，先写稳。
+    # ★ 与下面的 tools.py 一样**不 die**：写失败面板仍会起来（生效的是镜像内置
+    #   端口 / 入口），用户用容器内 `bt` 命令即可修正，
+    #   不至于「升级即整个容器起不来」
+    echo "${port}" > "${PANEL_DIR}/data/port.pl" \
+        || warn "无法写入 port.pl：面板端口将使用镜像内置值（可能不是 PANEL_PORT=${port}）"
     # 宝塔约定 admin_path.pl 以 / 开头，登录地址即 http://IP:端口<该值>/login
-    echo "/${safe_path#/}" > "${PANEL_DIR}/data/admin_path.pl"
+    echo "/${safe_path#/}" > "${PANEL_DIR}/data/admin_path.pl" \
+        || warn '无法写入 admin_path.pl：安全入口将使用镜像内置值，请用 `bt` 命令修正'
 
     # 用户名 / 口令走 tools.py —— 这是与宝塔内部实现强耦合的一处（上游改 API 就失败）。
     # 不再 die：即便失败面板仍能起来，用户用容器内 `bt` 命令即可重置，

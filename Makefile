@@ -28,10 +28,10 @@ LINE_VERSION_FILE := $(word 3,$(LINE_ROW))
 LINE_URL  := $(word 4,$(LINE_ROW))
 LINE_BASE_IMAGE := $(word 7,$(LINE_ROW))
 LINE_VER  := $(shell [ -n "$(LINE_VERSION_FILE)" ] && tr -d '[:space:]' < "$(LINE_VERSION_FILE)" 2>/dev/null)
-# 系统层顶层目录的真源：image/conf/defaults.env 的 PERSIST_SYSTEM_DIRS。
-# 只取不含 / 的项 —— reset-system 重置的正是这些顶层目录；
-# /www/server（面板里装的组件）刻意保留，理由见 reset-system 的注释
-SYSTEM_DIRS := $(shell sed -n 's/^PERSIST_SYSTEM_DIRS="$${PERSIST_SYSTEM_DIRS:-\(.*\)}"$$/\1/p' image/conf/defaults.env | tr ' ' '\n' | grep -v / | tr '\n' ' ')
+# 系统层 overlay 上层目录的真源：image/conf/defaults.env 的 PERSIST_SYSTEM_DIRS。
+# reset-system 清空这些目录的 overlay 上层（upper），面板组件即回到「当前镜像」版本；
+# 数据层（data/www 下的业务与面板状态）不在此列、不受影响。
+SYSTEM_DIRS := $(shell sed -n 's/^PERSIST_SYSTEM_DIRS="$${PERSIST_SYSTEM_DIRS:-\(.*\)}"$$/\1/p' image/conf/defaults.env | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
 # 编排文件与 Dockerfile 同在仓库根（docker build -f image/Dockerfile .），
 # 所以 up/down/logs 等目标直接 cd 到 ROOT_DIR —— 不另设等价的 COMPOSE_DIR 别名
 # （同一个概念两个名字，改一处漏一处就是幽灵 bug）
@@ -108,22 +108,19 @@ health-all: ## 四套全部跑一遍，任一失败即终止
 backup: ## 在运行中的容器里生成一份全量备份
 	docker exec baota baota-backup $(OPTS)
 
-# 重置系统层：清空 PERSIST_SYSTEM_DIRS 里各**顶层**目录（清单从 defaults.env 读，
-# 不在本文件另抄一份），让系统层回到「当前镜像」的状态。
-# 会丢：apt 装的软件、手工改过的 /etc、计划任务、root 家目录（含 .ssh）、历史日志
-# 不丢：面板账号与配置、站点、数据库、备份、证书 —— 全在 data/www（bind 层）；
-#   面板组件（data/.system/www/server）也刻意不动 —— 重置它等于让用户重装环境；
-#   真要清就手动删那个目录。
+# 重置系统层：清空 PERSIST_SYSTEM_DIRS 里各目录的 overlay 上层（清单从 defaults.env 读，
+# 不在本文件另抄一份），让面板里装的组件（PHP / nginx / MySQL…）回到「当前镜像」版本。
+# 会丢：面板组件 overlay 上层里你手动改过 / 装过的增量
+# 不丢：业务数据、站点、数据库、备份、证书、面板账号与配置 —— 全在 data/www（bind 层）；
 #   .baota 元数据同样保留：里面有镜像版本记录，删了会被判「首次使用」、
 #   升级前快照逻辑随之失效（没有可回滚的旧数据）
 #
 # 红线：必须先 down —— 容器运行时系统层正挂着 overlay，此时删 upper 是未定义行为
 reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIRM=yes
 	@[ "$(CONFIRM)" = "yes" ] || { \
-	    echo '⚠️  系统层将被清空，以下内容会丢失：'; \
-	    echo '    apt 装的软件、手工改过的 /etc、计划任务、root 家目录、历史日志'; \
-	    echo '  以下内容不受影响：面板账号与配置、站点、数据库、备份、证书，'; \
-	    echo '                  以及面板里装的组件（PHP / nginx / MySQL…）'; \
+	    echo '⚠️  系统层（面板组件 overlay 上层）将被清空，以下内容会丢失：'; \
+	    echo '    面板里装的组件（PHP / nginx / MySQL…）中你改过 / 装过的部分，将回到镜像版本'; \
+	    echo '  以下内容不受影响：业务数据、站点、数据库、备份、证书、面板账号与配置'; \
 	    echo '  确认执行：make reset-system CONFIRM=yes'; \
 	    exit 1; \
 	}
@@ -145,13 +142,13 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	for d in $(SYSTEM_DIRS); do \
 	    if [ -d "$$SYSTEM/$$d" ]; then \
 	        rm -rf "$$SYSTEM/$$d"; \
-	        echo "  已清空 $$SYSTEM/$$d"; \
+	        echo "  已清空 $$SYSTEM/$$d（面板组件回到镜像版本）"; \
+	    fi; \
+	    if [ -d "$$SYSTEM/.baota/$$d.work" ]; then \
+	        rm -rf "$$SYSTEM/.baota/$$d.work"; \
+	        echo "  已清空 $$SYSTEM/.baota/$$d.work（overlay 工作目录）"; \
 	    fi; \
 	done; \
-	# www/ 里的 server/ 是面板里装的组件，按设计保留（见目标说明）
-	if [ -d "$$SYSTEM/www" ]; then \
-	    echo "  保留 $$SYSTEM/www（面板里装的组件，重置它等于让用户重装环境）"; \
-	fi; \
 	echo '系统层已重置（.baota 元数据保留）'; \
 	docker compose up -d; \
 	echo '完成。查看启动日志：make logs'
@@ -165,7 +162,8 @@ version: ## 打印各条线记录的已发布宝塔版本
 lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@echo '--- bash -n ---'
 	@for f in image/build/*.sh image/scripts/entrypoint.sh \
-	          image/scripts/backup.sh \
+	          image/scripts/backup.sh image/scripts/guard.sh \
+	          image/scripts/shim.sh \
 	          .github/scripts/check/*.sh \
 	          .github/scripts/lint/*.sh \
 	          .github/scripts/drift/*.sh; do \
@@ -173,7 +171,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	 done
 	@echo '--- sh -n (POSIX) ---'
 	@for f in image/scripts/init.sh image/scripts/healthcheck.sh \
-	          image/conf/defaults.env; do \
+	          image/scripts/common.sh image/conf/defaults.env; do \
 	    sh -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- shellcheck ---'

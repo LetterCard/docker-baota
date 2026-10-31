@@ -23,6 +23,7 @@ FILES=(
     image/scripts/backup.sh
     image/scripts/healthcheck.sh
     image/scripts/guard.sh
+    image/scripts/common.sh
     image/build/services.sh
     .github/scripts/check/core.sh
     .github/scripts/check/degrade.sh
@@ -44,8 +45,6 @@ VARS=(
     PANEL_STATE_SUBDIRS
     PANEL_PYENV_OVERLAY
     CRITICAL_DIRS
-    DISK_MIN_AVAIL_MB
-    DISK_MAX_USED_PCT
     AUTO_SNAPSHOT_KEEP
     AUTO_SNAPSHOT_MODE
 )

@@ -55,7 +55,7 @@
 ## 日常巡检
 
 ```bash
-docker compose ps                       # 一眼看健康状态（含持久化与磁盘水位）
+docker compose ps                       # 一眼看健康状态（持久化降级标记是否置位）
 docker exec baota baota-backup --list   # 体积分布 + 磁盘水位
 docker compose logs --tail 100 baota    # 启动日志里的告警
 docker exec baota bt status             # 面板 + 任务进程
@@ -66,13 +66,12 @@ docker exec baota bt status             # 面板 + 任务进程
 
 ## 重置系统层（保留数据）
 
-持久化拆成两层，最大的好处就是：**系统层可以随时丢掉重来，数据层毫发无损**。
+持久化拆成两层，最大的好处就是：**面板组件层（overlay 上层）可以随时丢掉重来，数据层毫发无损**。
 
 什么时候用它：
 
-- 系统层被搞坏了（`apt` 装炸、手改 `/etc` 改崩、systemd 起不来）
-- 系统层 upper 膨胀得厉害，想回到干净状态
-- 想让 `/etc` `/usr` `/var` 回到「当前镜像」的样子
+- 面板里装的组件（PHP / nginx / MySQL…）被改坏、或想让它们**回到当前镜像的版本**
+- 系统层 overlay 上层（upper）膨胀得厉害，想回到干净状态
 
 ```bash
 make reset-system CONFIRM=yes      # 必须显式确认，避免误操作
@@ -80,14 +79,14 @@ make reset-system CONFIRM=yes      # 必须显式确认，避免误操作
 
 | 方向 | 内容 |
 |---|---|
-| **会丢** | apt 装的软件、手工改过的 `/etc`、计划任务（`/var/spool/cron`）、root 家目录（含 `.ssh/authorized_keys`）、`/var/log` 历史日志 |
-| **不会丢** | 面板账号与配置、站点文件、数据库、备份、站点证书与伪静态、面板自身证书、面板设置 —— 全在数据层 `data/`；**面板里装的组件**（PHP / nginx / MySQL…，在 `data/.system/www/server`）也刻意保留 —— 清掉它等于让用户重装一遍环境，与项目目的相反（真要清就手动删 `data/.system/www/server`） |
+| **会丢** | 面板组件 overlay 上层里你手动改过 / 装过的增量（即 `data/.system/www/server` 的 upper 内容）；`/etc` `/usr` `/var` `/root` 等系统目录本就不持久化、随镜像重建，谈不上「丢」 |
+| **不会丢** | 业务数据、站点文件、数据库、备份、站点证书与伪静态、面板账号与配置、面板自身证书、面板设置 —— 全在数据层 `data/`（`data/.system` 之外的部分） |
 
 `data/.system/.baota/` 元数据刻意保留：里面有镜像版本记录，删了会被判成「首次使用」，
 下次启动就不会再生成升级前快照了。
 
-> 没有 `make` 时手动做也一样：停容器 → 删掉 `data/.system/` 下
-> `PERSIST_SYSTEM_DIRS` 里的**顶层**目录（默认 `etc usr var root opt home srv`）→ 启动容器。
+> 没有 `make` 时手动做也一样：停容器 → 删掉 `data/.system/www/server`（overlay 上层）与
+> `data/.system/.baota/www/server.work`（overlay 工作目录）→ 启动容器。
 > 关键是**必须先停容器**：运行期间系统层正挂着 overlay，此时删 upper 属未定义行为。
 
 ## 升级 / 回退面板（换镜像标签）

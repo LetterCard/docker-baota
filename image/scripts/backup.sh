@@ -16,14 +16,12 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# 配置真源：与 init.sh / entrypoint.sh 共用同一份
+# 配置真源：/baota/defaults.env（与 init.sh / entrypoint.sh / guard.sh /
+# healthcheck.sh 共用同一份闸门）；log/warn/die 见 /baota/common.sh
 # ------------------------------------------------------------------------------
-if [ ! -f /baota/defaults.env ]; then
-    echo '❌ [backup][ERROR] 缺少运行期配置真源 /baota/defaults.env，镜像不完整' >&2
-    exit 1
-fi
-# shellcheck source=image/conf/defaults.env   # 相对仓库根（make lint 的工作目录）
-. /baota/defaults.env
+LOG_PREFIX='📦 [backup]'
+. /baota/common.sh
+load_defaults || exit 1
 
 # 备份产物目录。写成「数据层根/www/backup/manual」而不是容器内的
 # /www/backup/manual —— 开启直通时两者经 bind 指向同一份数据，但只有前者能
@@ -40,8 +38,8 @@ NAME_PREFIX='baota-backup'
 # 否则**自包含**：本次产物被下一次备份装进去，体积逐次翻倍。
 #   .baota                项目元数据，启动时自动重建
 #   www/backup/{auto,manual,database,rsync}   升级快照/本脚本产物/面板备份/--rsync 落点
-#   <系统层>/var/log/journal  journald 运行时日志（systemd 自管、恢复后自动重建，
-#                         且是打包期间写入最活跃之处，零恢复价值却白拖慢备份）
+#   <系统层>/var/log/journal  历史残留排除项：journald 日志实际在容器可写层（/var/log/journal），
+#                         不进 data/，所以这条排除当前是 no-op；保留以防哪天系统层重新纳入 /var
 # 系统层那一项成员名从真源派生（basename PERSIST_SYSTEM_ROOT）：写死「system」
 # 会让排除静默失效 —— 表现为备份体积逐次翻倍
 SYSTEM_MEMBER=$(basename "${PERSIST_SYSTEM_ROOT}")
@@ -73,16 +71,15 @@ done
 
 # --quiet 下日志改走 stderr：stdout 只保留最后那行备份路径，
 # 这样 `baota-backup --quiet` 的输出可以直接被脚本取用（CI 就是这么用的），
-# 不会被进度信息干扰。非 quiet 时保持原样，日志仍进容器 stdout 便于人看
+# 不会被进度信息干扰。非 quiet 时保持原样，日志仍进容器 stdout 便于人看。
+# ★ 覆盖 common.sh 的同名函数（本脚本多了 QUIET 分流）；warn/die 直接用 common 的
 log()  {
     if [ "${QUIET:-0}" = '1' ]; then
-        echo "📦 [backup] $*" >&2
+        echo "${LOG_PREFIX} $*" >&2
     else
-        echo "📦 [backup] $*"
+        echo "${LOG_PREFIX} $*"
     fi
 }
-warn() { echo "⚠️ [backup][WARN] $*" >&2; }
-die()  { echo "❌ [backup][ERROR] $*" >&2; exit 1; }
 
 # ==============================================================================
 #  tar 退出码判定（热备份必须区分，否则会把「正常竞态」误当成失败）
@@ -253,7 +250,7 @@ baota-backup 备份清单
 【./data:/data（compose 默认）】
 1. 停止容器：docker compose down
 2. 移走现有数据：mv data "data.bak-\$(date +%F)" && mkdir data
-3. 解开备份：tar xzf $(basename "${2:-本包}") -C data
+3. 解开备份：tar xzf <备份包.tgz> -C data
 4. 启动容器：docker compose up -d && docker compose logs -f baota
 
 若 MySQL 起不来（热备份时 InnoDB 文件可能半写）：
@@ -288,7 +285,7 @@ collect_members() {
     # 写死成员名在非默认布局下 tar 找不到成员，报错还指向不存在的路径。
     # 系统层若被指到 data 卷之外（tar 单一来源打不进来），在这里响亮拒绝；
     # --rsync 分支没有这个限制，会对 data 卷外的系统层补第二条同步
-    local _system
+    local _mode="${1:-tar}" _system
     _system=$(basename "${PERSIST_SYSTEM_ROOT}")
     DATA_MEMBERS=('www')
 
@@ -298,14 +295,20 @@ collect_members() {
         return 0
     fi
 
-    if [ -d "${PERSIST_DATA_ROOT}/${_system}" ]; then
+    if [ -d "${PERSIST_SYSTEM_ROOT}" ]; then
         # 是挂载点却没有镜像标记：有人手工挂了别的东西在系统层上。照常打进去
         # 会得到一份恢复后就被遮挡的内容，宁可拒绝产出
         if mountpoint -q "${PERSIST_SYSTEM_ROOT}" 2> /dev/null; then
             die "系统层 ${PERSIST_SYSTEM_ROOT} 是独立挂载点，但找不到镜像标记 ${PERSIST_DATA_ROOT}/.baota/system-image：拒绝产出恢复后可能失效的备份"
         fi
         DATA_MEMBERS+=("${_system}")
-    elif [ "${PERSIST_SYSTEM_ROOT}" != "${PERSIST_DATA_ROOT}/${_system}" ]; then
+    elif [ "${PERSIST_SYSTEM_ROOT}" = "${PERSIST_DATA_ROOT}/${_system}" ]; then
+        # 目录还不存在（首次备份 / 刚 reset 过）：系统层确实没有内容可打，
+        # 明确告警而不是静默省略 —— 否则用户会误以为系统层已进包
+        warn "系统层目录 ${PERSIST_SYSTEM_ROOT} 不存在：本次备份不含系统层"
+    elif [ "${_mode}" = 'tar' ]; then
+        # 系统层被指到 data 卷之外：tar 单一来源覆盖不到 → 拒绝产出。
+        # rsync 模式不在这里拒绝：rsync_sync 会对卷外的系统层补第二条同步
         die "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，tar 打包覆盖不到系统层（含面板账号、用户装的环境）；请改用 --rsync，或把系统层指回数据层内"
     fi
     return 0
@@ -330,7 +333,7 @@ build_archive() {
     # ★ 清单必须在转储之后生成：write_manifest 靠「databases.sql 在不在」决定
     #   清单里的数据库一行，先写会把「已随包转储」误报成「未包含 MySQL 转储」，
     #   而 MANIFEST.txt 正是恢复时的说明书（已踩过这个顺序坑）
-    write_manifest "${TMP_DIR}/MANIFEST.txt" "${out}"
+    write_manifest "${TMP_DIR}/MANIFEST.txt"
 
     local -a extra=()
     [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
@@ -486,7 +489,9 @@ rsync_sync() {
         log '未附加 MySQL 转储（MySQL 未运行或未安装）'
     fi
 
-    collect_members
+    # rsync 能同步 data 卷之外的路径，所以这里用 rsync 模式收集成员：
+    # 系统层在卷外时不拒绝，由下面补第二条同步
+    collect_members rsync
     [ ${#DATA_MEMBERS[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
 
     local -a rargs=( -aAX --delete --human-readable --stats )
@@ -567,7 +572,7 @@ main() {
             fi
 
             # 同 create 模式：清单要在转储之后生成，否则「已转储」会被写成「未包含」
-            write_manifest "${TMP_DIR}/MANIFEST.txt" '<stdout>'
+            write_manifest "${TMP_DIR}/MANIFEST.txt"
 
             # 退出码处理与 create 模式一致（热备份下 tar 返回 1 可接受）。
             # 这里无法清理半成品 —— 流已经吐出去了，读不回来。

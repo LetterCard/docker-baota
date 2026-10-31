@@ -45,7 +45,7 @@
 | `/www/vmail` | 邮局（装了才有） | `data/www/vmail` | bind，不预建 |
 | `/www/dk_project` | 面板 Docker 模块的项目（装了才有） | `data/www/dk_project` | bind，不预建 |
 | `/www/wwwlogs`、`/www/.Recycle_bin`、`/www/php_session`、`/www/panel-static`、`/www/monitor_data` | 日志 / 回收站 / session / 静态缓存 / 监控数据 | —— | 按设计不持久化（可再生；漂移检测的白名单见 `.github/scripts/drift/install.sh` 的 `WWW_VOLATILE_SUBDIRS`） |
-| `/etc /usr /var /root /opt /home /srv` | 系统目录 | `data/.system/<同名>` | overlay |
+| `/etc /usr /var /root /opt /home /srv` | 系统目录 | —— | 不持久化（随镜像，重建即重置；实测零「丢了会坏」的数据） |
 | `/baota/**` | 镜像自有（脚本、配置、面板副本） | —— | 随镜像，永不持久化 |
 | `/run/baota/**` | 运行态标记 | —— | tmpfs，重启即失效 |
 
@@ -118,7 +118,7 @@ data/
 | `_FILE` | **文件路径** | `META_VERSION_FILE`、`META_BOOT_FILE` |
 | `_BIN` | 可执行文件路径 | `PANEL_PY_BIN` |
 | `_SUBDIRS` | 子目录清单 | `WWW_DATA_SUBDIRS` |
-| `_MIN` / `_MAX` | 阈值上下界 | `DISK_MIN_AVAIL_MB`、`DISK_MAX_USED_PCT` |
+| `_MIN` / `_MAX` | 阈值上下界 | 如告警线上下界（现由宝塔监控接管，镜像内不再单独定义） |
 | `_MB` / `_PCT` / `_KEEP` | 单位 / 保留份数 | `AUTO_SNAPSHOT_KEEP` |
 
   前缀只有一个：`META_` = 持久化层元数据目录（`.baota/`）下的文件名
@@ -184,7 +184,7 @@ skills/     AI 助手技能包，只引用 docs，不复述正文
 |---|---|
 | 线 | 一条跟进上游的发布流水线。**文档一律叫「线」**；`lines.conf` 里 `line` 是线标识（`12_version`）、`display` 是该线的显示名（`12.x`）—— 二者不同义，不要把「线」当「线」的同义词混用 |
 | 数据层 | `data/` 整体（`PERSIST_DATA_ROOT`）：业务层 + 系统层 + 元数据。与「系统层」对举时指「非镜像的那一份」 |
-| 系统层 | `data/.system` 下以 overlay 承接的目录（`etc usr var root opt home srv`、`www/server`）；**增量** |
+| 系统层 | `data/.system` 下以 overlay 承接的目录（`www/server`）；**增量** |
 | 业务层 | `data/www` 下 bind 直通的用户数据（与容器 `/www` 同名） |
 | 面板状态 | `data/www/server/panel` 下 bind 的状态（`data plugin vhost ssl config`） |
 | 可选模块 | `data/www` 下**装了才出现**的目录（`vmail`、`dk_project`），不预建 |
