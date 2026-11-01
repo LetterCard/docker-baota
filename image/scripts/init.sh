@@ -28,6 +28,20 @@ load_defaults || exit 1
 # init.sh 自己的运行参数（不属于配置真源）
 STAGE1="${STAGE1:-/baota/entrypoint.sh}"
 
+# 兜底镜像已挂载标志：系统层与 pyenv 两层共用同一个 ext4 镜像，先触发的那层建好后
+# 置位，另一层直接复用，不再重复建。空 = 未启用（持久化根原生支持 overlay，无需镜像）。
+OVL_IMAGE=''
+
+# 兜底镜像的 loop 设备与挂载点（供退出清理用，避免崩溃泄漏 loop 导致下次启动耗尽）
+OVL_LOOP=''
+OVL_MOUNT=''
+cleanup_overlay_store() {
+    [ -n "${OVL_MOUNT}" ] && umount "${OVL_MOUNT}" 2> /dev/null || true
+    [ -n "${OVL_LOOP}" ] && losetup -d "${OVL_LOOP}" 2> /dev/null || true
+}
+# init.sh 异常退出（崩溃 / 拒绝启动）时释放 loop，防止泄漏 → 重启耗尽 → 启动死循环
+trap cleanup_overlay_store EXIT
+
 # 面板目录（不在 defaults.env，因为它由官方安装脚本固定，全项目同此约定）
 # 与它的临时钉桩：挂 /www/server 的 overlay 之前先 bind 到这里，
 # 挂完再 bind 回面板目录，面板代码因此始终来自镜像层、不落持久化层
@@ -92,6 +106,36 @@ probe_writable() {
         return 0
     fi
     rm -f "$1/${PROBE}" 2> /dev/null || true
+    return 1
+}
+
+# 尝试挂一次 overlay：建 upper/work → mount → 实测可写。
+# 返回 0 = 成功且可写；1 = 任一环节失败（含挂载成功但只读）。
+# 失败告警在此打印，但**不打 degraded 标记**——是否关键由调用方决定。
+# 挂载成功却只读时顺手 umount，给兜底重试留一个干净的挂载点。
+try_overlay() {
+    _l="$1"; _u="$2"; _w="$3"
+    if ! mkdir -p "${_l}" "${_u}" 2> /dev/null; then
+        warn "无法创建 ${_u}：持久化根不可写，${_l} 本次不会持久化"
+        return 1
+    fi
+    rm -rf "${_w}" 2> /dev/null || true
+    if ! mkdir -p "${_w}" 2> /dev/null; then
+        warn "无法创建 ${_w}：持久化根不可写，${_l} 本次不会持久化"
+        return 1
+    fi
+    if ! mount -t overlay overlay \
+        -o "lowerdir=${_l},upperdir=${_u},workdir=${_w},index=off" "${_l}" 2> /dev/null; then
+        warn "overlay 挂载失败：${_l} 本次不会持久化"
+        warn '  常见原因：容器未以 --privileged 运行 / 持久化根位于 overlay 之上 / 内核未启用 overlayfs'
+        return 1
+    fi
+    if probe_writable "${_l}" "${_u}"; then
+        return 0
+    fi
+    warn "${_l} 的 overlay 挂载成功但不可写，本次不会持久化"
+    rm -f "${_l}/${PROBE}" 2> /dev/null || true
+    umount "${_l}" 2> /dev/null || true
     return 1
 }
 
@@ -188,13 +232,20 @@ die_image() {
     exit 1
 }
 
-attach_system_image() {
-    _img="${PERSIST_SYSTEM_IMAGE}"
+attach_overlay_store() {
+    # 幂等：系统层与 pyenv 两层共用，先触发的那层建好即置位，另一层直接复用
+    [ -n "${OVL_IMAGE:-}" ] && return 0
 
+    # 未显式设 PERSIST_SYSTEM_IMAGE 时，用数据层内的默认镜像（自动兜底路径）
+    _img="${PERSIST_SYSTEM_IMAGE:-${PERSIST_DATA_ROOT}/.baota/overlay.img}"
     case "${_img}" in
         "${PERSIST_DATA_ROOT}"/*) ;;
         *) die_image "PERSIST_SYSTEM_IMAGE=${_img} 不在数据层 ${PERSIST_DATA_ROOT} 内（容器只挂了 data），拒绝启动" ;;
     esac
+
+    # 镜像文件父目录（data/.baota）必须在 truncate 前就位，否则 truncate 直接失败 → 启动 die
+    mkdir -p "$(dirname "${_img}")" 2> /dev/null \
+        || die_image "无法创建镜像目录 $(dirname "${_img}")（数据层不可写？）"
 
     _fresh=0
     if [ ! -f "${_img}" ]; then
@@ -203,8 +254,6 @@ attach_system_image() {
             || die_image "无法创建镜像文件 ${_img}（数据层不可写？）"
     fi
 
-    # losetup 缺失 / 没有 loop 设备都在这一步暴露（Docker Desktop 的虚拟机里
-    # 通常没有 loop 设备，那条路用不了本兜底）
     # 上一个容器异常退出时 loop 设备可能没释放：先解掉**本镜像名下**的旧绑定再挂，
     # 否则每重启一次就漏一个 loop 设备（只动本文件的绑定，不碰宿主机其它 loop）
     # BusyBox losetup 无 -j；改用 -a 解析（util-linux 同样兼容）
@@ -214,21 +263,31 @@ attach_system_image() {
     # BusyBox 内建 losetup 不支持 util-linux 的 --show，改用两步法（util-linux 同样兼容）
     _loop=$(losetup -f 2> /dev/null || true)
     [ -n "${_loop}" ] && losetup "${_loop}" "${_img}" >/dev/null 2>&1 || _loop=""
-    [ -n "${_loop}" ] || die_image "无法把 ${_img} 绑定到 loop 设备（losetup 缺失或无空闲 loop 设备）"
+    [ -n "${_loop}" ] || die_image "无法把 ${_img} 绑定到 loop 设备（losetup 缺失或无空闲 loop 设备，或 Docker Desktop 虚拟机无 loop 支持）"
 
     if [ "${_fresh}" = 1 ]; then
         mkfs.ext4 -F -q "${_loop}" > /dev/null 2>&1 \
             || die_image "mkfs.ext4 失败：${_loop}（镜像缺 e2fsprogs？）"
-        log "系统层镜像已创建：${_img}（${PERSIST_SYSTEM_IMAGE_SIZE_MB}MB，ext4）"
+        log "overlay 兜底镜像已创建：${_img}（${PERSIST_SYSTEM_IMAGE_SIZE_MB}MB，ext4）"
     else
-        # 停机备份拷贝过来的镜像可能是脏的：启动先修，修不好就拒绝启动 ——
-        # 带着损坏的文件系统跑，比起不来危险得多（e2fsck 退出码 ≤2 = 干净或已修复）
         e2fsck -p "${_loop}" > /dev/null 2>&1
         _rc=$?
-        [ "${_rc}" -le 2 ] \
-            || die_image "e2fsck 无法修复 ${_img}（退出码 ${_rc}），请从备份恢复该镜像"
+        if [ "${_rc}" -le 2 ]; then
+            : # 干净或已自动修复，直接用
+        elif [ -z "${PERSIST_SYSTEM_IMAGE:-}" ]; then
+            # 自动兜底的镜像是我们自己管理的可重建上层（内容可由镜像 lower 再派生），
+            # 损坏只可能来自上次非正常卸载 → 直接重建，避免 e2fsck 失败陷入启动死循环
+            log "兜底镜像 e2fsck 退出码 ${_rc}，自动重建（上层内容可由镜像再派生）"
+            mkfs.ext4 -F -q "${_loop}" > /dev/null 2>&1 \
+                || die_image "mkfs.ext4 失败：${_loop}（镜像缺 e2fsprogs？）"
+        else
+            # 用户显式指定了 PERSIST_SYSTEM_IMAGE（即自己的备份）→ 不擅自重建，拒绝启动
+            die_image "e2fsck 无法修复 ${_img}（退出码 ${_rc}），请从备份恢复该镜像"
+        fi
     fi
 
+    # PERSIST_SYSTEM_ROOT 是系统层 upper 基路径；镜像挂在这里后，
+    # 系统层与 pyenv 两层的 upper/work 都会自然落入镜像（STATE_DIR 也在其内）。
     if [ -d "${PERSIST_SYSTEM_ROOT}" ] && [ -n "$(ls -A "${PERSIST_SYSTEM_ROOT}" 2> /dev/null)" ]; then
         warn "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 非空：切到镜像模式后，这里的旧内容将被遮挡（不再生效）"
     fi
@@ -236,14 +295,19 @@ attach_system_image() {
         || die_image "无法创建挂载点 ${PERSIST_SYSTEM_ROOT}"
     mount -t ext4 -o defaults "${_loop}" "${PERSIST_SYSTEM_ROOT}" 2> /dev/null \
         || die_image "ext4 镜像挂载失败：${_loop} → ${PERSIST_SYSTEM_ROOT}"
+    OVL_LOOP="${_loop}"
+    OVL_MOUNT="${PERSIST_SYSTEM_ROOT}"
 
     # 备份工具靠这个标记识别镜像模式（tar 成员从「目录」换成「镜像文件」）。
-    # 写在数据层元数据里：它描述的是「这一层怎么存的」，随 data 卷一起走
+    # 写在数据层元数据里：描述的是「这一层怎么存的」，随 data 一起走。
+    # 该镜像同时兜系统层 + pyenv 两层，删它即两层一起重置。
     mkdir -p "${DATA_STATE_DIR}" 2> /dev/null || true
     _rel="${_img#${PERSIST_DATA_ROOT}/}"
     printf '%s\n' "${_rel}" > "${DATA_STATE_DIR}/system-image" 2> /dev/null \
         || warn "无法写入镜像标记 ${DATA_STATE_DIR}/system-image，备份可能按默认布局打包"
-    log "系统层已装入 ext4 镜像：${_img}（挂载于 ${PERSIST_SYSTEM_ROOT}）"
+    log "系统层 + pyenv 已装入同一 ext4 镜像：${_img}（挂载于 ${PERSIST_SYSTEM_ROOT}）"
+
+    OVL_IMAGE=1
 }
 
 # ==============================================================================
@@ -327,36 +391,22 @@ mount_persist() {
     _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
     _work="${STATE_DIR}/${_dir}.work"
 
-    if ! mkdir -p "${_lower}" "${_upper}" 2> /dev/null; then
-        warn "无法创建 ${_upper}：持久化根不可写，/${_dir} 本次不会持久化"
-        mark_degraded "${_dir}: 持久化根不可写"
-        return 1
-    fi
-
-    rm -rf "${_work}" 2> /dev/null || true
-    if ! mkdir -p "${_work}" 2> /dev/null; then
-        warn "无法创建 ${_work}：持久化根不可写，/${_dir} 本次不会持久化"
-        mark_degraded "${_dir}: workdir 创建失败"
-        return 1
-    fi
-
-    if ! mount -t overlay overlay \
-        -o "lowerdir=${_lower},upperdir=${_upper},workdir=${_work},index=off" "${_lower}"; then
-        warn "overlay 挂载失败：/${_dir} 本次不会持久化"
-        warn '  常见原因：容器未以 --privileged 运行 / 持久化根位于 overlay 之上 / 内核未启用 overlayfs'
-        mark_degraded "${_dir}: overlay 挂载失败"
-        return 1
-    fi
-
-    # 挂载成功 ≠ 可写（virtiofs / NFS / 9p 会降级只读），实测写入
-    if probe_writable "${_lower}" "${_upper}"; then
+    if try_overlay "${_lower}" "${_upper}" "${_work}"; then
         return 0
     fi
 
-    warn "/${_dir} 的持久化层挂载成功但不可写，本次不会持久化"
-    warn '  请让持久化根落在 ext4 / xfs / btrfs 上；实在换不了就设 PERSIST_SYSTEM_IMAGE 走镜像兜底'
-    rm -f "${_lower}/${PROBE}" 2> /dev/null || true
-    mark_degraded "${_dir}: 挂载成功但不可写"
+    # 持久化根不支持 overlay 的 upperdir（virtiofs / SMB / NFS / exFAT / NTFS）：
+    # 自动把「系统层 + pyenv 两层」兜进**同一个** ext4 镜像（容器内 loop 挂载，
+    # 仍是原生 ext4，overlay 必可写；镜像文件落在 data/ 内，随 data 一起打包迁移）。
+    # 一个镜像兜两层 → 删该文件即两层同时重置。
+    if attach_overlay_store; then
+        if try_overlay "${_lower}" "${_upper}" "${_work}"; then
+            log "/${_dir} 持久化根不支持 overlay，已自动切 ext4 镜像兜底"
+            return 0
+        fi
+    fi
+
+    mark_degraded "${_dir}: overlay 不可用"
     return 1
 }
 
@@ -509,39 +559,27 @@ mount_pyenv_overlay() {
         mark_degraded "${_target}: 镜像无 pyenv，覆盖层未挂载"
         return 1
     fi
-    if ! mkdir -p "${_upper}" 2> /dev/null; then
-        warn "无法创建 pyenv 覆盖层 upper：${_upper}（数据层不可写？）"
-        mark_degraded "${_target}: pyenv upper 创建失败"
-        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
-        return 1
-    fi
 
-    rm -rf "${_work}" 2> /dev/null || true
-    if ! mkdir -p "${_work}" 2> /dev/null; then
-        warn "无法创建 pyenv 覆盖层 workdir：${_work}"
-        mark_degraded "${_target}: pyenv workdir 创建失败"
-        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
-        return 1
-    fi
-
-    if ! mount -t overlay overlay \
-        -o "lowerdir=${PANEL_PIN_DIR}/pyenv,upperdir=${_upper},workdir=${_work},index=off" "${_target}"; then
-        warn "pyenv 覆盖层挂载失败：插件 pip 包不会持久化"
-        mark_degraded "${_target}: pyenv 覆盖层挂载失败"
-        mark_critical "${_target}: pyenv 覆盖层未挂载，pip 包将丢失"
-        return 1
-    fi
-
-    # 挂载成功 ≠ 可写：实测一次（与 mount_persist 同一套判据）
-    if probe_writable "${_target}" "${_upper}"; then
+    if try_overlay "${_target}" "${_upper}" "${_work}"; then
         log "pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新"
         return 0
     fi
 
-    warn "pyenv 覆盖层挂载成功但不可写：插件 pip 包不会持久化"
+    # 兜底：与系统层共用同一个 ext4 镜像（OVL_IMAGE 由 attach_overlay_store 置位）。
+    # upper/work 改指镜像内路径，绕开持久化根不支持 overlay 的限制。
+    if attach_overlay_store; then
+        _upper="${PERSIST_SYSTEM_ROOT}/pyenv"
+        _work="${PERSIST_SYSTEM_ROOT}/pyenv.work"
+        if try_overlay "${_target}" "${_upper}" "${_work}"; then
+            log "pyenv 覆盖层走 ext4 镜像兜底：pip 包持久化"
+            return 0
+        fi
+    fi
+
+    warn "pyenv 覆盖层挂载失败或不可写：插件 pip 包不会持久化"
     rm -f "${_target}/${PROBE}" 2> /dev/null || true
-    mark_degraded "${_target}: pyenv 覆盖层不可写"
-    mark_critical "${_target}: pyenv 覆盖层不可写，pip 包将丢失"
+    mark_degraded "${_target}: pyenv 覆盖层不可用"
+    mark_critical "${_target}: pyenv 覆盖层不可用，pip 包将丢失"
     return 1
 }
 
@@ -551,7 +589,7 @@ mount_pyenv_overlay() {
 main() {
     # ---- 0. 系统层镜像兜底（必须在取锁之前：系统层的锁文件就在镜像里）----
     if [ -n "${PERSIST_SYSTEM_IMAGE}" ]; then
-        attach_system_image
+        attach_overlay_store
     fi
 
     acquire_lock || exit 1

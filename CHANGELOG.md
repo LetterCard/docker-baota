@@ -36,14 +36,22 @@ upper = `data/www/server/panel/pyenv`。
 `btrfs subvolume delete`（只读子卷 `rm -rf` 删不掉）。任何时候不满足条件都自动
 回退 `cp -a`，快照失败不阻断启动。
 
-### 系统层 ext4 镜像兜底（`PERSIST_SYSTEM_IMAGE`，opt-in）
+### 系统层 + pyenv 共用一个 ext4 镜像兜底（自动，无需 `PERSIST_SYSTEM_IMAGE`）
 
-`data/` 只能放 SMB / NFS / exFAT / NTFS 时，overlay 的 upper 会「挂载成功但只读」、
-写入静默失败。设一个镜像路径即把系统层装进 data 卷里的 ext4 镜像（loop 挂载到
-`PERSIST_SYSTEM_ROOT`）：业务层 `data/www` 仍是普通 bind，任何文件系统都能工作。
-每次启动先 `e2fsck -p` 再挂载（修不好则拒绝启动）；`baota-backup` 自动改拿镜像
-文件当归档成员（挂载点内容不进包，否则恢复后会被遮挡）；`make reset-system`
-在镜像模式下禁用并给出提示。需要 loop 设备（Docker Desktop 的虚拟机里通常没有）。
+`data/` 落在 virtiofs / SMB / NFS / exFAT / NTFS 时，overlay 的 upper 会「挂载成功但
+只读」、写入静默失败。现在 `init.sh` **自动兜底**：普通 overlay 挂载成功却不可写时，
+把「系统层 + pyenv 两层」一起兜进**同一个** ext4 镜像 `data/.baota/overlay.img`
+（容器内 loop 挂载到 `PERSIST_SYSTEM_ROOT`），仍是原生 ext4，overlay 必可写。
+
+- 一个镜像兜两层 → 删该文件即两层同时重置；镜像文件在 `data/` 内，随打包迁移；
+- 原生文件系统（ext4 / btrfs / xfs）上走普通 overlay，**不创建镜像**，无额外开销；
+- 仅自动镜像 `e2fsck` 修不好时直接重建（上层内容可由镜像 lower 再派生）；显式设了
+  `PERSIST_SYSTEM_IMAGE`（即自己的备份）才在修不好时拒绝启动，避免误清备份；
+- `init.sh` 设 `trap` 在异常退出时释放 loop 设备，防止崩溃泄漏 loop → 重启耗尽 →
+  启动死循环；
+- `baota-backup` 自动改拿镜像文件当归档成员（挂载点内容不进包）；`make reset-system`
+  在镜像模式下禁用并给出提示。需要 loop 设备（Docker Desktop 的虚拟机里通常没有，
+  但 OrbStack 完整虚拟机可用）。
 
 ### overlay `metacopy=on`：评估后**回退**（不要开）
 
