@@ -218,7 +218,7 @@ print_mount_tree() {
 }
 
 # ==============================================================================
-#  -0.5 系统层 ext4 镜像兜底（opt-in：PERSIST_SYSTEM_IMAGE 非空时启用）
+#  -0.5 系统层 ext4 镜像兜底（PERSIST_SYSTEM_IMAGE 非空 = 强制镜像模式；为空则持久化根不支持 overlay 时自动兜底）
 #
 #   持久化根落在 SMB / NFS / exFAT / NTFS 上时，overlay 的 upper 会「挂载成功
 #   但只读」—— 写入静默失败，是本方案最危险的失效模式。此时把系统层装进一个
@@ -391,6 +391,18 @@ mount_persist() {
     _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
     _work="${STATE_DIR}/${_dir}.work"
 
+    # 显式设了 PERSIST_SYSTEM_IMAGE = 强制镜像模式：跳过原生 overlay 试探，
+    # 即使持久化根本就支持 overlay 也走单文件镜像（便于统一「删一个文件即重置」语义）
+    if [ -n "${PERSIST_SYSTEM_IMAGE:-}" ]; then
+        if attach_overlay_store; then
+            if try_overlay "${_lower}" "${_upper}" "${_work}"; then
+                return 0
+            fi
+        fi
+        mark_degraded "${_dir}: 镜像模式挂载失败"
+        return 1
+    fi
+
     if try_overlay "${_lower}" "${_upper}" "${_work}"; then
         return 0
     fi
@@ -557,6 +569,24 @@ mount_pyenv_overlay() {
     if [ ! -d "${PANEL_PIN_DIR}/pyenv" ]; then
         warn "镜像里没有 ${PANEL_PIN_DIR}/pyenv，pyenv 覆盖层跳过"
         mark_degraded "${_target}: 镜像无 pyenv，覆盖层未挂载"
+        return 1
+    fi
+
+    # 显式设了 PERSIST_SYSTEM_IMAGE = 强制镜像模式（与系统层共用同一镜像，
+    # upper/work 改指镜像内路径，绕开持久化根原生 overlay，统一单文件重置语义）
+    if [ -n "${PERSIST_SYSTEM_IMAGE:-}" ]; then
+        if attach_overlay_store; then
+            _upper="${PERSIST_SYSTEM_ROOT}/pyenv"
+            _work="${PERSIST_SYSTEM_ROOT}/pyenv.work"
+            if try_overlay "${_target}" "${_upper}" "${_work}"; then
+                log "pyenv 覆盖层走 ext4 镜像（强制）：pip 包持久化"
+                return 0
+            fi
+        fi
+        warn "pyenv 覆盖层镜像模式挂载失败：插件 pip 包不会持久化"
+        rm -f "${_target}/${PROBE}" 2> /dev/null || true
+        mark_degraded "${_target}: pyenv 镜像模式挂载失败"
+        mark_critical "${_target}: pyenv 镜像模式挂载失败，pip 包将丢失"
         return 1
     fi
 

@@ -44,7 +44,9 @@ upper = `data/www/server/panel/pyenv`。
 （容器内 loop 挂载到 `PERSIST_SYSTEM_ROOT`），仍是原生 ext4，overlay 必可写。
 
 - 一个镜像兜两层 → 删该文件即两层同时重置；镜像文件在 `data/` 内，随打包迁移；
-- 原生文件系统（ext4 / btrfs / xfs）上走普通 overlay，**不创建镜像**，无额外开销；
+- 原生文件系统（ext4 / btrfs / xfs）上默认走普通 overlay，**不创建镜像**，零额外开销；
+- 若偏好「单文件」形态，显式设 `PERSIST_SYSTEM_IMAGE=/data/.baota/overlay.img` 即
+  **强制镜像模式**（跳过原生 overlay 试探，原生盘上也走单文件镜像，统一「删一个文件即重置」语义）；
 - 仅自动镜像 `e2fsck` 修不好时直接重建（上层内容可由镜像 lower 再派生）；显式设了
   `PERSIST_SYSTEM_IMAGE`（即自己的备份）才在修不好时拒绝启动，避免误清备份；
 - `init.sh` 设 `trap` 在异常退出时释放 loop 设备，防止崩溃泄漏 loop → 重启耗尽 →

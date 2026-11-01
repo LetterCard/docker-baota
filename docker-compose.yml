@@ -79,6 +79,8 @@ services:
     #     data/.baota/overlay.img（容器内 loop 挂载，仍是原生 ext4，overlay 必可写），
     #     无需手工设 PERSIST_SYSTEM_IMAGE，也无需改用命名卷。
     #     一个镜像兜两层 → 删该文件即两层同时重置；镜像文件在 data/ 内，随打包迁移。
+    #     若你就是偏好「单文件」形态（哪怕底层原生支持 overlay），显式设
+    #     PERSIST_SYSTEM_IMAGE=/data/.baota/overlay.img 即可强制镜像模式（跳过原生试探）。
     volumes:
       - ./data:/data
 
