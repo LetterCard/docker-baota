@@ -409,7 +409,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 
 > 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-11-07 22:15:14
+- 生成时间（UTC）：2026-11-08 22:24:34
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
 - 验证脚本：`.github/scripts/check/published.sh`
@@ -432,13 +432,13 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 203s |
+| 耗时 | 185s |
 
 ###### 检查项
 
 - [x] 镜像拉取成功
 - [x] 首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）
-- [x] PHP 扩展安装 + 编译链路可用（phpize→configure→make→加载 myext 成功）
+- [x] 未预装 PHP 且 apt 不可用，但扩展编译工具链齐备（autoconf/gcc/make/libtool），足以装扩展
 - [x] 门禁 core 通过
 - [x] 门禁 degrade 通过
 - [x] 门禁 upgrade 通过
@@ -450,10 +450,10 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ###### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 06:12:12 - 已获得系统层持久化层独占锁
-⚙️ [init] 06:12:15 - 已获得数据层持久化层独占锁
-⚙️ [init] 06:12:15 - 持久化层并发保护已就位
-⚙️ [init] 06:12:15 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
+⚙️ [init] 06:21:50 - 已获得系统层持久化层独占锁
+⚙️ [init] 06:21:53 - 已获得数据层持久化层独占锁
+⚙️ [init] 06:21:53 - 持久化层并发保护已就位
+⚙️ [init] 06:21:53 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
 💾 持久化层挂载
 ├─ 系统层  /data/.system
 │   ├── etc
@@ -468,17 +468,17 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ├─ pyenv 覆盖层  /data/www/server/panel/pyenv（pip 包持久化，解释器随镜像）
 └─ 面板状态  /data/www/server/panel
 📦 面板代码：来自镜像层 /www/server/panel（不落持久化层）
-🚀 [entrypoint] 06:12:15 - 首次使用这份持久化数据，记录镜像版本 12.0.0
-🚀 [entrypoint] 06:12:16 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+🚀 [entrypoint] 06:21:53 - 首次使用这份持久化数据，记录镜像版本 12.0.0
+🚀 [entrypoint] 06:21:54 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 06:12:16 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 06:12:16 - 面板用户：baota
-🚀 [entrypoint] 06:12:16 - 面板口令：***已脱敏***
-🚀 [entrypoint] 06:12:16 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 06:12:16 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 06:12:16 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 06:21:54 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 06:21:54 - 面板用户：baota
+🚀 [entrypoint] 06:21:54 - 面板口令：***已脱敏***
+🚀 [entrypoint] 06:21:54 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 06:21:54 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 06:21:54 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 06:12:16 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 06:21:54 - 移交 systemd：/usr/sbin/init
 ```
 
 ---
@@ -492,13 +492,13 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 镜像 | `bugseeker/baota:13.1.0` |
 | 期望宝塔版本 | `13.1.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 174s |
+| 耗时 | 171s |
 
 ###### 检查项
 
 - [x] 镜像拉取成功
 - [x] 首次启动（持久化挂载 + entrypoint + systemd + 面板就绪）
-- [x] PHP 扩展安装 + 编译链路可用（phpize→configure→make→加载 myext 成功）
+- [x] 未预装 PHP 且 apt 不可用，但扩展编译工具链齐备（autoconf/gcc/make/libtool），足以装扩展
 - [x] 门禁 core 通过
 - [x] 门禁 degrade 通过
 - [x] 门禁 upgrade 通过
@@ -510,10 +510,10 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ###### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 06:12:09 - 已获得系统层持久化层独占锁
-⚙️ [init] 06:12:12 - 已获得数据层持久化层独占锁
-⚙️ [init] 06:12:12 - 持久化层并发保护已就位
-⚙️ [init] 06:12:12 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
+⚙️ [init] 06:21:51 - 已获得系统层持久化层独占锁
+⚙️ [init] 06:21:54 - 已获得数据层持久化层独占锁
+⚙️ [init] 06:21:54 - 持久化层并发保护已就位
+⚙️ [init] 06:21:54 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
 💾 持久化层挂载
 ├─ 系统层  /data/.system
 │   ├── etc
@@ -528,17 +528,17 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ├─ pyenv 覆盖层  /data/www/server/panel/pyenv（pip 包持久化，解释器随镜像）
 └─ 面板状态  /data/www/server/panel
 📦 面板代码：来自镜像层 /www/server/panel（不落持久化层）
-🚀 [entrypoint] 06:12:12 - 首次使用这份持久化数据，记录镜像版本 13.1.0
-🚀 [entrypoint] 06:12:13 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+🚀 [entrypoint] 06:21:54 - 首次使用这份持久化数据，记录镜像版本 13.1.0
+🚀 [entrypoint] 06:21:54 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 06:12:13 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 06:12:13 - 面板用户：baota
-🚀 [entrypoint] 06:12:13 - 面板口令：***已脱敏***
-🚀 [entrypoint] 06:12:13 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 06:12:13 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 06:12:13 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 06:21:55 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 06:21:55 - 面板用户：baota
+🚀 [entrypoint] 06:21:55 - 面板口令：***已脱敏***
+🚀 [entrypoint] 06:21:55 - root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 06:21:55 - 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 06:21:55 - 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 06:12:13 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 06:21:55 - 移交 systemd：/usr/sbin/init
 ```
 
 ---
