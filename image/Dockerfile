@@ -8,7 +8,7 @@
 #  构建上下文是仓库根：docker build -f image/Dockerfile --build-arg INSTALL_URL=... .
 #
 #  持久化与不可变面板（原理见 docs/persistence.md）：
-#    · 系统层仅持久化 /www/server（overlay，upper 在 data/.system/www/server）；/etc /usr /var 等不持久化
+#    · 系统层仅持久化 /www/server（overlay，upper 镜像模式在 overlay.img 内、原生模式在 data/.system/www/server）；/etc /usr /var 等不持久化
 #    · /www/server/panel 由 init.sh 用镜像绑定盖回：面板代码来自镜像、不落盘
 #    · 业务与面板状态逐子目录 bind（在 data/www 下，与容器内路径同名）
 #    · panel 内「更新」的新代码不会被执行（shim.sh）：面板版本真源 = 镜像
@@ -84,7 +84,7 @@ RUN bash /opt/baota/build/services.sh
 EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 
 # 持久化层：挂载这一个目录即可保住全部数据
-#   业务与面板状态 data/www、系统层 data/.system（含面板里装的组件）
+#   业务与面板状态 data/www、系统层 data/overlay.img（含面板里装的组件；原生模式为 data/.system）
 #   面板代码不在这里 —— 它属于镜像，换镜像即升级
 VOLUME ["/data"]
 

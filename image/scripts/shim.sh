@@ -2,26 +2,18 @@
 # ==============================================================================
 #  🐍 shim —— 面板 pyenv 解释器包装 + 执行入口守卫（运行期，镜像自有）
 #
-#  装配（构建期由 services.sh 完成）：pyenv/bin/python{,3} → 本文件，
-#  真解释器挪到 python-real。面板代码的每一次执行都要经过 pyenv 解释器，
-#  所以这里是「执行入口守卫」的唯一咽喉点：先让面板代码回到镜像版本，再执行。
+#  装配（构建期 services.sh）：pyenv/bin/python{,3} → 本文件，真解释器挪到
+#  python-real。面板代码每次执行都经过这里，是守卫的唯一咽喉点；两个职责合并
+#  省掉原本 fork+exec 独立 shim.sh 的开销。
 #
-#  ★ 两个职责合在本文件的原因：守卫原本是独立的 shim.sh，由本文件
-#    `bash /baota/shim.sh` 调用 —— 而本文件是**每一次 python 执行**都要跑的
-#    热路径，那次 fork+exec 是纯开销。合并后逻辑完全等价，还省掉一次进程创建。
+#  为什么：面板内「更新」把新代码写进可写层，更新最后重启面板、用磁盘上的代码
+#  跑 init_db 迁移 SQLite，出现「库被新版迁移、代码又回退」的降级组合。
+#  做法：不拦截写入，只拦截执行 —— 每次执行前比对代码版本与镜像版本，不一致
+#  就用 /baota/origin 覆盖回去，新代码从未被执行。升级面板 = 换镜像标签。
 #
-#  为什么要有守卫：面板代码来自镜像，但容器可写层**可写** —— 面板内「更新」
-#    会把新代码写进可写层，而更新最后必然重启面板、用**磁盘上的代码**跑
-#    init_db 升级持久层 SQLite，出现「库被新版迁移、代码又回退」的降级组合。
-#  做法：不拦截写入，只拦截执行 —— 每次执行前比对代码版本与镜像版本，
-#    不一致就用 /baota/origin 覆盖回去，新代码从未被执行。升级面板 = 换镜像标签。
-#
-#  红线：① 必须放 /baota —— 面板更新不会覆盖它，不会出现「脚本自己改自己」的
-#    竞态；② 守卫一律 fail-open —— 任何异常都放行并照常执行真解释器，
-#    绝不把面板卡死在启动路径上（故守卫里的退出一律是 return 0，不是 exit）。
-#
+#  红线：① 必须放 /baota（面板更新不会覆盖它）；② 守卫一律 fail-open ——
+#  任何异常都放行并照常执行真解释器，绝不把面板卡死在启动路径上。
 #  原理：docs/persistence.md#执行入口守卫不可变面板的兜底
-#  日志：[guard] 写 stderr —— 写 stdout 会混进面板自身的标准输出
 # ==============================================================================
 set -u
 set -o pipefail
@@ -35,7 +27,7 @@ REAL=${REAL:-${PANEL_DIR}/pyenv/bin/python-real}
 # ------------------------------------------------------------------------------
 run_guard() {
     LOG_PREFIX='🛡️ [guard]'
-    # shellcheck source=/baota/common.sh
+    # shellcheck source=image/scripts/common.sh
     . /baota/common.sh || return 0
     # ★ 覆盖 common.sh 的 log：本文件其后还要 exec 真 python，
     #   守卫日志写 stdout 会混进面板自身的标准输出，必须走 stderr
@@ -149,4 +141,12 @@ for _c in "${PANEL_DIR}"/pyenv/bin/python3.[0-9]*; do
     [ -x "${_c}" ] && exec "${_c}" "$@"
 done
 
-exec python3 "$@"
+# 最终回退：PATH 里的 python3。必须先解析目标，否则 PATH 含 pyenv/bin 时
+# 会命中本包装器自身并无限递归
+_last=$(command -v python3 2> /dev/null || true)
+case "$(readlink -f "${_last}" 2> /dev/null || true)" in
+    ''|*shim*)
+        echo "🛡️ [shim] 回退解释器无效：${_last:-未找到}，拒绝执行以免递归" >&2
+        exit 1 ;;
+esac
+exec "${_last}" "$@"

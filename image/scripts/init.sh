@@ -1,7 +1,7 @@
 #!/busybox sh
 # shellcheck shell=sh  # 本文件必须保持 POSIX（busybox 解释），shebang 不被 shellcheck 识别，需显式声明方言
 # ==============================================================================
-#  [阶段 0] 早期初始化 —— 系统层镜像兜底 → 并发锁 → 系统层 overlay → 面板代码隔离
+#  [阶段 0] 早期初始化 —— 系统层镜像兜底 → 系统层 overlay → 面板代码隔离
 #    → pyenv 覆盖层 → 业务/面板子目录 bind → 移交阶段 1
 #
 #  红线一：解释器用 busybox 而非 bash —— 本脚本要给 /usr 挂 overlay，万一持久化
@@ -22,6 +22,7 @@ set -eu
 # 抄 6 遍的必然结局是漂移，而漂移的表现是「运行期按旧值算路径」，离原因很远
 # ------------------------------------------------------------------------------
 LOG_PREFIX='⚙️ [init]'
+# shellcheck source=image/scripts/common.sh
 . /baota/common.sh
 load_defaults || exit 1
 
@@ -34,9 +35,11 @@ OVL_IMAGE=''
 
 # 兜底镜像的 loop 设备与挂载点（供退出清理用，避免崩溃泄漏 loop 导致下次启动耗尽）
 OVL_LOOP=''
-OVL_MOUNT=''
+# 已挂载标记：不能拿 PERSIST_SYSTEM_MOUNT_DIR 当哨兵 —— 它是 defaults.env 的
+# 配置变量，清空会把用户在 compose 里的覆盖静默丢掉
+OVL_MOUNTED=''
 cleanup_overlay_store() {
-    [ -n "${OVL_MOUNT}" ] && umount "${OVL_MOUNT}" 2> /dev/null || true
+    [ -n "${OVL_MOUNTED}" ] && umount "${OVL_MOUNTED}" 2> /dev/null || true
     [ -n "${OVL_LOOP}" ] && losetup -d "${OVL_LOOP}" 2> /dev/null || true
 }
 # init.sh 异常退出（崩溃 / 拒绝启动）时释放 loop，防止泄漏 → 重启耗尽 → 启动死循环
@@ -54,14 +57,14 @@ PANEL_PIN_DIR="${PANEL_PIN_DIR:-/run/baota/panel}"
 # 可写性探测文件名（同时用于 lower 与 upper 两侧）
 PROBE=.probe
 
-# 状态目录（各层自己的 .baota）：项目元数据 + overlay workdir 都在里面。
+# 状态目录（系统层 overlay 的 .baota）：overlay workdir 在这里面。
 # overlay 要求 workdir 与 upperdir 同盘（内核硬性要求）：work 放在状态目录内的
 # <目录>.work。内核会在它里面再建一层 work（省不掉），详情见
 # docs/persistence.md「挂载原理」
+# ★ 镜像模式下 init.sh 会把 PERSIST_SYSTEM_ROOT / STATE_DIR 重新指向镜像挂载点
+#   （/run/baota/overlay），系统层与 pyenv 两层的 upper/work 一并落入镜像；
+#   data/ 因此只留 www/ 与 overlay.img 两个条目。
 STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
-LOCK_FILE="${STATE_DIR}/lock"
-DATA_STATE_DIR="${PERSIST_DATA_ROOT}/.baota"
-DATA_LOCK_FILE="${DATA_STATE_DIR}/lock"
 
 # 运行态标记目录。/run 是 tmpfs：每次启动重新评估，不会残留上次的状态。
 # 供 compose healthcheck 与 CI 健康检查判定「本次启动的持久化是否完整」。
@@ -218,14 +221,13 @@ print_mount_tree() {
 }
 
 # ==============================================================================
-#  -0.5 系统层 ext4 镜像兜底（opt-in：PERSIST_SYSTEM_IMAGE 非空时启用）
-#
-#   持久化根落在 SMB / NFS / exFAT / NTFS 上时，overlay 的 upper 会「挂载成功
-#   但只读」—— 写入静默失败，是本方案最危险的失效模式。此时把系统层装进一个
-#   ext4 镜像文件（它躺在 data 卷上，任何文件系统都能放普通文件），loop 挂载到
-#   PERSIST_SYSTEM_ROOT，之后的 overlay 流程原样跑，对上层逻辑零改动。
-#   ★ 必须在取并发锁之前执行：系统层的锁文件就在 PERSIST_SYSTEM_ROOT 里
-#   ★ 显式开启却配不起来时直接拒绝启动：静默回落到只读根等于把用户骗进陷阱
+#  -0.5 系统层 ext4 镜像模式（自动 + 可强制）
+#   data/ 落在 SMB / NFS / exFAT / NTFS / virtiofs 时，overlay upper 会「挂载成功
+#   但只读」、写入静默失败（详见 docs/persistence.md 硬约束）。把系统层 + pyenv
+#   两层装进同一个 ext4 镜像文件 data/overlay.img，loop 挂载到 /run/baota/overlay
+#   （在 /data 之外），之后的 overlay 流程原样跑，对上层逻辑零改动。
+#   ★ 触发：auto/未设=自动兜底；true/on/1/yes 或显式路径=强制镜像模式。
+#   ★ 删镜像文件 = 两层同时重置；强制开启却配不起来直接拒绝启动，不静默回落只读根。
 # ==============================================================================
 die_image() {
     echo "❌ [init][ERROR] $*" >&2
@@ -235,15 +237,16 @@ die_image() {
 attach_overlay_store() {
     # 幂等：系统层与 pyenv 两层共用，先触发的那层建好即置位，另一层直接复用
     [ -n "${OVL_IMAGE:-}" ] && return 0
+    [ "${_IMG_DISABLED:-0}" = 1 ] && return 1   # 用户显式禁用镜像模式（false/0/no/off）
 
-    # 未显式设 PERSIST_SYSTEM_IMAGE 时，用数据层内的默认镜像（自动兜底路径）
-    _img="${PERSIST_SYSTEM_IMAGE:-${PERSIST_DATA_ROOT}/.baota/overlay.img}"
+    # 镜像路径由 main 解析到 _IMG_PATH（true/on/1/yes → data/overlay.img；显式路径 → 该路径）
+    _img="${_IMG_PATH}"
     case "${_img}" in
         "${PERSIST_DATA_ROOT}"/*) ;;
         *) die_image "PERSIST_SYSTEM_IMAGE=${_img} 不在数据层 ${PERSIST_DATA_ROOT} 内（容器只挂了 data），拒绝启动" ;;
     esac
 
-    # 镜像文件父目录（data/.baota）必须在 truncate 前就位，否则 truncate 直接失败 → 启动 die
+    # 镜像文件父目录（默认 data/）必须在 truncate 前就位，否则 truncate 直接失败 → 启动 die
     mkdir -p "$(dirname "${_img}")" 2> /dev/null \
         || die_image "无法创建镜像目录 $(dirname "${_img}")（数据层不可写？）"
 
@@ -264,120 +267,59 @@ attach_overlay_store() {
     _loop=$(losetup -f 2> /dev/null || true)
     [ -n "${_loop}" ] && losetup "${_loop}" "${_img}" >/dev/null 2>&1 || _loop=""
     [ -n "${_loop}" ] || die_image "无法把 ${_img} 绑定到 loop 设备（losetup 缺失或无空闲 loop 设备，或 Docker Desktop 虚拟机无 loop 支持）"
+    # 绑定成功就登记给 EXIT trap：后面 mkfs / e2fsck / mount 任一步失败都要释放 loop
+    OVL_LOOP="${_loop}"
 
     if [ "${_fresh}" = 1 ]; then
         mkfs.ext4 -F -q "${_loop}" > /dev/null 2>&1 \
             || die_image "mkfs.ext4 失败：${_loop}（镜像缺 e2fsprogs？）"
         log "overlay 兜底镜像已创建：${_img}（${PERSIST_SYSTEM_IMAGE_SIZE_MB}MB，ext4）"
     else
-        e2fsck -p "${_loop}" > /dev/null 2>&1
-        _rc=$?
+        # set -eu 下必须显式兜住非零退出：1/2（日志回放 / 已修复）与 >=4（无法修复）
+        # 都要走到下面分支，否则 e2fsck 一返回非零就当场退出，重建逻辑全是死代码
+        _rc=0
+        e2fsck -p "${_loop}" > /dev/null 2>&1 || _rc=$?
         if [ "${_rc}" -le 2 ]; then
             : # 干净或已自动修复，直接用
-        elif [ -z "${PERSIST_SYSTEM_IMAGE:-}" ]; then
-            # 自动兜底的镜像是我们自己管理的可重建上层（内容可由镜像 lower 再派生），
+        elif [ "${_IMG_EXPLICIT:-0}" = 1 ]; then
+            # 用户显式指定了 PERSIST_SYSTEM_IMAGE 路径（即自己的备份）→ 不擅自重建，拒绝启动
+            die_image "e2fsck 无法修复 ${_img}（退出码 ${_rc}），请从备份恢复该镜像"
+        else
+            # 自动/默认兜底的镜像是我们自己管理的可重建上层（内容可由镜像 lower 再派生），
             # 损坏只可能来自上次非正常卸载 → 直接重建，避免 e2fsck 失败陷入启动死循环
             log "兜底镜像 e2fsck 退出码 ${_rc}，自动重建（上层内容可由镜像再派生）"
             mkfs.ext4 -F -q "${_loop}" > /dev/null 2>&1 \
                 || die_image "mkfs.ext4 失败：${_loop}（镜像缺 e2fsprogs？）"
-        else
-            # 用户显式指定了 PERSIST_SYSTEM_IMAGE（即自己的备份）→ 不擅自重建，拒绝启动
-            die_image "e2fsck 无法修复 ${_img}（退出码 ${_rc}），请从备份恢复该镜像"
         fi
     fi
 
-    # PERSIST_SYSTEM_ROOT 是系统层 upper 基路径；镜像挂在这里后，
-    # 系统层与 pyenv 两层的 upper/work 都会自然落入镜像（STATE_DIR 也在其内）。
-    if [ -d "${PERSIST_SYSTEM_ROOT}" ] && [ -n "$(ls -A "${PERSIST_SYSTEM_ROOT}" 2> /dev/null)" ]; then
-        warn "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 非空：切到镜像模式后，这里的旧内容将被遮挡（不再生效）"
+    # 镜像挂载点移到 /data 之外（/run/baota/overlay）：data/ 因此只剩 www/ 与 overlay.img
+    # 两个条目，重置 = 删一个文件，迁移 = 打包 data/ 走人。
+    PERSIST_SYSTEM_MOUNT_DIR="${PERSIST_SYSTEM_MOUNT_DIR:-/run/baota/overlay}"
+    if [ -d "${PERSIST_SYSTEM_ROOT}" ] && [ -n "$(ls -A "${PERSIST_SYSTEM_ROOT}" 2> /dev/null)" ] && [ "${_FORCE_IMG:-0}" = 1 ]; then
+        warn "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 非空：强制镜像模式后不再读取这里（旧内容仍留在 data/，可手工删除）"
     fi
-    mkdir -p "${PERSIST_SYSTEM_ROOT}" 2> /dev/null \
-        || die_image "无法创建挂载点 ${PERSIST_SYSTEM_ROOT}"
-    mount -t ext4 -o defaults "${_loop}" "${PERSIST_SYSTEM_ROOT}" 2> /dev/null \
-        || die_image "ext4 镜像挂载失败：${_loop} → ${PERSIST_SYSTEM_ROOT}"
-    OVL_LOOP="${_loop}"
-    OVL_MOUNT="${PERSIST_SYSTEM_ROOT}"
+    mkdir -p "${PERSIST_SYSTEM_MOUNT_DIR}" 2> /dev/null \
+        || die_image "无法创建挂载点 ${PERSIST_SYSTEM_MOUNT_DIR}"
+    mount -t ext4 -o defaults "${_loop}" "${PERSIST_SYSTEM_MOUNT_DIR}" 2> /dev/null \
+        || die_image "ext4 镜像挂载失败：${_loop} → ${PERSIST_SYSTEM_MOUNT_DIR}"
+    OVL_MOUNTED="${PERSIST_SYSTEM_MOUNT_DIR}"
 
-    # 备份工具靠这个标记识别镜像模式（tar 成员从「目录」换成「镜像文件」）。
-    # 写在数据层元数据里：描述的是「这一层怎么存的」，随 data 一起走。
+    # 镜像挂好后，把系统层 upper 基路径与状态目录都指向挂载点（两层 upper/work 落入镜像）
+    PERSIST_SYSTEM_ROOT="${PERSIST_SYSTEM_MOUNT_DIR}"
+    STATE_DIR="${PERSIST_SYSTEM_MOUNT_DIR}/.baota"
+
+    # 备份工具改为「检测 data/overlay.img 是否存在」来识别镜像模式（见 backup.sh），
+    # 不再写宿主侧标记文件 —— data/ 保持只有 www/ 与 overlay.img。
     # 该镜像同时兜系统层 + pyenv 两层，删它即两层一起重置。
-    mkdir -p "${DATA_STATE_DIR}" 2> /dev/null || true
-    _rel="${_img#${PERSIST_DATA_ROOT}/}"
-    printf '%s\n' "${_rel}" > "${DATA_STATE_DIR}/system-image" 2> /dev/null \
-        || warn "无法写入镜像标记 ${DATA_STATE_DIR}/system-image，备份可能按默认布局打包"
-    log "系统层 + pyenv 已装入同一 ext4 镜像：${_img}（挂载于 ${PERSIST_SYSTEM_ROOT}）"
+    log "系统层 + pyenv 已装入同一 ext4 镜像：${_img}（挂载于 ${PERSIST_SYSTEM_MOUNT_DIR}）"
 
     OVL_IMAGE=1
 }
 
 # ==============================================================================
-#  0. 并发互斥锁（flock）
-#  ★ 持锁必须是「独立后台进程」，不能用 exec 8<>lock + flock -n 8 的 fd 方式：
-#    fd 随 exec 链（busybox → bash entrypoint → systemd）移交给 PID 1，systemd
-#    启动时关闭非标准 fd → 锁随之释放。实测（flock 2.38）主容器就绪后第二实例
-#    能再次取锁、并发保护在启动数秒后即失效。独立进程持锁与 exec 链无关：
-#    进程活 → 锁在；容器停 → 进程亡 → 锁自动释放（docker top 里是个 sleep 进程）。
-# ==============================================================================
-_lock_layer() {
-    _lock="$1"
-    _name="$2"
-
-    _dir=$(dirname "${_lock}")
-    if ! mkdir -p "${_dir}" 2> /dev/null || [ ! -d "${_dir}" ]; then
-        warn "无法创建 ${_dir}：${_name}持久化根不可写，跳过该层并发保护"
-        return 0
-    fi
-    if ! ( exec 2> /dev/null; : >> "${_lock}" ); then
-        warn "无法写入 ${_lock}，跳过${_name}并发保护"
-        return 0
-    fi
-    if [ ! -x /usr/bin/flock ]; then
-        # 并发锁是「同一份 data 不被两个容器同时写」的最后防线，这里 fail-open
-        # 等于放行并发损坏。debian:12 自带 util-linux，缺它说明镜像被改动过，
-        # 拒绝启动比静默丢数据好
-        echo "❌ [init][ERROR] 未找到 /usr/bin/flock，无法保证${_name}持久化层互斥，拒绝启动" >&2
-        exit 1
-    fi
-
-    # 一步完成「非阻塞互斥 + 长期持有」：拿到锁 → flock 驻留后台（持锁直到
-    # 进程退出）；拿不到 → flock 立即非零退出。通过 kill -0 观察其生死来判定。
-    /usr/bin/flock -n "${_lock}" -c 'exec sleep infinity' &
-    _holder=$!
-    # flock -n 是**立刻**返回（抢到 / 失败），所以只需等它表态的短暂稳定期。
-    # ★ 不能把「holder 还活着」当成继续等的理由 —— 那样每次成功启动
-    #   都会固定多等 3 秒（原写法正是如此，判据写反了）
-    sleep 1
-    if ! kill -0 "${_holder}" 2> /dev/null; then
-        wait "${_holder}" 2> /dev/null || true
-        _owner=$(cat "${_lock}" 2> /dev/null || echo '未知')
-        warn '=============================================================='
-        warn "另一个容器实例正在使用同一份持久化数据（${_name}）"
-        warn "  持有者：${_owner}"
-        warn '  同一份持久化层不可被两个容器同时挂载（内核 EBUSY / 行为未定义），'
-        warn '  为避免数据损坏，本次启动已中止。'
-        warn '  常见原因：12.0.0 与 13.0.0 两个 compose 用了同一个 data 目录。'
-        warn "  确认没有其它实例在跑之后，删除 ${_lock} 再启动。"
-        warn '=============================================================='
-        return 1
-    fi
-
-    printf 'pid=%s host=%s at=%s\n' \
-        "$$" "$(hostname 2> /dev/null || echo unknown)" "$(date '+%F %T')" \
-        >> "${_lock}" 2> /dev/null || true
-    log "已获得${_name}持久化层独占锁"
-    return 0
-}
-
-acquire_lock() {
-    _lock_layer "${LOCK_FILE}" '系统层' || return 1
-    _lock_layer "${DATA_LOCK_FILE}" '数据层' || return 1
-    log '持久化层并发保护已就位'
-    return 0
-}
-
-# ==============================================================================
 #  1. overlay 分层持久化（仅系统层）
-#   系统层只持久化 /www/server 一个目录：←overlay→  upper = data/.system/www/server；
+#   系统层只持久化 /www/server（upper：镜像模式 /run/baota/overlay/www/server，原生模式 data/.system/www/server）
 #  ★ 面板（/www）不再走 overlay：代码由镜像层直接提供、不持久化，
 #    只有业务与状态子目录走 bind（见 mount_www_layer）。
 #  ★ index=off 是必须的，不是优化（同 upper 换 lower 的升级语义需要它）
@@ -388,20 +330,19 @@ acquire_lock() {
 mount_persist() {
     _dir="$1"
     _lower="/${_dir}"
-    _upper="${PERSIST_SYSTEM_ROOT}/${_dir}"
-    _work="${STATE_DIR}/${_dir}.work"
 
-    if try_overlay "${_lower}" "${_upper}" "${_work}"; then
-        return 0
+    # 自动模式：先试原生 overlay（仅当未强制镜像模式）
+    if [ -z "${_FORCE_IMG:-}" ]; then
+        if try_overlay "${_lower}" "${PERSIST_SYSTEM_ROOT}/${_dir}" "${STATE_DIR}/${_dir}.work"; then
+            return 0
+        fi
     fi
 
-    # 持久化根不支持 overlay 的 upperdir（virtiofs / SMB / NFS / exFAT / NTFS）：
-    # 自动把「系统层 + pyenv 两层」兜进**同一个** ext4 镜像（容器内 loop 挂载，
-    # 仍是原生 ext4，overlay 必可写；镜像文件落在 data/ 内，随 data 一起打包迁移）。
-    # 一个镜像兜两层 → 删该文件即两层同时重置。
+    # 镜像模式（自动兜底 or 显式强制）：系统层 + pyenv 兜进同一个 ext4 镜像。
+    # 镜像挂好后 PERSIST_SYSTEM_ROOT / STATE_DIR 已指向挂载点，这里实时取值。
     if attach_overlay_store; then
-        if try_overlay "${_lower}" "${_upper}" "${_work}"; then
-            log "/${_dir} 持久化根不支持 overlay，已自动切 ext4 镜像兜底"
+        if try_overlay "${_lower}" "${PERSIST_SYSTEM_ROOT}/${_dir}" "${STATE_DIR}/${_dir}.work"; then
+            [ -z "${_FORCE_IMG:-}" ] && log "/${_dir} 持久化根不支持 overlay，已自动切 ext4 镜像兜底"
             return 0
         fi
     fi
@@ -539,14 +480,12 @@ mount_www_layer() {
 #   lower = 钉桩里的镜像 pyenv（随镜像走）；upper = 数据层 pyenv（pip 的包在这里）。
 #  于是两者同时成立：pip 包重建后还在，镜像升级的新解释器 / 新依赖照样生效 ——
 #  不再有「把 pyenv 加进 PANEL_STATE_SUBDIRS 就不再随镜像更新」的取舍。
-#  ★ upper 放数据层而不是 .system：镜像模式下 .system 是另一个文件系统，而内核
-#    硬性要求 overlay 的 workdir 与 upperdir 同盘（workdir 跟着放数据层 .baota）
+#  ★ 原生模式 upper/work 都在数据层 PANEL_STATE_ROOT（同盘，满足内核要求）；
+#    镜像模式时两者改指镜像挂载点（由 attach_overlay_store 重定向 PERSIST_SYSTEM_ROOT）。
 #  ★ 必须挂在「面板代码 bind 回镜像」之后：早于它会被那次 bind 遮住
 # ==============================================================================
 mount_pyenv_overlay() {
     _target="${PANEL_DIR}/pyenv"
-    _upper="${PANEL_STATE_ROOT}/pyenv"
-    _work="${DATA_STATE_DIR}/pyenv.work"
 
     if [ -z "${PANEL_PIN_DIR}" ]; then
         warn "面板代码未钉桩，pyenv 覆盖层跳过：插件 pip 包不会持久化"
@@ -560,17 +499,17 @@ mount_pyenv_overlay() {
         return 1
     fi
 
-    if try_overlay "${_target}" "${_upper}" "${_work}"; then
-        log "pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新"
-        return 0
+    # 自动模式：原生 overlay（upper/work 都在数据层，同盘）
+    if [ -z "${_FORCE_IMG:-}" ]; then
+        if try_overlay "${_target}" "${PANEL_STATE_ROOT}/pyenv" "${PANEL_STATE_ROOT}/pyenv.work"; then
+            log "pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新"
+            return 0
+        fi
     fi
 
-    # 兜底：与系统层共用同一个 ext4 镜像（OVL_IMAGE 由 attach_overlay_store 置位）。
-    # upper/work 改指镜像内路径，绕开持久化根不支持 overlay 的限制。
+    # 兜底/强制：与系统层共用同一个 ext4 镜像（挂载后 PERSIST_SYSTEM_ROOT 指向挂载点）
     if attach_overlay_store; then
-        _upper="${PERSIST_SYSTEM_ROOT}/pyenv"
-        _work="${PERSIST_SYSTEM_ROOT}/pyenv.work"
-        if try_overlay "${_target}" "${_upper}" "${_work}"; then
+        if try_overlay "${_target}" "${PERSIST_SYSTEM_ROOT}/pyenv" "${PERSIST_SYSTEM_ROOT}/pyenv.work"; then
             log "pyenv 覆盖层走 ext4 镜像兜底：pip 包持久化"
             return 0
         fi
@@ -587,12 +526,25 @@ mount_pyenv_overlay() {
 #  入口
 # ==============================================================================
 main() {
-    # ---- 0. 系统层镜像兜底（必须在取锁之前：系统层的锁文件就在镜像里）----
-    if [ -n "${PERSIST_SYSTEM_IMAGE}" ]; then
+    # ---- 0. 解析 PERSIST_SYSTEM_IMAGE 并（可选）提前挂载镜像 ----
+    #   true/on/1/yes  → 强制镜像模式，默认路径 <data>/overlay.img
+    #   显式路径        → 强制镜像模式，使用该路径（必须落在 data 内）
+    #   auto/空        → 自动：原生 overlay 优先，失败才用镜像兜底
+    #   false/0/no/off → 关闭镜像模式：走原生 overlay，不自动兜底
+    #   _FORCE_IMG=1 时跳过原生 overlay 试探；_IMG_EXPLICIT=1 时镜像损坏不擅自重建
+    case "${PERSIST_SYSTEM_IMAGE:-}" in
+        true|on|1|yes)  _FORCE_IMG=1; _IMG_EXPLICIT=0; _IMG_DISABLED=0 ;;
+        false|0|no|off) _FORCE_IMG=''; _IMG_EXPLICIT=0; _IMG_DISABLED=1 ;;
+        auto|"")        _FORCE_IMG=''; _IMG_EXPLICIT=0; _IMG_DISABLED=0 ;;
+        *)              _FORCE_IMG=1; _IMG_EXPLICIT=1; _IMG_DISABLED=0 ;;
+    esac
+    _IMG_PATH="${PERSIST_SYSTEM_IMAGE_PATH}"
+    export _FORCE_IMG _IMG_PATH _IMG_EXPLICIT _IMG_DISABLED
+
+    # 强制镜像模式：提前挂载（跳过原生 overlay 试探）
+    if [ "${_FORCE_IMG}" = 1 ]; then
         attach_overlay_store
     fi
-
-    acquire_lock || exit 1
 
     # 运行态标记目录（tmpfs）：准备 seeded 记录文件，供挂载汇总树标注「首次初始化」
     mkdir -p "${RUNTIME_DIR}" 2> /dev/null || true

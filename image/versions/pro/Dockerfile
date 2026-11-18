@@ -84,7 +84,7 @@ RUN bash /opt/baota/build/services.sh
 EXPOSE 8888 888 80 443 20 21 22 3306 39000-40000
 
 # 持久化层：挂载这一个目录即可保住全部数据
-#   业务与面板状态 data/www、系统层 data/.system（含面板里装的组件）
+#   业务与面板状态 data/www、系统层 data/overlay.img（含面板里装的组件；原生模式为 data/.system）
 #   面板代码不在这里 —— 它属于镜像，换镜像即升级
 VOLUME ["/data"]
 

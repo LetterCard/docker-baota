@@ -3,22 +3,20 @@
 #  🧰 共享运行期函数（POSIX sh）
 #
 #     init.sh / entrypoint.sh / backup.sh / shim.sh / healthcheck.sh 共同 source，
-#     消掉「每个脚本各写一份 defaults.env 闸门 + log/warn/die」的样板重复 ——
-#     抄 6 遍的必然结局是漂移，而漂移的表现是「运行期按旧值算路径」，离原因很远
+#     消掉「每个脚本各写一份 defaults.env 闸门 + log/warn/die」的重复（抄 6 遍必漂移）
 #
 #  红线：
 #    - 必须是 POSIX：init.sh / healthcheck.sh 用 /bin/sh（busybox）运行，
 #      混入 local / [[ ]] / 数组 / pipefail 会让容器在最早启动阶段崩
 #    - 只放工具，不放策略：各脚本的判据与流程仍留在自己文件里
 #
-#  用法（调用方先设 LOG_PREFIX 与可选 LOG_TAG，再 source）：
-#    LOG_PREFIX='⚙️ [init]'  LOG_TAG='init'
+#  用法（调用方先设 LOG_PREFIX，再 source）：
+#    LOG_PREFIX='⚙️ [init]'
 #    . /baota/common.sh
 #    load_defaults || exit 1
 # ==============================================================================
 
 LOG_PREFIX=${LOG_PREFIX:-'[baota]'}
-LOG_TAG=${LOG_TAG:-baota}
 
 # 配置真源：/baota/defaults.env（镜像自有，不在任何持久化目录内）。
 # 各脚本只从这里取配置，不再写默认值副本。
@@ -32,6 +30,18 @@ load_defaults() {
     . /baota/defaults.env
 }
 
+# 系统层持久化根：镜像模式下挂载在 PERSIST_SYSTEM_MOUNT_DIR（/run/baota/overlay，在 data/ 之外），
+# 原生模式下是宿主目录 PERSIST_SYSTEM_ROOT（/data/.system）。两者在 entrypoint 运行时
+# 均已就绪（init.sh 已完成挂载），据此统一解析，避免 init 与 entrypoint 各自按静态
+# 默认值算 STATE_DIR 而漂移（镜像模式下会出现 digest/启动历史写回宿主 .system 的 bug）。
+persist_system_root() {
+    if mountpoint -q "${PERSIST_SYSTEM_MOUNT_DIR}" 2>/dev/null; then
+        echo "${PERSIST_SYSTEM_MOUNT_DIR}"
+    else
+        echo "${PERSIST_SYSTEM_ROOT}"
+    fi
+}
+
 log()  { echo "${LOG_PREFIX} $*"; }
 warn() { echo "⚠️ ${LOG_PREFIX}[WARN] $*" >&2; }
 die()  { echo "❌ ${LOG_PREFIX}[ERROR] $*" >&2; exit 1; }
@@ -43,16 +53,4 @@ die()  { echo "❌ ${LOG_PREFIX}[ERROR] $*" >&2; exit 1; }
 panel_version() {
     [ -f "$1" ] || return 0
     sed -n "s/.*g\.version[^0-9]*\([0-9][0-9.]*\).*/\1/p" "$1" 2> /dev/null | head -n1
-}
-
-# 保留最近 keep 份，其余交给 _del 指定的删除函数处理。
-#   $1 = 目录   $2 = 匹配串（如 'baota-*' / '*.tgz'）   $3 = 保留份数   $4 = 删除函数名
-prune_keep() {
-    _dir=$1 _glob=$2 _keep=$3 _del=$4
-    _n=$(ls -1td "${_dir}"/${_glob} 2> /dev/null | wc -l)
-    [ "${_n}" -le "${_keep}" ] && return 0
-    ls -1td "${_dir}"/${_glob} 2> /dev/null | tail -n "$((_n - _keep))" \
-        | while read -r _f; do
-              "${_del}" "${_f}"
-          done
 }

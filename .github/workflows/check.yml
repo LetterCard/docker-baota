@@ -9,10 +9,10 @@ name: 🔬 巡检：已发布镜像回归
 #
 #  ★ 多 job 结构（进度一目了然，每线一张独立 job 卡）：
 #     prep    读 image/lines.conf 生成「线 × 版本」矩阵（新增一条线不用改本文件）
-#     verify  每线一个 job 跑 published.sh（拉取 + 脱敏首启日志 + PHP 扩展真编译
+#     verify  每线一个 job 跑 check.sh published（拉取 + 脱敏首启日志 + PHP 扩展真编译
 #              + 复用四套发布前门禁）；各自独立进度
 #     report  汇总报告并回写 README / .github/reports/report.md
-#  验什么由 .github/scripts/check/published.sh 决定。
+#  验什么由 .github/scripts/check.sh published 决定。
 # ==============================================================================
 
 on:
@@ -27,7 +27,7 @@ concurrency:
 env:
   IMAGE_NAME: baota
   REPORT: .github/reports/report.md
-  CHECK_DIR: .github/scripts/check
+  CHECK_SH: .github/scripts/check.sh
   LINES: image/lines.conf
 
 jobs:
@@ -88,7 +88,7 @@ jobs:
         run: |
           set -uo pipefail
           echo "🔬 开始验证 ${{ matrix.display }}（${{ matrix.version }}）…"
-          bash "${CHECK_DIR}/published.sh" "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${{ matrix.version }}" \
+          bash "${CHECK_SH}" published "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${{ matrix.version }}" \
               "${{ matrix.version }}" "/tmp/report-${{ matrix.line }}.md"
 
       - name: 📦 上传回归报告
@@ -179,12 +179,12 @@ jobs:
           {
             echo '# 📊 已发布镜像每日验证报告'
             echo
-            echo '> 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。'
+            echo '> 本报告由 `.github/workflows/check.yml` 生成并注入 README，每次运行整体覆盖（不追加）。'
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
             echo '- 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）'
-            echo "- 验证脚本：\`${CHECK_DIR}/published.sh\`"
+            echo "- 验证脚本：\`${CHECK_SH} published\`"
             echo
             echo '## 概要'
             echo
@@ -204,7 +204,7 @@ jobs:
       - name: ✏️ 注入 README 并回写仓库
         run: |
           set -euo pipefail
-          python3 .github/scripts/report.py "${REPORT}"
+          bash .github/scripts/check.sh report "${REPORT}"
           git add "${REPORT}" README.md
 
           echo '--- 待提交变更 ---'

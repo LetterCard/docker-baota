@@ -31,6 +31,7 @@ PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 # 「真源改了、兜底没改」会让镜像里凭空建出 data/.system/www 空目录
 # ------------------------------------------------------------------------------
 LOG_PREFIX='🔨 [build]'
+# shellcheck source=image/scripts/common.sh
 . /baota/common.sh
 load_defaults || exit 1
 
@@ -117,9 +118,9 @@ install_runtime_files() {
 #    1) pyenv/bin/python{,3} → /baota/shim.sh（包装器），真解释器挪到 python-real
 #    2) /baota/origin = 面板目录的实体副本（排除 pyenv），作「换回镜像版本」的来源
 #  ★ 不用 cp -al 硬链接：面板目录在更早的构建层，overlayfs 跨层 link 只退化成复制
-#    （CI 实测 inode 不同，即 core.sh A15 断言）。
+#    （CI 实测 inode 不同，即 check.sh core 的 A15 断言）。
 #  装配失败不阻断构建：上游改掉 pyenv 布局时守卫只是失效、面板仍按上游默认运行，
-#  由 core.sh 守卫检查（A15）拦下，不会静默上线。
+#  由 check.sh core 的守卫检查（A15）拦下，不会静默上线。
 # ==============================================================================
 setup_guard() {
     log '4/5 装配执行入口守卫（解释器包装 + 镜像代码副本）'

@@ -337,10 +337,10 @@ jobs:
           mkdir -p "${LOG_DIR}"
           VER="${{ matrix.version }}"
 
-          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
-          bash .github/scripts/check/run.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
-          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
-          bash .github/scripts/check/run.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
+          bash .github/scripts/check.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
+          bash .github/scripts/check.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
 
           FAILED=0
           wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }

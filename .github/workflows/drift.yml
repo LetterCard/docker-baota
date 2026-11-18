@@ -4,10 +4,10 @@ name: 🔭 监测：变更与漂移检测
 #  只监测、不发布。目的：上游更新后第一时间发现会破坏持久化的变更 ——
 #  「安装产生的文件落到了已知持久化位置之外」= 那部分数据不会被持久化。
 #
-#  刻意不检测「面板升级入口 / 代码路径」（面板内更新不生效已由 guard.sh 兜住）。
+#  刻意不检测「面板升级入口 / 代码路径」（面板内更新不生效已由 shim.sh 的执行入口守卫兜住）。
 #
 #  ★ 多 job 结构：probe 探测 sha256；analyze 每线一 job 真装做目录比对
-#   （安装过程由 install.sh 流式输出，独立进度）；report 回写；alert 关键漂移开 issue。
+#   （安装过程由 check.sh drift 流式输出，独立进度）；report 回写；alert 关键漂移开 issue。
 #  基线只在 analyze 成功后更新 —— 否则一次失败就会把「上游变了」这个信号吞掉。
 #
 #  检测范围 = image/lines.conf 里的各条线：新增一条线不用改本文件。
@@ -32,7 +32,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BASELINE: .github/scripts/drift/baseline.json
+  BASELINE: .github/reports/baseline.json
   REPORT: .github/reports/drift.md
   LINES: image/lines.conf
   # 与构建所用基础镜像一致（image/lines.conf 的 base 字段）
@@ -125,7 +125,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   #  2) 每线一个 job 做安装对比（独立进度；非变更时整体跳过）
-  #     安装过程由 .github/scripts/drift/install.sh 流式输出（后台跑 + 前台 tail），
+  #     安装过程由 .github/scripts/check.sh drift 流式输出（后台跑 + 前台 tail），
   #     长静默窗口已消除，job 卡内可见每一步
   # ---------------------------------------------------------------------------
   analyze:
@@ -153,7 +153,7 @@ jobs:
           mkdir -p /tmp/uw
           INSTALL_URL="${{ matrix.url }}" BASE_IMAGE="${BASE_IMAGE}" \
           OUT_MD="/tmp/uw/${{ matrix.line }}.md" CRITICAL_FILE="/tmp/uw/${{ matrix.line }}.critical" \
-            bash .github/scripts/drift/install.sh
+            bash .github/scripts/check.sh drift
 
       - name: 📦 上传对比产物
         if: always()
@@ -205,21 +205,27 @@ jobs:
           SUMMARY: ${{ needs.probe.outputs.summary }}
           LINES_JSON: ${{ needs.probe.outputs.lines }}
           REASON: ${{ needs.probe.outputs.reason }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
         run: |
           set -euo pipefail
           analyzed='skipped'
-          [ -n "$(ls /tmp/uw/*.md 2>/dev/null || true)" ] && analyzed='success'
+          # 只看 .md 会把「安装脚本中途 die」误判成成功：check.sh drift 现在写 .part，
+          # 但一条线失败、另一条成功时仍会有 .md；用 job 结果兜住整体失败
+          if [ "${ANALYZE_RESULT}" = 'success' ] \
+             && [ -n "$(ls /tmp/uw/*.md 2>/dev/null || true)" ]; then
+            analyzed='success'
+          fi
 
           {
             echo '# 🔭 漂移检测报告'
             echo
-            echo '> 本文件由 `.github/workflows/drift.yml` 自动生成，每次运行整体覆盖。'
+            echo '> 本报告由 `.github/workflows/drift.yml` 生成并注入 README，每次运行整体覆盖。'
             echo
             echo "- 生成时间（UTC）：$(date -u '+%F %T')"
             echo "- 触发方式：${{ github.event_name }}"
             echo "- 变更判定：${REASON}"
             echo
-            echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '| 线（显示名） | 线标识 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
             # SUMMARY 由 probe 输出传回，末尾换行会被 GitHub 吃掉：
             # 只 printf '%s' 再 echo 会让表格与下面的 --- 粘成一行（表格失效），
@@ -258,7 +264,7 @@ jobs:
       - name: ✏️ 注入 README 并回写仓库
         run: |
           set -euo pipefail
-          python3 .github/scripts/report.py "${REPORT}" DAILY-DRIFT-REPORT
+          bash .github/scripts/check.sh report "${REPORT}" DAILY-DRIFT-REPORT
           git add "${REPORT}" "${BASELINE}" README.md
           if git diff --cached --quiet; then
             echo '报告与基线无变化，跳过提交。'
@@ -289,7 +295,7 @@ jobs:
   # ---------------------------------------------------------------------------
   alert:
     name: 🚨 关键漂移告警
-    needs: [analyze]
+    needs: [probe, analyze]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -329,7 +335,7 @@ jobs:
             echo
             echo "- 变更判定：${REASON}"
             echo
-            echo '| 线 | 线 | 仓库记录版本 | 安装脚本 | sha256 |'
+            echo '| 线（显示名） | 线标识 | 仓库记录版本 | 安装脚本 | sha256 |'
             echo '|---|---|---|---|---|'
             printf '%s\n\n' "${SUMMARY}"
             echo '完整报告见 `.github/reports/drift.md`（也已内嵌进 README「漂移检测报告」章节）。'

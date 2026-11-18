@@ -1,15 +1,15 @@
 # 备份与恢复
 
 所有状态都在持久化层里：一个 `data/` 目录（compose 默认 `./data:/data`）——
-业务数据与面板状态都在 `data/www/`（bind，宿主可直改；它就是容器 `/www` 的镜像），
-系统层在隐藏的 `data/.system/`。备份工具 `baota-backup` 直接打整份
-`data/`，包内不含宿主机绝对路径，所以恢复到任何机器、任何目录都不受影响。
+业务数据与面板状态在 `data/www/`（bind，宿主可直改；它就是容器 `/www` 的镜像），
+**系统层 + pyenv 两层在 `data/overlay.img` 这一个 ext4 镜像文件里**（compose 默认
+`PERSIST_SYSTEM_IMAGE: "true"`；容器内 loop 挂载到 `/run/baota/overlay`）。
+所以 `data/` 下只有 `www/` 与 `overlay.img` 两项，备份工具打的成员也正是这两项；
+包内不含宿主机绝对路径，恢复到任何机器、任何目录都不受影响。
 （面板代码不在 `data/` 里 —— 它属于镜像，换镜像即升级，无需备份。）
 
-> 若启用了[系统层 ext4 镜像兜底](persistence.md#系统层-ext4-镜像兜底opt-in)
-> （`PERSIST_SYSTEM_IMAGE`），系统层的真身是 data 卷里的镜像文件，
-> `baota-backup` 会自动改拿它当归档成员（`.system` 只是挂载点，内容不进包）——
-> 恢复后启动时自动挂载，步骤与默认布局完全一致。
+> 若把 `PERSIST_SYSTEM_IMAGE` 设为 `false` 走原生 overlay，系统层 upper 才是目录
+> `data/.system/`；`baota-backup` 会自动按实际布局切换归档成员，恢复步骤完全一致。
 
 ---
 
@@ -65,11 +65,10 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 
 它替你绕开手工 tar 的三个坑：
 
-1. **自动排除** `.baota`、`www/backup/auto`、`www/backup/manual`、`www/backup/database`、
-   `www/backup/rsync`、`.system/var/log/journal`（历史残留排除项，当前为 no-op：journal 在容器可写层、不在 data/ 下）—— 漏掉 `auto` 会把上一次的升级快照
+1. **自动排除** `www/backup/auto`、`www/backup/manual`、`www/backup/database`、
+   `www/backup/rsync` 与系统层 journal —— 漏掉 `auto` 会把上一次的升级快照
    打进本次备份，体积逐次翻倍（实测 10M 业务数据 + 60M 快照：不排除 70M，排除后 10M）；
-   journal 目录是打包期间写入最活跃的地方（`file changed as we read it` 几乎都出自它），
-   且由 systemd 自行管理、零恢复价值
+   journal 由 systemd 自行管理、零恢复价值
 2. **自动加 `--xattrs`**，保住 overlay 的目录替换标记
 3. **生成后自动自校验**，并拒绝自包含的包
 
@@ -85,19 +84,20 @@ docker exec baota baota-backup --verify /www/backup/manual/baota-backup-20260902
 # 1) 停机，保证一致（运行中打包，数据库文件可能处于半写状态）
 docker compose down
 
-# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www 与 .system 两个顶层
-#    必须用显式成员 www .system，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
+# 2) 打包。--xattrs 保留 overlay 元数据；归档根是 data/ 下的 www 与 overlay.img 两项
+#    必须用显式成员，不能图省事写 '.'：'.' 会让包内成员名带 './' 前缀，
 #     下面的 --exclude='www/backup/manual' 就匹配不上了（排除静默失效）。把输出包放在
 #     data/ 里时 tar 还会边写边读自己的输出并报错；放外面虽能成功，但包内是 ./www/...，
 #     与 baota-backup 产出的结构不一致，下面的校验与恢复步骤就对不上了
-#    .system 不能漏：面板里装的组件（PHP / nginx / MySQL…）的 overlay 上层都在里面
+#    overlay.img 不能漏：面板里装的组件（PHP / nginx / MySQL…）与 pyenv 全在这一个文件里
 #   （面板状态已归位在 www/server/panel 下，跟着 www 一起进包，不用单列）
+#    原生模式（PERSIST_SYSTEM_IMAGE=false）没有该文件，把成员换成 .system 即可
 tar --xattrs --xattrs-include='trusted.overlay.*' \
     -czf "baota-backup-$(date +%F).tgz" \
-    -C data --exclude='.baota' --exclude='www/backup/auto' \
+    -C data --exclude='www/backup/auto' \
              --exclude='www/backup/manual' --exclude='www/backup/database' \
-             --exclude='www/backup/rsync' --exclude='.system/var/log/journal' \
-             www .system
+             --exclude='www/backup/rsync' \
+             www overlay.img
 
 # 3) 启动
 docker compose up -d
@@ -105,15 +105,13 @@ docker compose up -d
 
 💡 要点：
 
-- `-C data` 加显式成员 `www .system`，让包内路径保持相对（`www/...` 与
-  `.system/...`），恢复到任何机器、任何目录都不受绝对路径影响；结构也与
-  `baota-backup` 的产出一致，两种包共用同一套校验与恢复步骤
-- `--exclude='.baota'`：项目元数据 / 数据层状态（`data/.baota` 与 `data/.system/.baota`），
-  排除后启动时自动重建
+- `-C data` 加显式成员 `www overlay.img`，让包内路径保持相对，恢复到任何机器、
+  任何目录都不受绝对路径影响；结构也与 `baota-backup` 的产出一致，
+  两种包共用同一套校验与恢复步骤
+- **停机后 `overlay.img` 未被 loop 挂载**，此时它就是一个普通 ext4 镜像文件，
+  直接打包即完整（不需要先 mount、也不用导内部文件）
 - `--exclude='www/backup/*'`：升级快照、本工具产物、面板备份、rsync 同步目标，
   都在 `data/www/backup/` 下，**必须排除**，否则自包含、体积逐次翻倍
-- `--exclude='.system/var/log/journal'`：journald 运行时日志（历史残留排除项，当前 no-op：journal 在容器可写层、不在 data/ 下），打包期间写得最凶
-  （热备份的「file changed as we read it」几乎都出自它），恢复价值为零
 - 站点多、数据库大时，耗时主要花在 `data/www/server/data`（MySQL 数据目录），属正常
 - 想看体积分布：`docker exec baota baota-backup --list`
 
@@ -145,7 +143,7 @@ docker exec baota baota-backup --rsync /backup
 /backup/
 ├── data/            ← 整份 data 卷：业务与面板状态 www/（wwwroot / backup /
 │                      server/data、server/panel 面板状态、可选模块 vmail / dk_project）
-│                      + 系统层 .system/<dir>/
+│                      + 系统层 + pyenv 两层 overlay.img
 └── databases.sql    ← MySQL 一致性转储（连得上就有）
 ```
 
@@ -196,7 +194,7 @@ docker compose down
 # 现有 data 先改名而不是直接删，新包有问题还能退回
 mv data "data.bak-$(date +%F)" && mkdir data
 
-# 整包解回 data（业务 + 面板状态 + 系统都在包里，结构就是 data/www、data/.system）
+# 整包解回 data（业务 + 面板状态 + 系统层都在包里，结构就是 data/www、data/overlay.img）
 tar xzf baota-backup-2026-08-31.tgz -C data
 
 docker compose up -d && docker compose logs -f baota
@@ -246,3 +244,44 @@ docker exec -i baota mysql < /path/to/databases.sql
 **注意**
 - 备份存到**另一块盘**，同盘备份等于没备
 - 飞牛快照会随改动占空间，旧快照记得定期清理
+
+## 迁移到新机器
+
+### 老机器
+
+```bash
+# 推荐：容器内备份（自动排除 + 自校验，包落在 data/www/backup/manual/）
+docker exec baota baota-backup
+# 需要停机打包时，用本文「方式二」里那段 tar（显式成员 + 排除项）。
+# 不要图省事写成员 '.'：包内会带 './' 前缀，排除项静默失效，升级快照被打进包里
+```
+
+把备份包和 `docker-compose.yml` 一起传到新机器。
+
+### 新机器
+
+```bash
+# 1) 放好 docker-compose.yml，确认 image 标签与架构匹配（见下面第 2 条）
+# 2) 解开数据
+mkdir -p data && tar xzf baota-backup-*.tgz -C data
+
+# 3) 启动
+docker compose up -d
+docker compose logs -f baota
+```
+
+### 迁移后自动适配的部分
+
+- **面板地址、用户名、口令、安全入口全部不变**——它们都随 `data/` 持久化数据一起保留
+- `hosts`、`resolv.conf`、`hostname` 由 `init.sh` 在每次启动时从宿主注入值写回，与持久化层无关
+- SSH 主机密钥位于 `/etc/ssh`（镜像层），重建/换镜像后回到镜像内置值，客户端**可能**报密钥变更，需在客户端更新 known_hosts
+
+### 迁移后需要你确认的部分
+
+1. **面板端口**：新机器的端口映射要和 `data/www/server/panel/data/port.pl` 里的值对得上
+2. **架构**：amd64 与 arm64 的镜像不通用。`apt` 装的软件在 `/usr`（镜像层，不持久化），
+   二进制是编给原架构的，搬到另一种架构上起不来；面板代码在镜像层，会随架构自动匹配。
+   **跨架构迁移只搬业务数据**：在新机器上全新启动，
+   再用面板导入站点文件与数据库备份
+3. **文件系统**：新位置必须是 ext4 / btrfs / xfs，否则持久化层会降级为只读（见[硬约束](persistence.md#硬约束)）
+4. **磁盘空间**：目标盘至少要留 `data/` 的 1.5 倍

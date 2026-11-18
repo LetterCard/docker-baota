@@ -14,7 +14,7 @@
 # ==============================================================================
 set -euxo pipefail
 
-PANEL_DIR=/www/server/panel
+PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
 CLOUD_URL=${PANEL_CLOUD_URL:-}
 
@@ -41,6 +41,10 @@ PLACEHOLDER = 'http://www.example.com'
 TAG = 'BT-PRO-PERMAUTH'
 SKIP_DIRS = {'pyenv', 'plugin', 'logs', 'backup', 'recycle_bin', 'GeoLite2'}
 notes = []
+cloud_hits = 0
+auth_targets = {'class/panelPlugin.py', 'class/PluginLoader.py'}
+visited_auth = set()
+visited_rules = set()
 
 
 def read(p):
@@ -62,16 +66,20 @@ def sub_once(source, old, new, desc, at_least=1, regex=False):
     if n < at_least:
         raise AssertionError('补丁锚点未命中（%s）：上游代码可能已变更，请复查' % desc)
     notes.append('  %s（%d 处）' % (desc, n))
-    return re.sub(old, new, source, count=1) if regex else source.replace(old, new)
+    # 正则规则可能命中多处（如 local_fix.sh 的多个下载执行分支）。只换第一处
+    # 会被幂等判断当成「已打过」，剩下的分支永远漏补 —— 必须全量替换
+    return re.sub(old, new, source) if regex else source.replace(old, new)
 
 
 # ---------------------------------------------------------------------------
 # 1) 云端地址：占位符 -> 真实云端地址
 # ---------------------------------------------------------------------------
 def patch_cloud_url(source):
+    global cloud_hits
     if PLACEHOLDER not in source:
         return source
     n = source.count(PLACEHOLDER)
+    cloud_hits += n
     notes.append('  云端地址 %s -> %s（%d 处）' % (PLACEHOLDER, cloud_url, n))
     return source.replace(PLACEHOLDER, cloud_url)
 
@@ -207,7 +215,7 @@ NO_UPDATE_RULES = {
             True,
         ),
     ],
-    # 命令行自救通道一并封死：pro 线不跟踪官方更新，升级一律换镜像标签
+    # 命令行自救入口一并封死：pro 线不跟踪官方更新，升级一律换镜像标签
     'script/upgrade_panel_optimized.py': [
         (
             "def main():\n"
@@ -266,6 +274,10 @@ NO_UPDATE_RULES = {
         ),
     ],
 }
+
+# 面板核心文件必须存在：缺了它们，「禁用面板内更新」这条主线就形同虚设，
+# 云端更新包会把授权补丁覆盖掉。其余为可选/版本相关文件，缺失只告警。
+REQUIRED_RULES = {'class/ajax.py', 'class/system.py', 'task.py'}
 
 
 def patch_no_update(rel, source):
@@ -353,7 +365,7 @@ def patch_endtime(source):
     if old in source:
         notes.append('  endtime 覆盖改为 0（永久）')
         return source.replace(old, new, 1)
-    return source
+    raise AssertionError('endtime 锚点未命中且尚未打过补丁（上游可能已改，请复查）')
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +385,7 @@ def main():
 
             # 顺序：依赖占位符原文的规则必须先跑，云端地址替换放最后
             if rel in NO_UPDATE_RULES:
+                visited_rules.add(rel)
                 head = '禁用面板内更新 %s' % rel
                 before = len(notes)
                 cur = patch_no_update(rel, cur)
@@ -380,12 +393,14 @@ def main():
                     notes.insert(before, head)
 
             if rel == 'class/panelPlugin.py':
+                visited_auth.add(rel)
                 before = len(notes)
                 cur = patch_endtime(cur)
                 cur = patch_cloud_list_pro(cur)
                 if len(notes) > before:
                     notes.insert(before, '授权补丁 %s' % rel)
             elif rel == 'class/PluginLoader.py':
+                visited_auth.add(rel)
                 before = len(notes)
                 cur = patch_loader_pro(cur)
                 if len(notes) > before:
@@ -402,22 +417,26 @@ def main():
 
     print('\n'.join(notes))
 
+    # 收尾自检：上面多处补丁「锚点不在就跳过」，少了这层校验，上游一改代码
+    # 就会静默产出缺补丁的镜像（脚本 exit 0，构建照常成功）
+    if cloud_hits == 0:
+        raise AssertionError('云端地址占位符 %s 一次都没命中：安装包可能已换真实域名，请复查' % PLACEHOLDER)
+    missing = sorted(auth_targets - visited_auth)
+    if missing:
+        raise AssertionError('授权补丁目标文件缺失：%s（上游可能已改名，请复查）' % ', '.join(missing))
+    missing_required = sorted(REQUIRED_RULES - visited_rules)
+    if missing_required:
+        raise AssertionError('关键禁用更新目标文件缺失：%s（面板结构可能已变，请复查）' % ', '.join(missing_required))
+    missing_rules = sorted(set(NO_UPDATE_RULES) - visited_rules - REQUIRED_RULES)
+    if missing_rules:
+        print('警告：以下禁用更新目标文件未找到（可能是可选文件）：%s' % ', '.join(missing_rules))
+
 
 main()
 PY
 
-# 打过的补丁要在 /baota/origin 里同步：shim.sh 用它做回滚来源，
-# 若两边不一致，守卫会把运行态还原成旧版本。
-if [ -d /baota/origin ]; then
-    ( cd "${PANEL_DIR}" && find class script -maxdepth 1 -type f \
-        \( -name '*.py' -o -name '*.sh' \) -print ) 2>/dev/null \
-        | while read -r f; do
-            if [ -e "/baota/origin/${f}" ]; then
-                cp -f "${PANEL_DIR}/${f}" "/baota/origin/${f}"
-            fi
-        done || true
-    log '已同步守卫副本 /baota/origin'
-fi
+# /baota/origin 由 services.sh 在本步骤之后从「已打补丁」的面板目录整体复制，
+# 此刻该目录尚未创建，不需要也不能在这里同步（见 pro/Dockerfile 的 RUN 顺序）。
 
 # 清字节码，避免旧 pyc 先生效
 find "${PANEL_DIR}" -maxdepth 2 -name '__pycache__' -type d 2>/dev/null \

@@ -15,9 +15,11 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 
 ## 三十秒理解这个项目
 
-持久化只有一条规则：**`data/www` 下的路径 = 容器内的路径**；系统层是隐藏的
-`data/.system`（overlay 增量，不是拿来翻看的数据）。完整目录树、命名与例外见
-`docs/conventions.md`（唯一真源），原理见 `docs/persistence.md`。
+持久化只有一条规则：**`data/www` 下的路径 = 容器内的路径**；系统层 + pyenv
+两层的增量在 `data/overlay.img` 这一个 ext4 镜像文件里（compose 默认
+`PERSIST_SYSTEM_IMAGE: "true"`，容器内挂载到 `/run/baota/overlay`）。
+所以 `data/` 只有 `www/` 与 `overlay.img` 两项。完整目录树与硬约束见
+`docs/persistence.md`，命名与例外见 `docs/development.md` 末尾附录。
 
 ```
 启动链：/busybox sh /baota/init.sh  →  bash /baota/entrypoint.sh  →  systemd
@@ -28,8 +30,10 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 - **面板代码 `/www/server/panel` 来自镜像、不持久化**；持久化的只是它的
   `data / plugin / vhost / ssl / config` 五个子目录（落在 `data/www/server/panel/`）；
   它的 `pyenv` 走独立 overlay（lower = 镜像 pyenv、upper = 同路径数据层目录）——
-  pip 包持久化、解释器随镜像更新，别再把 `pyenv` 加进 `PANEL_STATE_SUBDIRS`
-- **`/www/server` 走 overlay**（upper 在 `data/.system/www/server`），不进 `data/www` ——
+  pip 包持久化、解释器随镜像更新（镜像模式 upper 在 `overlay.img` 内），
+  别再把 `pyenv` 加进 `PANEL_STATE_SUBDIRS`
+- **`/www/server` 走 overlay**（upper 在系统层：镜像模式在 `overlay.img` 内，
+  原生模式在 `data/.system/www/server`），不进 `data/www` ——
   否则 MySQL 与面板状态的 bind 源会落进 upperdir 内部，形成自引用
 - **可选模块（`vmail` / `dk_project`）不预建**：装了面板里对应模块才出现
 
@@ -40,8 +44,8 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 1. **配置常量只写一处**。`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` / `CRITICAL_DIRS` /
    `AUTO_SNAPSHOT_KEEP` 的唯一真源是 `image/conf/defaults.env`。
    不要往 Dockerfile `ENV` 或 CI 脚本里再抄一份 —— 漂移的表现是静默丢数据。
-2. **命名先查 `docs/conventions.md`**（唯一真源），分节查：新增文件 / 目录查 §4，
-   新增变量查 §5。要点：官方已有的目录原样沿用；**连字符是常规分隔符、该用就用**
+2. **命名先查 `docs/development.md` 末尾「命名与目录结构约定」附录**（唯一真源），
+   分节查：新增文件 / 目录查 §4，新增变量查 §5。要点：官方已有的目录原样沿用；**连字符是常规分隔符、该用就用**
    （`python-real` 就是标准范例），真正禁止的是自造拼法与自造缩写 —— 缩写只在业界
    通用时才用，白名单就 `rc` / `pid` / `sha` / `tmp` 四个（`src` / `dst` / `PKG`
    都不算，要写 `source` / `target` / `BACKUP_FILE`）。变量与它指向的路径要对得上：
@@ -69,8 +73,9 @@ description: "Development and operations guide for this repo (baota-docker: 把�
     线 / 版本号放**步骤名**里（矩阵值可以），job 名用静态中文。
 11. **`.github/reports/report.md` / `.github/reports/drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
     不要手改 —— 下次巡检运行会被整体覆盖。
-12. **`make lint` 的 shellcheck 是 warning 即失败**，且未安装时**静默跳过**。
-    本地跑通不代表 CI 能过；典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
+12. **`make lint` 的 shellcheck 是 warning 即失败**；未安装时统一入口
+    `.github/scripts/check.sh lint shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（不要提交缓存，
+    也别用异架构二进制硬跑）。典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
 13. **面板代码的执行入口只有一个：pyenv 解释器**。`services.sh` 的 `setup_guard`
     把 `pyenv/bin/{python,python3}` 指向 `/baota/shim.sh`，真解释器挪到
     `python-real`，并生成 `/baota/origin` 实体副本（排除 pyenv）。改这块时三条铁律：
@@ -84,27 +89,26 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 | `image/build/base.sh` | 基础系统、救援 shell（`/busybox`）、SSH |
 | `image/build/panel.sh` | 官方脚本安装宝塔 + 两处适配补丁（看门狗 comm / panel_start 幂等）+ 防火墙复位 + 清 swap + 账号链路预热 |
 | `image/build/services.sh` | 运行期脚本权限、systemd 复位、版本与持久化骨架、守卫装配、删构建脚本 |
-| `image/scripts/init.sh` | 阶段 0：并发锁 → 系统层 overlay（含 opt-in ext4 镜像兜底）→ 面板代码隔离 → pyenv 覆盖层 → 业务/面板 bind → 交棒 |
+| `image/scripts/init.sh` | 阶段 0：系统层 overlay（含 `overlay.img` 镜像模式）→ 面板代码隔离 → pyenv 覆盖层 → 业务/面板 bind → 交棒 |
 | `image/scripts/entrypoint.sh` | 阶段 1：版本护栏（版本 + 代码指纹，含升级前快照）→ 首启初始化 → 启动报告归档 → exec systemd |
 | `image/scripts/healthcheck.sh` | 判据：降级标记 / 守卫装配 / 面板版本一致（磁盘水位与端口存活归宝塔监控） |
 | `image/scripts/shim.sh` | pyenv 解释器包装 + 执行入口守卫：先比对版本、不一致就换回镜像副本，再 exec 真解释器（fail-open） |
 | `image/scripts/backup.sh` | `baota-backup`：全量备份、校验、体积分布 |
+| `image/scripts/common.sh` | POSIX 共享函数（配置解析 / 日志 / 版本读取），被运行期脚本 source |
 | `image/conf/defaults.env` | ★ 运行期配置真源 |
 | `image/conf/btpanel.service` | 自建 systemd unit（不依赖 sysv generator） |
 | `image/lines.conf` | ★ 线声明表（各线的脚本地址、探测方式、标签策略、基础镜像） |
 | `image/versions/<主线号>/VERSION` | 各线「已发布」版本（发布流水线回写） |
-| `.github/scripts/check/*.sh` | 发布门禁四套：功能检查（core）/ 只读降级（degrade）/ 版本演进（upgrade）/ 备份恢复（restore） |
-| `.github/scripts/check/published.sh` | 每日巡检：从 DockerHub 拉**已发布**镜像跑回归（含 PHP 扩展编译、二次初始化判定、不可变面板守卫） |
-| `.github/scripts/drift/install.sh` | 漂移检测：一次性容器原样跑官方安装脚本，检测目录漂移（数据落点） |
-| `.github/scripts/drift/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
-| `.github/scripts/report.py` | 把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区 |
+| `.github/scripts/check.sh` | CI 检查统一入口：`core` / `degrade` / `upgrade` / `restore` 四套门禁 + `published` 每日巡检 + `drift` 上游漂移检测（一次性容器真装比对目录落点）；每套是独立子 shell 函数 |
+| `.github/reports/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
+| `.github/scripts/check.sh` | 统一入口：`lint <子命令>` 静态检查、`report [报告] [标记]` 注入 README、`core/…` 门禁 |
 | `.github/workflows/build.yml` | 构建发布：一份流水线跑 12/13 所有线（矩阵从 lines.conf 生成；pro 线另有 build-pro.yml） |
-| `.github/workflows/check.yml` | 每日巡检：prep → 各线**并行**验证 → collect 回写 |
+| `.github/workflows/check.yml` | 每日巡检：prep → 各线**并行**验证 → report 回写 |
 | `.github/workflows/drift.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
 | `.github/reports/report.md` | 每日巡检报告（CI 生成并回写，勿手改） |
 | `.github/reports/drift.md` | 漂移检测报告（CI 生成并回写，勿手改） |
-| `docs/` | 使用文档；`docs/development.md` 是开发者入口 |
-| `docs/conventions.md` | ★ 命名、路径、目录结构与术语的**唯一真源**：新增目录 / 文件 / 变量前必读 |
+| `docs/` | 使用文档（8 篇，一个主题一处详解） |
+| `docs/development.md` | 开发者入口；末尾附录是命名 / 路径 / 术语的**唯一真源** |
 
 ## 常用命令
 
@@ -114,7 +118,7 @@ make up                        # 起容器
 make logs                      # 看日志（首次登录凭据在这里）
 make ps                        # 健康状态
 make health                    # 跑发布前健康检查
-make lint                      # shellcheck + bash -n + YAML（shellcheck 未装会跳过；CI 上 warning 即失败）
+make lint                      # 统一入口 .github/scripts/check.sh lint（shellcheck 未装自动下载；CI 上 warning 即失败）
 
 docker exec baota baota-backup            # 备份
 docker exec baota baota-backup --list     # 体积分布 + 磁盘水位
@@ -134,17 +138,17 @@ docker exec baota /baota/healthcheck.sh      # 单独执行，看退出码
 
 - `critical` 存在 → 看 `docker compose logs baota` 里 `[init][WARN]` 的原因：
   未 privileged / `/data` 在 SMB·NFS·exFAT·NTFS / `/data` 落在容器可写层
-- 启动被「另一个容器实例正在使用」拦下 → 两份 compose 共用同一 `data/`，
-  确认没有别的实例后删 `data/.system/.baota/lock`
+- 两份容器共用同一 `data/` → 本项目已移除独占锁、不会再拦截启动，
+  但内核禁止两个 overlay 共用 upper，写入会互相覆盖；必须 `down` 掉旧容器再起新的
 - 面板进程起不来 → 检查 `data/www/server/panel/data` 是否被写坏（面板代码来自镜像层、不持久化，不会因持久化写坏）；
   启动器异常 → 不可变面板下启动器来自镜像层、不持久化，换镜像版本即整体刷新，不会锁死
-- 想看历史上哪次启动开始降级 → `cat data/.system/.baota/boot.log`
+- 想看历史上哪次启动开始降级 → 持久化层 `.baota/boot.log`（镜像模式在 `overlay.img` 内）
 
 **想确认 / 更换面板版本** → 面板代码来自镜像层、不持久化，换镜像标签即整体切换面板，
 不存在「持久层里的旧面板代码覆盖新镜像」的情况。在面板里点「更新」的写入只落在容器可写层，
 restart 不消失、销毁重建后即还原为镜像版本。想换面板版本：直接换镜像标签，无需 `reset-panel`（已废弃）。
 
-**每日巡检失败或 .github/reports/report.md 没更新** → 先看 collect 步骤的「待提交变更」输出：
+**每日巡检失败或 .github/reports/report.md 没更新** → 先看 report 步骤的「待提交变更」输出：
 
 - 有 diff 却没提交 → 回写步骤挂了，多半是 `git rebase` 因 dirty tree 中止（红线 8）
 - 打印「报告内容无变化，跳过提交」 → 内容确实一致（时间戳每次不同，正常不会命中）
@@ -165,4 +169,26 @@ restart 不消失、销毁重建后即还原为镜像版本。想换面板版本
 | 排障（症状 → 原因 → 处置） | `docs/faq.md`、`docs/operations.md` |
 | 改代码须知、注释规范、门禁覆盖 | `docs/development.md` |
 | 线声明表与流水线 | `docs/release.md` |
-| 备份 / 升级 / 配置 / 快速开始 | `docs/` 下同名文档 |
+| 备份与迁移 / 升级与回滚 / 配置 / 快速开始 | `docs/backup.md`、`docs/operations.md`、`docs/configuration.md`、`docs/quickstart.md` |
+
+---
+
+## 安装与维护
+
+本节给人看（AI 助手只需读上面的红线与文件地图）。技能包**只维护这一份**，
+不绑定任何工具 —— Codex / CodeBuddy / Trae 都放同一个 `baota-docker/` 目录，
+不要复制成多份手工同步（必然漂移，历史上已删过一份 Trae 副本）。
+
+| 工具 | 常见技能目录 |
+|---|---|
+| Codex | `$CODEX_HOME/skills/`（默认 `~/.codex/skills/`） |
+| CodeBuddy | `~/.codebuddy/skills/` |
+| Trae | 按其技能文档指定的目录 |
+
+也可以不安装：直接在对话里让助手读 `skills/baota-docker/SKILL.md`。
+
+维护约定：
+
+- SKILL.md 只放「AI 不知道就会犯错」的东西：红线、文件地图、命令速查；
+  细节写进 `docs/`，技能里只做索引 —— 正文与技能重复处一律以 `docs/` 为准
+- 改了仓库结构、命令、红线时，同步更新 `SKILL.md`（它是助手的第一入口）

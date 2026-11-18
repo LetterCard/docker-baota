@@ -5,7 +5,7 @@
 - 生成时间（UTC）：2026-11-18 01:13:49
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
-- 验证脚本：`.github/scripts/check/published.sh`
+- 验证脚本：`.github/scripts/check.sh published`
 
 ## 概要
 

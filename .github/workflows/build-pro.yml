@@ -23,7 +23,7 @@ on:
         type: string
         default: ''
       version:
-        description: '覆盖版本(仅镜像 label)，留空用云端探测'
+        description: '覆盖版本（同时是四套门禁的期望值，须与面板 public.version() 一致），留空用云端探测'
         type: string
         default: ''
       install_url:
@@ -84,7 +84,7 @@ jobs:
             rm -f "${tmp}"
             echo "云端版本接口：${ver}"
           fi
-          printf '%s' "${ver}" | grep -Eq '^[0-9][0-9.]*$' \
+          printf '%s' "${ver}" | grep -Eq '^[0-9]+(\.[0-9]+)*$' \
             || { echo "::error::版本不是合法形态：${ver}"; exit 1; }
           base_img="${PRO_BASE}"
           [ -n "${BASE_OVERRIDE}" ] && base_img="${BASE_OVERRIDE}"
@@ -183,10 +183,10 @@ jobs:
           mkdir -p "${LOG_DIR}"
           VER="${{ needs.prep.outputs.version }}"
 
-          bash .github/scripts/check/run.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
-          bash .github/scripts/check/run.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
-          bash .github/scripts/check/run.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
-          bash .github/scripts/check/run.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
+          bash .github/scripts/check.sh core    "baota:candidate" "${VER}" > "${LOG_DIR}/core.log"    2>&1 & PID_CORE=$!
+          bash .github/scripts/check.sh degrade  "baota:candidate"                > "${LOG_DIR}/degrade.log"  2>&1 & PID_DEGRADE=$!
+          bash .github/scripts/check.sh upgrade "baota:candidate" "${VER}" > "${LOG_DIR}/upgrade.log" 2>&1 & PID_UPGRADE=$!
+          bash .github/scripts/check.sh restore "baota:candidate"          > "${LOG_DIR}/restore.log" 2>&1 & PID_RESTORE=$!
 
           FAILED=0
           wait "${PID_CORE}"    || { echo "::error::core 检查失败，日志见 ${LOG_DIR}/core.log";    FAILED=1; }

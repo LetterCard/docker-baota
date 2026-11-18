@@ -30,6 +30,12 @@ data/
 *.tgz
 .DS_Store
 
+# 本地缓存与临时文件：lint 下载的 shellcheck 有 58MB，绝不能进构建上下文
+.cache/
+.tmp-*
+__pycache__/
+*.pyc
+
 # 密钥与本地环境（绝不能进镜像）
 .env
 .env.*

@@ -13,8 +13,9 @@
 #  解释器用 /bin/sh：每 30 秒跑一次，越轻越好。
 # ==============================================================================
 
-# 配置真源：/baota/defaults.env（与 init / entrypoint / backup / guard 共用闸门）
+# 配置真源：/baota/defaults.env（与 init / entrypoint / backup / shim 共用闸门）
 LOG_PREFIX='🩺 [health]'
+# shellcheck source=image/scripts/common.sh
 . /baota/common.sh
 load_defaults || exit 1
 

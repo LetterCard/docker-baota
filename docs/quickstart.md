@@ -12,8 +12,10 @@
 `data/www/` 就是你在容器里看到的 `/www`：站点在 `data/www/wwwroot/`、数据库在
 `data/www/server/data/`、备份在 `data/www/backup/`、面板自己的配置与插件在
 `data/www/server/panel/` —— 找什么按容器里的路径找，你日常要管理的都在这里。
-`data/.system/` 是系统层（www/server 的 overlay 上层与项目元数据，
-隐藏目录：它是相对镜像的改动，一般不用翻）。
+系统层 + pyenv 两层的增量在 `data/overlay.img` 这一个 ext4 镜像文件里
+（compose 默认 `PERSIST_SYSTEM_IMAGE: "true"`）。所以 `data/` 只有 `www/` 与
+`overlay.img` 两项：重置系统层 = 删 `overlay.img`，迁移 = 打包 `data/` 走人。
+三种取值的区别见[编排配置详解](configuration.md#环境变量)。
 
 ## 其它 Linux 服务器
 
@@ -32,7 +34,7 @@ docker exec baota bt status   # 面板 + 任务进程都应在运行
 ```
 
 `healthy` 的判定只针对封装自身不变量（持久化降级标记、执行入口守卫、面板版本钉死），
-不是单纯的进程探活，见[编排配置详解](configuration.md#健康检查与日志)。
+不是单纯的进程探活，见[编排配置详解](configuration.md#健康检查)。
 
 首次启动生成的面板地址与账号口令打印在启动日志里（`docker compose logs baota`）。
 忘记口令用 `docker exec -it baota bt 5` 重置 —— `bt default` 读的文件属于面板代码、
@@ -112,4 +114,4 @@ docker exec baota passwd root   # 改 root 口令
   点「更新」虽然会显示成功（文件写进了容器可写层），但**不会生效**：面板代码的每次
   执行都先过执行入口守卫，发现版本与镜像不一致就用镜像副本换回去（见
   [持久化原理](persistence.md#执行入口守卫不可变面板的兜底)）。升级 / 回退面板请换
-  镜像标签再 `docker compose up -d`（见[升级与迁移](upgrade.md)）。
+  镜像标签再 `docker compose up -d`（见[升级与迁移](operations.md)）。

@@ -35,10 +35,13 @@ docker exec -it baota bt 5         # 重置面板口令
 ## 持久化层变成只读
 
 `docker compose ps` 显示 unhealthy，或日志里出现「持久化层挂载成功但不可写」时，
-说明 `/data` 落在了不支持的文件系统上 —— 挪到 ext4 / btrfs / xfs 即可，
-原因见[硬约束](persistence.md#硬约束)。实在挪不了（比如只能挂 SMB / NTFS 硬盘），
-用 opt-in 的[系统层 ext4 镜像兜底](persistence.md#系统层-ext4-镜像兜底opt-in)：
-设 `PERSIST_SYSTEM_IMAGE=/data/.system.img` 即可，业务数据不受影响。
+说明 `/data` 落在不支持 overlay 的文件系统上（SMB / NFS / exFAT / NTFS / virtiofs），
+原因见[硬约束](persistence.md#硬约束)。
+
+compose 默认已设 `PERSIST_SYSTEM_IMAGE: "true"`，系统层走 `data/overlay.img`，
+本不该出现这个症状。若你把它改成了 `false`（原生 overlay），改回 `true` 即可，
+业务数据 `data/www` 不受影响。三种取值的区别见
+[镜像模式](persistence.md#镜像模式单文件-overlayimg)。
 
 ## 重建容器后插件报错 / 面板里显示已装却用不了
 
@@ -99,17 +102,18 @@ bt restart
 
 （`BT-Panel` 来自镜像层、运行期只读，热改需重启面板生效，仅用于定位；根治请重建镜像。）
 
-修复是否生效已被 CI 自动门禁覆盖（`core.sh` 的 `A16` 步断言看门狗 cmdline 补丁同时落在
+修复是否生效已被 CI 自动门禁覆盖（`check.sh core` 的 `A16` 步断言看门狗 cmdline 补丁同时落在
 运行态面板与守卫基准副本，发布前门禁与每日回归都跑这一断言）。想手动确认，起容器后：
 `docker exec <容器> sh -c "grep -qF 'not in cmdline' /www/server/panel/BT-P* && echo OK"`。
 
-## 启动被「另一个容器实例正在使用」拦下
+## 两个容器共用同一份 data/
 
-同一份 `data/` 不允许两个容器同时挂载（内核 EBUSY / 行为未定义）。
-常见原因是两个容器 / 两个项目共用同一个 `data/` 目录，或手工 `docker run` 挂了同一个卷。
+本项目已移除持久化独占锁，**不再有「另一个容器实例正在使用」这条启动拦截**。
+内核禁止两个 overlay 共用 upper，两份容器同时挂同一个 `data/` 会让写入互相覆盖，
+甚至损坏 `data/overlay.img` 里的文件系统。
 
-确认没有其它实例在跑之后，删除 `data/.system/.baota/lock` 再启动。
-锁由内核持有、容器死亡会自动释放，正常重启不需要手工删。
+所以：**一份 `data/` 只能对应一个容器**。多实例请各用各的目录；
+重建前先 `docker compose down`，确认旧容器已停再起新的。
 
 ## 备份体积逐次翻倍
 
@@ -118,9 +122,10 @@ bt restart
 
 ## 升级后面板功能异常
 
-先看日志里有没有「检测到镜像降级」：`data/.system/.baota/version` 记录上次启动的
-镜像版本，`data/www/backup/auto/` 有升级前的面板数据快照；回滚步骤见
-[升级与迁移](upgrade.md#回滚)。
+先看日志里有没有「检测到镜像降级」：持久化层 `.baota/version` 记录上次启动的
+镜像版本（镜像模式在 `overlay.img` 内，原生模式在 `data/.system/.baota/`），
+`data/www/backup/auto/` 有升级前的面板数据快照；回滚步骤见
+[运维手册](operations.md#回滚)。
 
 ## 想彻底重来
 

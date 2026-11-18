@@ -31,7 +31,7 @@ LINE_VER  := $(shell [ -n "$(LINE_VERSION_FILE)" ] && tr -d '[:space:]' < "$(LIN
 # 系统层 overlay 上层目录的真源：image/conf/defaults.env 的 PERSIST_SYSTEM_DIRS。
 # reset-system 清空这些目录的 overlay 上层（upper），面板组件即回到「当前镜像」版本；
 # 数据层（data/www 下的业务与面板状态）不在此列、不受影响。
-SYSTEM_DIRS := $(shell sed -n 's/^PERSIST_SYSTEM_DIRS="$${PERSIST_SYSTEM_DIRS:-\(.*\)}"$$/\1/p' image/conf/defaults.env | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
+SYSTEM_DIRS := $(shell sed -n 's/^PERSIST_SYSTEM_DIRS="$${PERSIST_SYSTEM_DIRS:-\(.*\)}"$$/\1/p' image/conf/defaults.env | tr ' ' '\n' | grep -v '^$$' | tr '\n' ' ')
 # 编排文件与 Dockerfile 同在仓库根（docker build -f image/Dockerfile .），
 # 所以 up/down/logs 等目标直接 cd 到 ROOT_DIR —— 不另设等价的 COMPOSE_DIR 别名
 # （同一个概念两个名字，改一处漏一处就是幽灵 bug）
@@ -81,29 +81,29 @@ ps: ## 查看健康状态
 exec: ## 进入容器（make exec CMD="bt default"）
 	cd $(ROOT_DIR) && docker compose exec baota $(or $(CMD),bash)
 
-# 四套发布前检查的统一入口（.github/scripts/check/），
+# 四套发布前检查 + 每日巡检共用一个入口（.github/scripts/check.sh），
 # 各覆盖一个互不相关的失效面：
 #   core     功能检查 —— 「功能完整性」
 #   degrade  持久化降级场景 —— 「挂载正确性」
 #   upgrade  升级 / 降级路径 —— 「版本演进」
 #   restore  备份恢复闭环 —— 「备份可恢复」
-CHECK_DIR := .github/scripts/check
+CHECK_SH := .github/scripts/check.sh
 CHECK_VERSION := $(or $(VERSION),$(LINE_VER))
 
 health: ## 功能检查（全新卷 + 同卷重建）
-	bash $(CHECK_DIR)/run.sh core "$(IMAGE)" "$(CHECK_VERSION)"
+	bash $(CHECK_SH) core "$(IMAGE)" "$(CHECK_VERSION)"
 
 health-degrade: ## 持久化降级场景（只读持久化根是否被识别为 critical）
-	bash $(CHECK_DIR)/run.sh degrade "$(IMAGE)"
+	bash $(CHECK_SH) degrade "$(IMAGE)"
 
 health-upgrade: ## 升级 / 降级路径（版本护栏 + 升级前快照）
-	bash $(CHECK_DIR)/run.sh upgrade "$(IMAGE)" "$(CHECK_VERSION)"
+	bash $(CHECK_SH) upgrade "$(IMAGE)" "$(CHECK_VERSION)"
 
 health-restore: ## 备份恢复闭环（站点 / 数据库 / 面板状态能否恢复回来）
-	bash $(CHECK_DIR)/run.sh restore "$(IMAGE)"
+	bash $(CHECK_SH) restore "$(IMAGE)"
 
 health-all: ## 四套全部跑一遍，任一失败即终止
-	bash $(CHECK_DIR)/run.sh all "$(IMAGE)" "$(CHECK_VERSION)"
+	bash $(CHECK_SH) all "$(IMAGE)" "$(CHECK_VERSION)"
 
 backup: ## 在运行中的容器里生成一份全量备份
 	docker exec baota baota-backup $(OPTS)
@@ -112,7 +112,7 @@ backup: ## 在运行中的容器里生成一份全量备份
 # 不在本文件另抄一份），让面板里装的组件（PHP / nginx / MySQL…）回到「当前镜像」版本。
 # 会丢：面板组件 overlay 上层里你手动改过 / 装过的增量
 # 不丢：业务数据、站点、数据库、备份、证书、面板账号与配置 —— 全在 data/www（bind 层）；
-#   .baota 元数据同样保留：里面有镜像版本记录，删了会被判「首次使用」、
+#   系统层版本指纹（digest）保留在系统层 .baota 内，删了会被判「首次使用」、
 #   升级前快照逻辑随之失效（没有可回滚的旧数据）
 #
 # 红线：必须先 down —— 容器运行时系统层正挂着 overlay，此时删 upper 是未定义行为
@@ -127,8 +127,8 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	@set -eu; \
 	cd "$(ROOT_DIR)"; \
 	SYSTEM=data/.system; \
-	if [ -f data/.baota/system-image ]; then \
-		echo '❌ 系统层装在 ext4 镜像里（data/.baota/system-image 存在），本目标不适用：'; \
+	if [ -f data/overlay.img ]; then \
+		echo '❌ 系统层装在 ext4 镜像里（data/overlay.img 存在），本目标不适用：'; \
 		echo '   镜像里是整个系统层（面板里装的组件、apt 软件、面板账号）。'; \
 		echo '   要重置请停容器后删除该镜像文件再启动（等于全新系统层）。'; \
 		exit 1; \
@@ -149,7 +149,7 @@ reset-system: ## 重置系统层（保留数据层）：make reset-system CONFIR
 	        echo "  已清空 $$SYSTEM/.baota/$$d.work（overlay 工作目录）"; \
 	    fi; \
 	done; \
-	echo '系统层已重置（.baota 元数据保留）'; \
+	echo '系统层已重置'; \
 	docker compose up -d; \
 	echo '完成。查看启动日志：make logs'
 
@@ -164,9 +164,7 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@for f in image/build/*.sh image/scripts/entrypoint.sh \
 	          image/scripts/backup.sh \
 	          image/scripts/shim.sh \
-	          .github/scripts/check/*.sh \
-	          .github/scripts/lint/*.sh \
-	          .github/scripts/drift/*.sh; do \
+	          .github/scripts/check.sh; do \
 	    bash -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- sh -n (POSIX) ---'
@@ -175,9 +173,9 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	    sh -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- shellcheck ---'
-	@bash .github/scripts/lint/shellcheck.sh
+	@bash .github/scripts/check.sh lint shellcheck
 	@echo '--- BT-Panel 字面量（非注释行）检查 ---'
-	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check 2>/dev/null \
+	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check.sh 2>/dev/null \
 	      | grep -vE ':[0-9]+:[[:space:]]*#' || true); \
 	 if [ -n "$$BAD" ]; then \
 	   echo '  FAIL 非注释行出现 BT-Panel 字面量：'; \
@@ -187,11 +185,11 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	 fi; \
 	 echo '  ok  无非注释的 BT-Panel 字面量'
 	@echo '--- 配置真源一致性（defaults.env vs 各脚本兜底）---'
-	@bash .github/scripts/lint/config.sh
+	@bash .github/scripts/check.sh lint config
 	@echo '--- 命名规范（禁用标识符 / 容器名 / 卷名 / 变量前后缀 / 术语）---'
-	@bash .github/scripts/lint/naming.sh
+	@bash .github/scripts/check.sh lint naming
 	@echo '--- 注释体积（文件头 ≤16 行、注释块 ≤10 行）---'
-	@bash .github/scripts/lint/comments.sh
+	@bash .github/scripts/check.sh lint comments
 	@echo '--- YAML 语法 ---'
 	@for f in docker-compose.yml \
 	          .github/workflows/*.yml; do \
@@ -199,6 +197,6 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	        && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- workflow 内嵌脚本语法 ---'
-	@bash .github/scripts/lint/workflow.sh
+	@bash .github/scripts/check.sh lint workflow
 	@echo '--- 文档链接与锚点 ---'
-	@bash .github/scripts/lint/links.sh
+	@bash .github/scripts/check.sh lint links

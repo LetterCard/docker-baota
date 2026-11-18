@@ -21,7 +21,6 @@
   - [镜像与首次启动](#镜像与首次启动)
   - [持久化模型](#持久化模型)
   - [升级语义](#升级语义)
-  - [并发与一致性保护](#并发与一致性保护)
 - [快速开始](#快速开始)
 - [配置](#配置)
 - [发布线](#发布线)
@@ -125,10 +124,9 @@ data/
 │   │   └── pyenv/       pyenv 覆盖层 upper ↔ 插件 pip 装的包（解释器本身仍来自镜像）
 │   ├── vmail/           邮局数据        ↔ /www/vmail（装了邮局才出现）
 │   └── dk_project/      面板 Docker 项目 ↔ /www/dk_project（装了 Docker 模块才出现）
-├── .system/      系统层（overlay upper，以 . 开头：类 Unix/macOS 下隐藏，飞牛文件管理器/SMB 仍可见）
-│   ├── www/server/                       面板里装的组件、计划任务脚本、插件数据
-│   └── .baota/                           锁 / 版本与指纹记录 / 启动历史 / 各 overlay 工作目录
-└── .baota/       数据层元数据（并发锁，以 . 开头：类 Unix 下隐藏，飞牛/SMB 仍可见）
+└── overlay.img   系统层 + pyenv 两层的差量（单个 ext4 镜像文件）
+                  容器内 loop 挂载到 /run/baota/overlay（在 /data 之外）
+                  内含 www/server/ upper、pyenv/ upper、.baota/ 元数据与 workdir
 ```
 
 **面板代码**（`/www/server/panel`）**不持久化**：它属于镜像，随镜像替换整体更新
@@ -139,8 +137,9 @@ data/
 启动器恢复、版本审计之类的补丁也就都不需要了。
 
 **pyenv 覆盖层**：面板的 Python 环境走一层独立 overlay —— `pip` 装进来的包落在
-`data/www/server/panel/pyenv`（重建后还在），解释器与镜像自带依赖仍来自镜像
-（换镜像照常更新）。于是「插件重建后还能跑」不再依赖把 `pyenv` 整个持久化。
+该层 upper（镜像模式在 `overlay.img` 内，原生模式在 `data/www/server/panel/pyenv`），
+重建后还在；解释器与镜像自带依赖仍来自镜像（换镜像照常更新）。
+于是「插件重建后还能跑」不再依赖把 `pyenv` 整个持久化。
 
 **执行入口守卫**：面板更新写进来的新代码**不会被执行** —— 面板代码的每次执行
 都先过 `/baota/shim.sh`，发现代码版本 ≠ 镜像版本就用镜像副本换回去（只覆盖、
@@ -154,20 +153,16 @@ data/
 upper；业务数据、面板状态、面板里装的组件都是持久的，完全不动。
 完整取舍与实测见[持久化原理](docs/persistence.md#换镜像后会发生什么)。
 
-### 并发与一致性保护
-
-持久化层在挂载时获取排他锁。当同一份持久化数据被第二个容器实例尝试挂载时，锁竞争会阻止其启动，避免两个实例同时写入同一份数据造成损坏。
-
----
-
 ## 快速开始
 
 环境要求三条，缺一不可：
 
 - 已安装 Docker 与 Docker Compose；
-- 持久化根（`/data`、`/data/.system`）必须位于 **ext4、btrfs 或 xfs** 上（飞牛存储池满足）；
-  落在 SMB / NFS / exFAT / NTFS 上会「挂载成功但只读」、写入**静默失败** ——
-  这是唯一的硬要求，绕法见[系统层 ext4 镜像兜底](docs/persistence.md#系统层-ext4-镜像兜底opt-in)；
+- compose 默认启用**镜像模式**（`PERSIST_SYSTEM_IMAGE: "true"`）：系统层 + pyenv
+  两层装在 `data/overlay.img` 里，SMB / NFS / exFAT / NTFS / virtiofs 上也能工作。
+  改成 `false` 走原生 overlay 时才要求 `data/` 位于 **ext4 / btrfs / xfs**
+  （飞牛存储池满足）。三种取值见[编排配置详解](docs/configuration.md#环境变量)；
+- 镜像模式需要 loop 设备（Docker Desktop 的虚拟机通常没有，OrbStack 完整虚拟机可用）；
 - 容器以**特权模式**运行（`docker-compose.yml` 已配好），因此不适用于 rootless Docker。
 
 资源：镜像约 1.4–1.8 GB（两条线不同）；面板、MySQL 与 PHP 会常驻，建议宿主机内存 ≥ 2 GB
@@ -233,7 +228,7 @@ Dockerfile 与流水线都只有一份）：
 - **重建容器**：销毁后使用同一份持久化数据重建，凭据与数据保持不变；
 - **排障**：查看日志、健康检查状态与已知问题。
 
-详见 [升级与迁移](docs/upgrade.md) 及[文档地图](#文档地图)里的对应章节。
+详见 [升级与迁移](docs/operations.md) 及[文档地图](#文档地图)里的对应章节。
 
 ---
 
@@ -261,100 +256,22 @@ Dockerfile 与流水线都只有一份）：
 
 - **面板内「更新」不会生效**。写入落在容器可写层，且执行入口守卫会在代码被执行前换回镜像版本（UI 仍会显示「更新成功」）。升级 / 回退面板请换镜像标签。
 - **不支持 rootless Docker 与无特权的托管容器服务**。overlay 挂载与 systemd 都要求特权模式；它的取舍、安全影响与规避清单见[特权模式（privileged）的取舍与规避](#特权模式privileged的取舍与规避)。
-- **持久化根不能是网络文件系统**。SMB / NFS / exFAT / NTFS 会「挂载成功但只读」，写入静默失败 —— 这是最危险的失效模式，启动时会被识别为 `critical` 并判 unhealthy。唯一的绕法是 opt-in 的[系统层 ext4 镜像兜底](docs/persistence.md#系统层-ext4-镜像兜底opt-in)：把系统层装进 data 卷里的一个镜像文件，业务层不受影响。
-- **同一份 `data/` 不能被两个容器同时挂载**。挂载时取排他锁，第二个实例会被阻止启动（避免并发写坏数据）；12.x 与 13.x 若指向同一个 `data/` 目录就会触发。
+- **原生模式下持久化根不能是网络文件系统**。SMB / NFS / exFAT / NTFS / virtiofs
+  会让 overlay「挂载成功但只读」、写入静默失败 —— 这是最危险的失效模式，启动时
+  会被识别为 `critical` 并判 unhealthy。compose 默认的[镜像模式](docs/persistence.md#镜像模式单文件-overlayimg)
+  （`data/overlay.img`）正是为绕开它，业务层不受影响。
+- **同一份 `data/` 只能对应一个容器**。本项目已移除排他锁、不再拦截第二个实例，
+  但内核禁止两个 overlay 共用 upper，同时挂载会互相写坏；多实例请各用各的 `data/`。
 - **跨架构搬移 `data/` 未经验证**。amd64 与 arm64 各自构建镜像，同一份 `data/` 在两种架构之间迁移不在门禁覆盖范围内。
 
 ---
 
 ## 特权模式（privileged）的取舍与规避
 
-`docker-compose.yml` 里用了 `privileged: true` 加 `security_opt: [seccomp:unconfined, apparmor:unconfined]`。
-这不是图省事，而是被本方案的三项硬需求共同决定的；下面说清它换来什么、代价是什么、以及怎么把代价压到最低。
-
-### 为什么必须 privileged
-
-| 需求 | 需要的特权 | 不授权会怎样 |
-|---|---|---|
-| 运行期 `mount -t overlay` 接系统目录 | `CAP_SYS_ADMIN` | 持久化层挂不上，写入落到容器可写层、重建即丢 |
-| 把业务/状态子目录 `mount -o bind` 进 `/www` | `CAP_SYS_ADMIN` | 同上 |
-| 以 systemd 作 PID1（停 nginx/MySQL/面板靠它） | `CAP_SYS_ADMIN` + 可写 `/sys/fs/cgroup` + `/run` tmpfs | 起不来或关机超时被强杀 |
-| 宝塔管服务、跑 `iptables`/防火墙 | `CAP_NET_ADMIN` | 面板里装软件、改防火墙失败 |
-| opt-in 的 ext4 镜像兜底（`PERSIST_SYSTEM_IMAGE`）挂 loop 设备 | `/dev/loop-control` + loop 设备节点 | 兜底模式挂不上盘 |
-
-逐项授权能做到，但要把上面这些 capability、设备节点、以及 systemd 依赖的 seccomp/apparmor 放开
-凑齐，几乎等于把 `privileged` 该给的都给了——这也是 compose 直接写 `privileged` 而不是一长串
-`cap_add` 的原因：更短、更不容易漏，且四套 CI 门禁（功能 / 降级 / 升级 / 恢复）都只在 privileged
-下验证过。
-
-### 安全影响
-
-`privileged` 等价于**把宿主机内核交给容器**：它拿到全部 Linux capabilities，能读写所有 `/dev`、
-加载内核模块、改宿主机 iptables、触及宿主网络命名空间。换言之，容器内一旦被攻破
-（来路不明的面板插件、站点里跑的 PHP 代码被利用，或镜像本身不可信），攻击者就约等于拿到了宿主机 root。
-
-所以这一条是**设计取舍，不是缺陷**，前提是「容器跑在可信边界内」。它不适合：
-
-- 多租户 / 共享的托管 Docker 服务（rootless 也不行，见上）；
-- 把 Docker socket 挂进容器的玩法；
-- 把面板、SSH、phpMyAdmin 端口直接暴露到公网。
-
-### 规避风险的清单
-
-1. **只在自己信任的内网 / 单机跑**，最好是独占的 NAS 或虚拟机，不与不可信负载混部。
-2. **端口别曝公网**：SSH（`2222`）非必要注释掉；phpMyAdmin（`888`）默认开放，不用就注释；
-   面板安全入口（随机 8 位）务必保留，别把 `/login` 直曝公网。
-3. **首启凭据默认随机生成、只在首次启动日志里打印**（看 `docker compose logs`），登录后立刻在面板里重设。
-   想固定口令时：把 `PANEL_PASSWORD`/`ROOT_PASSWORD` 等写进同目录的 `.env`，**不要直接写进 `docker-compose.yml` 再提交到 Git**（那会把口令进版本库）。
-   只拉镜像本地跑、不提交仓库的，用随机口令 + 面板内重设即可，无需 `.env`。
-4. **不在面板里装来路不明的插件、跑不可信的站点代码**——特权模式下它们等同宿主 root 权限。
-5. **设 `mem_limit`**：把故障域封在容器内，避免 MySQL 失控拖垮整机（见[编排配置详解](docs/configuration.md#资源上限与规划)）。
-6. **定期 `docker compose ps` 看 STATUS**：持久化降级会直接 `unhealthy`，别等数据静默丢才发现。
-
-### 想缩小攻击面：capability 最小化（备选，未经 CI 验证）
-
-若你接受「非特权化需自行验证、且失去部分能力」的代价，可把 `privileged: true` 换成：
-
-```yaml
-    # 去掉 privileged，改为最小授权；systemd + overlay + 宝塔服务管理都靠这些
-    cap_drop:
-      - ALL             # 必须先行：否则 Docker 默认的 ~14 个 cap（MKNOD / DAC_OVERRIDE /
-                        # NET_RAW…）仍在，缩小的是假象
-    cap_add:
-      - SYS_ADMIN      # mount overlay / bind、systemd
-      - SYS_RESOURCE   # systemd 设置资源上限
-      - NET_ADMIN      # 宝塔 iptables / 防火墙
-    security_opt:
-      - apparmor:unconfined
-      - seccomp:unconfined
-    devices:
-      - /dev/loop-control   # 仅启用 PERSIST_SYSTEM_IMAGE 兜底时才需要
-      - /dev/loop0
-```
-
-实测（OrbStack 上只能验证能力位，overlay 被其运行时整体禁止，见下方）：`cap_drop: ALL` + 三项 `cap_add` 后
-容器内 `CapEff = 0000000001201000`，恰好只有 `SYS_ADMIN + SYS_RESOURCE + NET_ADMIN` 三位，
-`mknod` 创建设备节点等默认危险操作已被拒；去掉 `cap_drop: ALL` 时会多出 Docker 默认那批 cap，缩小大打折扣。
-
-注意：
-
-- 这**没有消除**核心风险——`SYS_ADMIN` 已是内核级权限，仍等价于很大一部分 privileged；
-  它只是不再开放「所有设备 + 所有 capability + 内核模块加载」这一整包。
-- loop 镜像兜底（`PERSIST_SYSTEM_IMAGE`）必须额外挂 `/dev/loop*`，否则该模式挂不上。
-- 此路径**未经过本项目的 CI 门禁**（core/degrade/upgrade/restore 都在 privileged 下验证），
-  不同宿主机（cgroup v1/v2、Docker 版本、AppArmor 配置）表现可能不一致，出问题需自行排查。
-- ⚠️ **不要拿 OrbStack / 其他 macOS 容器运行时当验证环境**：实测其运行时整体禁止在容器内挂
-  overlayfs（连 `privileged` 都报 `wrong fs type / bad superblock`），systemd 在非特权容器里也起不来；
-  这与「macOS 宿主目录不是 ext4/btrfs/xfs」是同一类硬约束的更彻底版本。最小集只在**真实 Linux 宿主**
-  （飞牛 / Debian / Ubuntu）上才有意义，且仍需你在那上面亲自验证。
-- 真要降到最低风险，更彻底的做法是**把容器放到独立、不存其他敏感数据的宿主机上**，
-  而不是在 capability 上微调——隔离边界比权限裁剪更可靠。
-
-> 结论：**默认保持 `privileged`**（项目支持且 CI 覆盖的路径）；上面的最小化方案仅作为
-> 你已评估过风险、且愿意自行维护时的可选项。两者都不解决「容器被攻破=宿主受威胁」这一根本问题，
-> 那只能靠前面的风险清单与网络隔离来兜底。
-
----
+`privileged: true` + 两项 `security_opt` 是 mount overlay、挂 loop 设备与运行 systemd
+的硬需求。**它等同于把宿主机内核交给容器，仅限信任的内网使用。**
+设计取舍、安全影响、规避清单与 capability 最小化备选见
+[编排配置详解](docs/configuration.md#特权模式privileged的取舍与规避)。
 
 ## 健康检查与每日验证
 
@@ -378,23 +295,21 @@ Dockerfile 与流水线都只有一份）：
 
 ## 文档地图
 
-README 只讲「是什么、怎么跑、设计核心的四条原则」；细节按主题分散在 `docs/`，
-**每个主题只有一处详解**（避免同一件事写两遍然后互相矛盾）：
+README 只讲「是什么、怎么跑、设计核心的四条原则」；细节按主题分散在 `docs/` 的
+**8 篇文档**里，每个主题只有一处详解（避免同一件事写两遍然后互相矛盾）：
 
 | 我想… | 读这个 |
 |---|---|
 | 把面板跑起来（飞牛 / 普通 Linux） | [快速开始](docs/quickstart.md) |
 | 搞清楚数据存在哪、会不会丢 | [持久化原理](docs/persistence.md) |
 | 了解为什么不用「直接挂 /etc」 | [为什么用 overlay 而不是整目录 bind](docs/persistence.md#为什么用-overlay-而不是整目录-bind) |
-| 调整 compose 里的配置项 | [编排配置详解](docs/configuration.md) |
-| 备份、恢复或搬到新机器 | [备份与恢复](docs/backup.md) |
-| 升级、回滚或跨机器迁移 | [升级与迁移](docs/upgrade.md) |
-| 做长期运维（资源 / 日志 / 安全） | [运维手册](docs/operations.md) |
+| 调整 compose 配置项 / 环境变量 | [编排配置详解](docs/configuration.md) |
+| 备份、恢复、搬到新机器 | [备份与恢复](docs/backup.md) |
+| 升级、回滚、重置系统层、日常运维、救援 | [运维手册](docs/operations.md) |
 | 排查遇到的问题 | [常见问题](docs/faq.md) |
-| 本地构建、改脚本、看门禁覆盖 | [开发指南](docs/development.md) |
-| 起名字（目录 / 文件 / 变量 / 术语）前 | [命名与目录结构约定](docs/conventions.md) |
-| 改 CI、加一条线 | [发布流程](docs/release.md) |
-| 看公开前的开发期记录 | [开发期记录](docs/history.md) |
+| 本地构建、改脚本、看门禁、起名字 | [开发指南](docs/development.md) |
+| 改 CI、加一条线、发布流程 | [发布流程](docs/release.md) |
+| 看变更记录与开发期归档 | [变更记录](CHANGELOG.md) |
 
 ---
 
@@ -411,7 +326,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 - 生成时间（UTC）：2026-11-18 01:13:49
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
-- 验证脚本：`.github/scripts/check/published.sh`
+- 验证脚本：`.github/scripts/check.sh published`
 
 #### 概要
 

@@ -2,7 +2,7 @@
 
 ## 线声明表（唯一的差异来源）
 
-各条线（线）的差异**只写在** [image/lines.conf](../image/lines.conf) 里，
+各条线的差异**只写在** [image/lines.conf](../image/lines.conf) 里，
 成对排列、一眼能对照；12/13 两条线共用一份 Dockerfile 与流水线：
 
 ```
@@ -31,8 +31,9 @@ line         display  version                    install                        
 选哪个：**求稳用 12.x**（只跟进稳定线，节奏慢、变更少），**求新用 13.x**
 （跟进最新正式版，`latest` 指向最近一次手动发布的版本）。两者用相同的 `data/`
 目录结构，数据互相兼容。**`pro` 是静态线**：安装脚本来自 `baota.1000.run`、版本不透明，
-`probe=none` 跳过版本探测与每日漂移检测，发布标签固定为字面量 `pro`；`VERSION` 文件仍记
-真实面板版本（来自 `panel6.zip`，当前 `13.1.0`）以便发布前四套门禁的版本比对成立。
+`probe=none` 跳过版本探测与每日漂移检测，发布标签固定为字面量 `pro`；`VERSION` 由
+`build-pro.yml` 从云端版本接口取值并回写，同时作为发布前四套门禁的 `EXPECT_VERSION`
+—— 因此该值必须与面板 `public.version()` 一致，否则 `core` 门禁会拦下发布。
 
 > **两条线都是手动发布**（没有定时触发）。原因：`latest` 一旦自动推进，上游出问题
 > 就会把坏镜像立刻分发给所有使用者。现在的流程是：先看
@@ -101,10 +102,10 @@ buildx 一次调用里没法做到「推送发生在验证之后」，所以拆�
 「看门狗 vs shim 改名」的修复（面板里装软件失败的真根因，见 docs/faq.md）现在是 **CI
 自动门禁**，不用手动跑：
 
-- **发布前门禁**：`core.sh` 的 `A16` 步断言看门狗 cmdline 补丁同时落在运行态面板
+- **发布前门禁**：`core` 子命令的 `A16` 步断言看门狗 cmdline 补丁同时落在运行态面板
   `BT-P*` 与守卫基准副本 `/baota/origin/BT-P*`；任一缺失即 `fail`，阻断发布。
-- **每日回归**：`.github/scripts/check/published.sh` 复用同一套 `core.sh`，线上镜像每天
-  也被这一断言覆盖。
+- **每日回归**：`.github/scripts/check.sh published` 复用同一个 `core` 子命令，线上镜像
+  每天也被这一断言覆盖。
 
 手动想确认也行（不依赖脚本）：起容器后
 
@@ -127,14 +128,14 @@ docker exec <容器> sh -c "grep -qF 'not in cmdline' /baota/origin/BT-P* && ech
 
 ```
 prep（读 lines.conf + 各条线 VERSION）
-  └─ verify（矩阵：各条线并行）→ 拉 repo:<已发布版本> → 跑 published.sh → 上传片段
-collect（汇总）→ 生成 .github/reports/report.md → 注入 README → 回写仓库
+  └─ verify（矩阵：各条线并行）→ 拉 repo:<已发布版本> → 跑 check.sh published → 上传片段
+report（汇总）→ 生成 .github/reports/report.md → 注入 README → 回写仓库
 ```
 
 - 版本号取自各条线的 VERSION 文件（由发布流水线在推送成功后回写，永远对应已发布标签），
   不重新探测上游 —— 本工作流只回答「当前线上这套东西还好不好用」
-- 回归复用 `.github/scripts/check/published.sh`：持久化全生命周期（落盘 / 销毁重建 /
-  升级降级快照 / 并发锁 / 只读降级 / 备份包结构 / 首启凭据 / PHP 扩展编译链路 /
+- 回归复用 `.github/scripts/check.sh published`：持久化全生命周期（落盘 / 销毁重建 /
+  升级降级快照 / 只读降级 / 备份包结构 / 首启凭据 / PHP 扩展编译链路 /
   面板里装的东西重建后仍在 / 不可变面板守卫）
 - 只验 **linux/amd64**：arm64 要跑 QEMU，而本方案的核心是 overlay 持久化，
   模拟环境下的结论不可信 —— 宁可不测也不给假绿灯；arm64 的真实覆盖由构建流水线
@@ -143,7 +144,7 @@ collect（汇总）→ 生成 .github/reports/report.md → 注入 README → �
 ### 产出
 
 - **`.github/reports/report.md`**：每次运行整体覆盖（不追加，体积恒定）
-- README 的「镜像验证报告」章节：由 `.github/scripts/report.py` 注入（整篇标题降 2 级，
+- README 的「镜像验证报告」章节：由 `.github/scripts/check.sh report` 注入（整篇标题降 2 级，
   让它严格嵌在 README 的 H2 章节之下），折叠在 `<details>` 里，点开即看
 - ⚠️ 日志里的面板口令 / root 口令 / 安全入口在写入前**已脱敏**
 - ⚠️ README 里 `<!-- DAILY-VERIFY-REPORT:START/END -->` 与
@@ -152,7 +153,7 @@ collect（汇总）→ 生成 .github/reports/report.md → 注入 README → �
 ### 触发时机与判定
 
 - 🗓️ 每天 UTC 18:30（北京时间 02:30）；🖱️ 也可手动触发
-- **即使某线验证失败也会回写报告**（`collect` 用 `if: always()`），把失败现场留在
+- **即使某线验证失败也会回写报告**（`report` 用 `if: always()`），把失败现场留在
   报告里，最后一步才判红 —— 看到红的运行，报告里一定有具体是哪一项挂了
 - 回写时先 `git rebase origin/main` 再生成文件：**rebase 必须在修改任何仓库文件之前**，
   否则报告 / README 处于已修改状态会让 rebase 中止，报告就写不进仓库

@@ -15,7 +15,7 @@
 # ==============================================================================
 set -euxo pipefail
 
-PANEL_DIR=/www/server/panel
+PANEL_DIR=${PANEL_DIR:-/www/server/panel}
 PANEL_PY_BIN=${PANEL_DIR}/pyenv/bin/python
 
 # ---- 入参兜底：与 Dockerfile 中 ARG 的默认值保持一致 ----
@@ -31,6 +31,13 @@ die()  { echo "❌ [build][ERROR] $*" >&2; exit 1; }
 # 镜像是公开发布的，任何写进镜像的固定口令等于人人可见，所以这里只放占位值，
 # 真正的口令与安全入口在容器首次启动时由 entrypoint 重新生成。
 build_secret() { echo "bt-build-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"; }
+
+# 构建期日志与缓存清理：安装与账号预热之后各会生成一批，共用一份避免漏项
+cleanup_build_artifacts() {
+    rm -rf /root/.cache /tmp/* /var/tmp/*
+    rm -f "${PANEL_DIR}"/logs/*.pid "${PANEL_DIR}"/logs/*.log
+    find /var/log -type f -name '*.log' -delete
+}
 
 # ==============================================================================
 #  1. 官方脚本安装宝塔
@@ -65,20 +72,10 @@ install_panel() {
     test -f "${PANEL_DIR}/data/port.pl"
 
     # ---- 清理构建期残留（必须在本层内完成）----
-    # Docker 分层的关键约束：在后续层里删除本层产生的文件，镜像体积不会减小 ——
-    # 旧层依然存在，只是被 whiteout 遮住。所以谁产生的垃圾，就在谁那一层清掉。
-    #
-    # 以下每一项都经过实测确认（见 docs/development.md「镜像纯净度」）：
-    #   apt lists    19M。阶段 1 清过，但官方脚本自己又跑了 apt-get update
-    #   面板 pid     安装脚本启动过面板，留下构建期 PID，运行期读到是隐患
-    #   面板 log     构建期启动面板产生的 error.log / task.log / jobs.log
-    #   apt/dpkg log 构建过程记录，对使用者无意义
-    #   .wget-hsts   下载安装脚本时留下的 HSTS 缓存
+    # Docker 分层的关键约束：谁产生的垃圾就在谁那一层清掉（见 docs/development.md）
     rm -f /root/install.sh /root/panel.zip /root/el*.repo.tar.gz /root/.wget-hsts
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
-    rm -f ${PANEL_DIR}/logs/*.pid ${PANEL_DIR}/logs/*.log
-    find /var/log -type f -name '*.log' -delete
-    rm -rf /tmp/* /var/tmp/*
+    cleanup_build_artifacts
 }
 
 # ==============================================================================
@@ -255,10 +252,7 @@ warmup_account_chain() {
     chmod 600 "${PANEL_DIR}/default.pl"
 
     # 清理本层残留：tools.py 可能又写了面板日志，pip 可能留了缓存
-    rm -rf /root/.cache /tmp/* /var/tmp/*
-    rm -f ${PANEL_DIR}/logs/*.pid ${PANEL_DIR}/logs/*.log
-    find /var/log -type f -name '*.log' -delete
-
+    cleanup_build_artifacts
 }
 
 # ==============================================================================

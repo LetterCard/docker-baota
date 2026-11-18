@@ -118,7 +118,7 @@ install_packages() {
         libncurses-dev libbz2-dev libgd-dev libgd3 libwebp-dev libvpx-dev
         libfreetype6-dev libjpeg62-turbo libjpeg62-turbo-dev libudev-dev
         libldap2-dev         libxml2-dev libcurl4-openssl-dev
-    e2fsprogs btrfs-progs
+        e2fsprogs btrfs-progs
     )
 
     if ! apt-get install -y --no-install-recommends "${pkgs[@]}"; then

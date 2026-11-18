@@ -2,7 +2,8 @@
 # ==============================================================================
 #  [阶段 1] 收尾初始化，然后交给 systemd
 #
-#  进入本脚本时挂载已就绪：系统层走 overlay（upper 在 data/.system/<dir>），
+#  进入本脚本时挂载已就绪：系统层走 overlay（镜像模式下 upper 在 /run/baota/overlay，
+#  原生模式下在 data/.system/<dir>），
 #  业务与面板状态走 bind（源在 data/www/<同名>），面板代码来自镜像、不持久化。
 #
 #  可用环境变量（详见 docs/quickstart.md「首次登录凭据」）：
@@ -18,6 +19,7 @@ set -euo pipefail
 # healthcheck.sh 共用同一份闸门）；log/warn/die 见 /baota/common.sh
 # ------------------------------------------------------------------------------
 LOG_PREFIX='🚀 [entrypoint]'
+# shellcheck source=image/scripts/common.sh
 . /baota/common.sh
 load_defaults || exit 1
 
@@ -32,7 +34,7 @@ FIRST_BOOT_MARKER="${PANEL_DIR}/data/.initialized"
 
 # 运行期状态目录（在系统层持久化目录内，跨容器保留）。
 # 存放：镜像版本记录、启动历史等
-STATE_DIR="${PERSIST_SYSTEM_ROOT}/.baota"
+STATE_DIR="$(persist_system_root)/.baota"
 BOOT_LOG_FILE="${STATE_DIR}/${META_BOOT_FILE}"
 BOOT_LOG_MAX_LINES=200
 
@@ -74,7 +76,7 @@ check_panel_files() {
     ls ${PANEL_DIR}/BT-P* > /dev/null 2>&1 \
         || die "找不到面板主程序 ${PANEL_DIR}/BT-P*，镜像可能不完整；面板代码来自镜像层（不持久化），请重新拉取镜像"
     [ -x "${PANEL_PY_BIN}" ] \
-        || die "找不到面板 Python 运行环境 ${PANEL_PY_BIN}；pyenv 由独立 overlay 提供（见 mount_pyenv_overlay），请检查 ${PANEL_STATE_ROOT}/pyenv 是否挂载成功"
+        || die "找不到面板 Python 运行环境 ${PANEL_PY_BIN}；pyenv 由独立 overlay 提供（见 mount_pyenv_overlay），请检查 $(persist_system_root)/pyenv 是否挂载成功"
 }
 
 # ==============================================================================
@@ -177,7 +179,7 @@ prune_snapshots() {
 # （inode 256）才用只读子卷快照 —— O(1)，与目录大小无关；其余情况 cp -a。
 # 子卷是一次性宿主机动作（btrfs subvolume create），见 docs/persistence.md
 snapshot_backend() {
-    local mode="${AUTO_SNAPSHOT_MODE:-auto}"
+    local mode="${AUTO_SNAPSHOT_MODE}"
     [ "${mode}" = 'copy' ] && { echo copy; return 0; }
     # btrfs 模式但宿主不满足时，按 defaults.env 的承诺告警并回退 cp -a（快照失败不阻断启动）
     if [ "${mode}" = 'btrfs' ] && ! command -v btrfs > /dev/null 2>&1; then
@@ -259,9 +261,13 @@ take_snapshot() {
 compute_code_digest() {
     local out=''
     [ -d "${PANEL_ORIGIN_DIR}" ] || return 1
+    # 只算代码：default.pl 是构建期随机初始口令，data/ 存的是同一随机口令写出的
+    # 账号库（panel.sh warmup_account_chain），两者每次构建都不同。算进去会让
+    # 「同代码重建指纹一致」永不成立，版本护栏每次换镜像都误判升级
     out=$( cd "${PANEL_ORIGIN_DIR}" 2> /dev/null \
-           && find . -type f -exec sha256sum {} + 2> /dev/null | LC_ALL=C sort | sha256sum \
-           | cut -d' ' -f1 ) || true
+           && find . -type f ! -path './data/*' ! -name 'default.pl' \
+                -exec sha256sum {} + 2> /dev/null \
+           | LC_ALL=C sort | sha256sum | cut -d' ' -f1 ) || true
     [ -n "${out}" ] || return 1
     printf '%s' "${out}"
 }

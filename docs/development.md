@@ -9,22 +9,18 @@ baota-docker/
 ├── LICENSE                    MIT
 ├── Makefile                   常用命令入口（构建 / 启动 / 检查 / 静态分析）
 │
-├── docs/                      使用文档（本目录）
+├── docs/                      使用文档（8 篇；一个主题只有一处详解）
 │   ├── quickstart.md          快速开始、端口、首次登录凭据
-│   ├── persistence.md         持久化原理、候选方案、硬约束
-│   ├── configuration.md       compose 逐项配置详解
-│   ├── backup.md              备份与恢复
-│   ├── upgrade.md             镜像升级、回滚、跨机器迁移
-│   ├── operations.md          运维手册
-│   ├── faq.md                 常见问题
-│   ├── conventions.md         ★ 命名、路径、目录结构的唯一真源（含术语表）
-│   ├── development.md         本文件
-│   ├── release.md             线声明表、发布流水线、每日巡检
-│   └── history.md             公开前的开发期记录（从 CHANGELOG 归档）
+│   ├── persistence.md         持久化原理、data/ 目录模型、硬约束
+│   ├── configuration.md       compose / 环境变量逐项配置
+│   ├── backup.md              备份、恢复、跨机器迁移
+│   ├── operations.md          运维、升级、回滚、重置系统层、救援
+│   ├── faq.md                 常见问题与排障
+│   ├── development.md         ★ 本文件：构建、门禁、命名与目录约定
+│   └── release.md             线声明表、发布流水线、每日巡检
 │
-├── skills/                    AI 编程助手的技能包
-│   ├── README.md              用途说明（只维护一份，按工具放入各自目录即可）
-│   └── baota-docker/          通用 skill（Codex / CodeBuddy / Trae 共用同一份）
+├── skills/baota-docker/
+│   └── SKILL.md               AI 助手技能包（唯一一份：红线 / 文件地图 / 命令速查 / 安装与维护）
 │
 ├── image/                     镜像本体：Dockerfile、线声明表、构建期与运行期脚本
 │   ├── Dockerfile             12/13 主线共用的一份（线差异由 build-arg 传入）
@@ -38,8 +34,9 @@ baota-docker/
 │   │   ├── btpanel.service    systemd unit
 │   │   └── defaults.env       ★ 运行期配置真源（PERSIST_DATA_ROOT / PERSIST_SYSTEM_ROOT 等）
 │   └── scripts/               运行期脚本（构建期 COPY 到 /baota）
-│       ├── init.sh            阶段 0：并发锁 + overlay 持久化 + 面板代码隔离
-│       │                      + pyenv 覆盖层 + ext4 镜像兜底（opt-in）
+│       ├── common.sh          共享函数：load_defaults / log / persist_system_root
+│       ├── init.sh            阶段 0：overlay 持久化（含 ext4 镜像模式）+ 面板代码隔离
+│       │                      + pyenv 覆盖层
 │       ├── entrypoint.sh      阶段 1：版本护栏（版本 + 代码指纹）/ 快照（cp -a 或
 │       │                      btrfs 子卷）/ 初始化，交棒 systemd
 │       ├── healthcheck.sh     compose healthcheck 的统一入口
@@ -49,14 +46,12 @@ baota-docker/
 ├── docker-compose.yml         编排文件（只挂一个 data 目录）
 │
 └── .github/
-    ├── reports/               CI 生成并回写的两篇报告（report.md 每日巡检 / drift.md 漂移检测，不要手改）
+    ├── reports/               CI 回写产物：两篇报告 + baseline.json（不要手改）
     ├── scripts/
-    │   ├── report.py          把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
-    │   ├── check/             发布前检查四套 + 每日巡检脚本（CI 专用，被 .dockerignore 排除）
-    │   ├── drift/             漂移检测脚本（目录漂移）
-    │   └── lint/              配置真源唯一性检查（make lint 调用：脚本里不许再有默认值副本）
+    │   └── check.sh           CI 统一入口：四套门禁 + 每日巡检 + 漂移检测 + 静态检查 + 报告注入（子命令）
     └── workflows/
-        ├── build.yml          构建发布（一份流水线跑所有线，矩阵从 lines.conf 生成）
+        ├── build.yml          构建发布（一份流水线跑 12/13 所有线，矩阵从 lines.conf 生成）
+        ├── build-pro.yml      pro 线专属构建（独立 Dockerfile / 授权补丁 / VERSION）
         ├── check.yml          每日巡检已发布镜像（矩阵：各条线并行）
         └── drift.yml          漂移检测（只监测，不发布）
 ```
@@ -76,7 +71,7 @@ baota-docker/
 - **配置常量只写一处**：`PERSIST_DATA_ROOT` / `PERSIST_SYSTEM_ROOT` / `PERSIST_SYSTEM_DIRS` /
   `CRITICAL_DIRS` / `AUTO_SNAPSHOT_KEEP` 的唯一真源是 `image/conf/defaults.env`，
   写法一律 `${VAR:-默认值}`，保证已存在的环境变量优先。
-  `check/` 下的四套检查脚本也从该文件解析，不再硬编码一份
+  `.github/scripts/check.sh` 也从该文件解析，不再硬编码一份
 - **日志前缀**：`[build]` / `[init]` / `[entrypoint]` / `[backup]` / `[health]` /
   `[guard]` / `[verify]`（日巡检）/ `[drift]`（漂移检测）
 - **降级不用文案判断，用标记文件**：`/run/baota/degraded[-critical]`。
@@ -96,7 +91,7 @@ baota-docker/
 # 相关：docs/xxx.md#锚点
 ```
 
-★ **硬上限**（由 `make lint` 的 `lint/comments.sh` 强制，超了就红）：
+★ **硬上限**（由 `make lint` 的 `check.sh lint comments` 强制，超了就红）：
 
 | 位置 | 上限 |
 |---|---|
@@ -116,16 +111,16 @@ baota-docker/
 | **踩过的坑**：写清**症状 + 原因** | 「`exec 9> f 2>/dev/null` 会把整个脚本的 stderr 永久重定向（恢复日志全部消失）」 |
 | **红线**：改这里会破坏什么 | 「探活命令里不能出现面板进程名，否则上游判定会跳过启动」 |
 
-**文档分工**（一个主题只有一处详解）：表在[命名与目录结构约定](conventions.md) §7，
+**文档分工**（一个主题只有一处详解）：表在[命名与目录结构约定](#命名与目录结构约定维护者速查表) §7，
 改分工先改那里；这里只补一条给贡献者的读法 —— **改行为前先读对应主题的 docs/，
 改完只改那一处详解，其它位置一律留链接**。
 
 **标题层级**：`#` 后**必须**有空格（`##标题` 会被 GitHub 当正文，目录里的锚点点了没反应）；
 一篇只允许一个 H1；README 的章节一律 H2，注入进来的报告由
-`.github/scripts/report.py` **整篇降 2 级**（H1→H3…），所以报告内部不会与章节标题同级。
+`.github/scripts/check.sh report` **整篇降 2 级**（H1→H3…），所以报告内部不会与章节标题同级。
 `make lint` 会检查前两项（标题缺空格、多个 H1）—— 这两类错误渲染不报错，只能靠工具拦。
 
-**命名、路径与目录结构**：唯一真源是 [命名与目录结构约定](conventions.md)
+**命名、路径与目录结构**：唯一真源是 [命名与目录结构约定](#命名与目录结构约定维护者速查表)
 （术语表也收在那里）。新增目录 / 文件 / 变量前先按它取名，不要在各文档里各写一套。
 
 ## 漂移检测
@@ -143,7 +138,7 @@ baota-docker/
 两级节奏，控制成本：
 
 - **probe**（每天，几十秒）：取两条线安装脚本的 sha256 与版本号，
-  与 `.github/scripts/drift/baseline.json` 比对，判断是否有变更
+  与 `.github/reports/baseline.json` 比对，判断是否有变更
 - **drift**（仅在有变更 / 手动强制时，几分钟）：真的装一遍并做上面的比对
 
 产物与提醒：
@@ -154,7 +149,7 @@ baota-docker/
 
 维护要点（改上游相关代码时同步）：
 
-- 目录集合只有一份：`.github/scripts/drift/install.sh` 的 `KNOWN_DIRS`，对应
+- 目录集合只有一份：`check.sh drift` 的 `KNOWN_DIRS`，对应
   `defaults.env` 的 `PERSIST_SYSTEM_DIRS`（现在含 `www/server`）。新增系统层持久化
   目录时同步它
 - `/www` 刻意**不**计入 `KNOWN_DIRS`：它按子路径分别处理（`www/server` overlay、业务目录与
@@ -162,7 +157,7 @@ baota-docker/
   「未覆盖」报警，由人确认新出现的子路径该不该持久化 —— 这是有意的常亮项，不是假红
 - 换 Debian 基础镜像（大版本）时，建议手动触发一次完整比对
 - 要摸清上游把数据写到哪：看每日漂移检测的报告；需要更细的现场时按
-  `.github/scripts/drift/install.sh` 的方式在一次性容器里真装一遍再比对
+  `check.sh drift` 的方式在一次性容器里真装一遍再比对
 
 ## 面板版本策略
 
@@ -212,25 +207,25 @@ docker build -f image/Dockerfile \
   --build-arg INSTALL_URL=<见 lines.conf> --build-arg IMAGE_VERSION=<见 VERSION> -t baota:dev .
 ```
 
-> ⚠️ `make lint` 里的 shellcheck **未安装时会被直接跳过**（本地很常见），但 CI 上会真正
-> 执行，且 **warning 级别即判失败** —— 本地跑通不代表 CI 能过。
+> ⚠️ `make lint` 里的 shellcheck **warning 级别即判失败**。本地未安装时，
+> `.github/scripts/check.sh lint shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（该目录已 gitignore）；
+> 网络不通时才失败，不会静默跳过。
 
-安装与启用：
+想自己装也可以（在 `PATH` 里就直接用，不下载）：
 
 ```bash
 brew install shellcheck                        # 有 brew 用这个
 python3 -m pip install --user shellcheck-py    # 没有 brew 时的替代
 ```
 
-⚠️ 装完**必须确认 shellcheck 真的进了 `PATH`**，否则 make 仍会静默跳过——
-pip 的 `--user` 安装位置不一定是 `~/.local/bin`：macOS 系统 Python 装在
-`~/Library/Python/<版本>/bin`。临时启用一行搞定：
+pip 的 `--user` 位置不一定是 `~/.local/bin`（macOS 系统 Python 在
+`~/Library/Python/<版本>/bin`）；`Makefile` 会自动去这两处找，也可临时指定：
 
 ```bash
 PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/dev/null | head -1)"):$PATH" make lint
 ```
 
-验证是否生效：`make lint` 输出应出现「shellcheck 通过」，而不是「未安装，跳过」。
+单独重跑某一项用子命令，例如 `bash .github/scripts/check.sh lint links`（清单见 §9）。
 
 ## 架构支持
 
@@ -259,7 +254,7 @@ PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/de
 | `/root/.wget-hsts` | 下载安装脚本留下的 HSTS 缓存 |
 | `/tmp`、`/var/tmp` | 构建期临时文件 |
 
-CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerignore` 排除，不会进入镜像。
+CI 专用的 `.github/scripts/*.sh` 随 `.github` 整体被 `.dockerignore` 排除，不会进入镜像。
 
 有三类内容**故意保留**，它们不是垃圾（镜像不预装 PHP，PHP 与扩展由用户在面板里运行期安装）：
 
@@ -273,19 +268,23 @@ CI 专用的 `.github/scripts/check/` 目录随 `.github` 整体被 `.dockerigno
 
 ## 发布前检查覆盖什么
 
-五份脚本，各覆盖一个**互不相关**的失效面；具体断言写在脚本里（脚本头有说明），
-这里只给索引 —— 细节抄一份到这里只会两处漂移：
+同一个 `.github/scripts/check.sh` 下六个子命令，各覆盖一个**互不相关**的失效面；
+具体断言写在脚本里（每段头部有说明），这里只给索引 —— 抄一份只会两处漂移：
 
-| 脚本 | 覆盖 |
+| 子命令（`.github/scripts/check.sh`） | 覆盖 |
 |---|---|
-| `check/core.sh` | 功能完整性：启动、持久化落盘（含 **pyenv 覆盖层**）、**并发锁**、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢（含 pip 包）、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
-| `check/degrade.sh` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
-| `check/upgrade.sh` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
-| `check/restore.sh` | 备份恢复闭环：包内三类关键路径完整、解回全新数据卷后站点 / 数据库 / 面板状态可恢复、**恢复后不被误判为首次启动**（安全入口与端口不变） |
-| `check/published.sh` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述四套** |
+| `core` | 功能完整性：启动、持久化落盘（含 **pyenv 覆盖层**）、面板代码隔离、守卫、备份、防火墙/SSH/bt、销毁重建后数据不丢（含 pip 包）、**优雅停机**（SIGRTMIN+3 → systemd 在 90s 宽限期内停服） |
+| `degrade` | 只读持久化根必须被识别为 `critical` 且判 unhealthy（最危险的失效模式） |
+| `upgrade` | 版本护栏：升级/降级识别、快照完整性、降级不阻断启动 |
+| `restore` | 备份恢复闭环：包内三类关键路径完整、解回全新数据卷后站点 / 数据库 / 面板状态可恢复、**恢复后不被误判为首次启动**（安全入口与端口不变） |
+| `published` | 日巡检：拉取线上镜像 + 脱敏首启日志 + PHP 扩展真编译，其余**复用上述四套** |
+| `drift` | 上游目录漂移：一次性容器原样跑官方安装脚本，比对装前/装后目录落点，新落点不在持久化声明里就报关键漂移 |
 
-入口 `check/run.sh <core|degrade|upgrade|restore|all> <镜像> [<版本>]`；
-`make health` / `health-degrade` / `health-upgrade` / `health-restore` / `health-all` 是它的包装。
+入口 `check.sh <core|degrade|upgrade|restore|published|drift|all> [参数]`：四套门禁的本地包装是
+`make health` / `health-degrade` / `health-upgrade` / `health-restore` / `health-all`，
+`published` 由 `check.yml` 调用、`drift` 由 `drift.yml` 调用（参数走环境变量）。
+六套各自是一个子 shell 函数，公共样板与 `trap` 清理在同一份文件顶部，互不污染；
+`all` 只跑四套门禁，不含重量级的 `published` / `drift`。
 
 ## 构建期对面板的两处适配补丁
 
@@ -314,11 +313,236 @@ core 门禁（A15 / A16）拦下发布，不会静默上线。完整根因分析
 - 探活命令里同样不能出现面板进程名，理由同上
 - 持久化层的每一次写入都不可逆：**能不写就不写**。
   新增「每次启动都做的事」时，先判断结果是否真的需要变化，变化了才写
-- **shellcheck 的 warning 会让 CI 失败**（`make lint` 用 `-S warning`），而本地没装
-  shellcheck 时这一步被跳过，所以务必装上再验。典型例子：未使用的循环计数器
+- **shellcheck 的 warning 会让 CI 失败**（`make lint` 用 `-S warning`），本地没装时
+  `check.sh lint shellcheck` 会自动下载，别把这项从检查里摘掉。典型例子：未使用的循环计数器
   （`for i in $(seq 1 60)` 但循环体没读到 `i`）会报 SC2034 —— 用不到就写成 `_`
 - **动 `image/conf/defaults.env` 的目录清单要连着发布一起做**：门禁（core / degrade /
   upgrade）读的是**仓库里**的清单，跑的是**镜像**；往 `WWW_DATA_SUBDIRS` 加一个目录
   之后，线上那份旧镜像还没有这个挂载，日巡检会红到下一次发布为止（这是预期现象，
   不是回归）。另外，漂移检测的 `KNOWN_DIRS` / `WWW_PERSIST_SUBDIRS` **从这份清单派生**，
   不需要跟着改第二处
+
+---
+
+## 命名与目录结构约定（维护者速查表）
+
+> **本文是命名、路径、目录结构的唯一真源。** 新增任何目录 / 文件 / 变量 / 术语之前，
+> 先按本文取名；本文没覆盖的，按 §1 的优先级推导，并把结论补回本文 ——
+> 命名与结构一旦各写各的，后面每一处改动都要先猜「当初为什么叫这个」。
+>
+> ⚠️ **动手之前先过第一原则**：README「设计核心」的四条 —— **不对抗上游 /
+> 不可变面板 / 通用 overlay，而非定制方案 / 不用维护项目** —— 优先于本文。
+> 本文只管「叫什么」，第一原则管「该不该做」。
+> 看到不一致时先问「这份东西该不该存在、该不该放在这一层」，再问「它该叫什么」：
+> 把一份跟踪上游的清单收拾得再整齐，它仍然是一份要永远跟下去的清单。
+
+> **本节是附录式速查表**：仓库结构树见本文开头「仓库结构」、文件头注释写法见
+> 「注释与文档规范」、门禁清单见「发布前检查覆盖什么」。这里保留的是**命名规则、
+> 术语定义、变更时必须同步改的清单**——正文写过的内容不再复述。
+
+### 1. 三条优先级
+
+1. **宝塔官方已有的目录与名称 → 原样沿用。** 面板程序在 `/www/server/panel`、
+   站点在 `/www/wwwroot`、备份在 `/www/backup`、数据库在 `/www/server/data`、
+   日志在 `/www/wwwlogs`、回收站是 `/www/.Recycle_bin`，服务名 `btpanel`、
+   运维命令 `bt`、端口文件 `port.pl`、安全入口 `admin_path.pl` ——
+   这些都是**上游事实**，我们不改名、不另起别名，也不在容器里另建一套路径。
+2. **官方没有、业界有标准的 → 按权威标准。** Docker（`docker-compose.yml`、
+   `.dockerignore`）、systemd（`*.service`）、Debian（`systemd-*`、
+   `lib*-dev`、`apt-get`）、环境变量一律大写下划线、make 目标用连字符。
+3. **两者都没有的 → 用业界通用的现成叫法；路径即语义**（持久化落点 = 容器内路径，见 §3）。
+
+★ 这里的要点是**用标准的、别人也这么叫的名字**，不是「禁止连字符」——
+连字符、点号都是常规分隔符，该用就用（`python-real`、`boot.log`、`.dockerignore`
+都是标准写法）。真正要避免的是**自造拼法**：把两个词硬拼成一个谁也没见过的词
+（`pythonreal`、`dockermeta`），那才是后续维护的噩梦。
+
+判断一个名字是否合格，只看一句话：**这个名字在别的项目里是不是也这么叫？**
+是（或有明确惯例）→ 用；不是 → 换成标准写法；确实没有先例 → 选最短的、能表达清楚的
+通用单词（`staging`、`probe`、`lock`、`version`），并写进 §4 白名单说明理由。
+
+### 2. 容器路径对照表（官方为准）
+
+| 容器内路径 | 官方用途 | 持久化落点 | 机制 |
+|---|---|---|---|
+| `/www/wwwroot` | 站点 | `data/www/wwwroot` | bind |
+| `/www/backup` | 备份 | `data/www/backup` | bind |
+| `/www/server/data` | 数据库（MySQL/MariaDB） | `data/www/server/data` | bind |
+| `/www/server/panel` | **面板程序** | —— | 镜像层，不持久化 |
+| `/www/server/panel/{data,plugin,vhost,ssl,config}` | 面板状态 | `data/www/server/panel/<同名>` | bind |
+| `/www/server/panel/pyenv` | 面板 Python 环境 | `data/www/server/panel/pyenv` | overlay（lower = 镜像 pyenv，upper 持久化 pip 包） |
+| `/www/server`（其余） | 组件、cron 脚本、插件数据 | 镜像模式 `data/overlay.img`（upper `/run/baota/overlay/www/server`）；原生模式 `data/.system/www/server` | overlay |
+| `/www/vmail` | 邮局（装了才有） | `data/www/vmail` | bind，不预建 |
+| `/www/dk_project` | 面板 Docker 模块的项目（装了才有） | `data/www/dk_project` | bind，不预建 |
+| `/www/wwwlogs`、`/www/.Recycle_bin`、`/www/php_session`、`/www/panel-static`、`/www/monitor_data` | 日志 / 回收站 / session / 静态缓存 / 监控数据 | —— | 按设计不持久化（可再生；漂移检测的白名单见 `check.sh drift` 的 `WWW_VOLATILE_SUBDIRS`） |
+| `/etc /usr /var /root /opt /home /srv` | 系统目录 | —— | 不持久化（随镜像，重建即重置；实测零「丢了会坏」的数据） |
+| `/baota/**` | 镜像自有（脚本、配置、面板副本） | —— | 随镜像，永不持久化 |
+| `/run/baota/**` | 运行态标记 | —— | tmpfs，重启即失效 |
+
+新增一个 `/www` 下的落点 = 改变持久化承诺，**必须同步改 §2 与
+[持久化原理](persistence.md)**。
+
+### 3. 持久化目录约定
+
+```
+data/
+├── www/          ← 唯一可见目录：就是容器 /www 的镜像
+└── overlay.img   ← 默认：系统层 + pyenv 两层的 ext4 镜像（loop 挂到 /run/baota/overlay）
+
+原生模式（`PERSIST_SYSTEM_IMAGE: "false"`）下，第二项换成隐藏的 `.system/` 目录。
+```
+
+- **规则只有一条：`data/www` 下的路径 = 容器内的路径。** 找什么按容器里的路径找。
+- 面板状态归位在 `www/server/panel/`（与容器内同名），**不单列一层**。
+- 镜像模式下系统层增量在 `data/overlay.img`（单个 ext4 镜像文件），挂载点在
+  `/data` 之外；原生模式才是隐藏的 `data/.system/` 目录。两者性质相同：
+  都是 overlay upper（相对镜像的增量），与「内容完整、可直接读写」的 `data/www`
+  不是一回事；`/www/server` 的 upper 不能放进 `data/www/server`（否则 MySQL 与
+  面板状态的 bind 源会落进 upperdir 内部，形成自引用）。
+- `.baota/` 只放项目元数据：`version`、`digest`（面板代码指纹）、`boot.log`
+  与 overlay workdir。镜像模式下它在 `overlay.img` 内，原生模式在 `data/.system/.baota/`。
+  已无锁文件与 `system-image` 标记文件（镜像模式由 `data/overlay.img` 是否存在判断）。
+- **顶层只有一个可见目录。** 镜像模式 `data/` 只有 `www/` + `overlay.img`；
+  原生模式多一个隐藏的 `.system/`。再加顶层 = 引入新语义，先改本文。
+
+### 4. 文件与目录命名
+
+- 用**通用单词 + 常规分隔符**（连字符、点号该用就用）：`version`、`boot.log`
+  （Linux 标准日志名）、`lock`、`.probe`、`_marker`、`python-real`（wrapper 惯例）、
+  `origin`、`shim.sh`、`staging`。
+- **元数据这类要手敲的名字尽量短**（排障时 `cat data/.system/.baota/version`）：
+  所在目录已经说明了归属，不必在文件名里重复 —— `image-version` → `version`、
+  `boot-history.log` → `boot.log`。
+- **禁止自造拼法**：`pythonreal` → `python-real`、`dockermeta` → `staging`。
+  判据：这名字在别的项目里也这么叫吗？不是 → 换标准写法。
+- **`image/scripts/` 下的运行期脚本一律 `.sh` 后缀**（含解释器包装 `shim.sh`）：
+  它们由 Dockerfile 逐条 COPY 到 `/baota`，同目录混着无后缀文件会让 `COPY`、
+  `chmod` 与门禁断言各写一套名字。
+- **CI 临时容器与卷**（`check.sh` 各子命令里 `docker run` 出来的，跑完即删）：
+  容器名 `baota-<用途>-<PID>`、卷名 `baota-<用途>-<data|ro>-<PID>`。
+  ★ 统一 `baota-` 前缀，是为了能 `docker ps -f name=baota-` 一次看全、
+  `docker rm -f $(docker ps -aq -f name=baota-)` 一次清干净（四套门禁 + 巡检 +
+  漂移检测同时在前台跑时，混杂的名字会让人漏掉残留）；卷名后缀 `-data` / `-ro`
+  说明**用途**（普通数据卷 / 只读卷），不写 `-vol` 那种只说明「它是个卷」的名字。
+- **禁止自造缩写**（自造拼法的近亲）：项目里已有的全称照抄 —— `SYSTEM` 不写 `SYS`、
+  `CONTAINER` / `VOLUME` 不写 `C` / `V`、`VERSION_FILE` 不写 `VFILE`、
+  `KNOWN_DIRS` 不写 `KNOWNS`（「knowns」甚至不是英文复数）。
+  缩写只在**业界通用**时才用：`rc`、`pid`、`sha`、`tmp`。
+- 例外白名单（改了反而更难读 / 属硬性要求）：
+
+| 保留原名 | 理由 |
+|---|---|
+| `docker-compose.yml`、`.dockerignore` | Docker 固定文件名 |
+| `baota-backup` | 命令行名，与 `docker-compose` 同惯例 |
+| `reset-system`、`health-*` | make 目标惯例用连字符 |
+| `baota-*`（CI 临时容器名）、`baota-*-data` / `baota-*-ro`（CI 临时卷名） | 统一前缀便于批量查看 / 清理；后缀 `-data`（普通数据卷）/ `-ro`（只读卷）说明用途 |
+| `systemd-*`、`lib*-dev`、`php-*`、`apt-get`、`.wget-hsts` | 上游与 Debian 名 |
+| `python-real` | wrapper 惯例：被包装的真解释器用 `-real` 后缀（自造 `pythonreal` 不标准） |
+| `fail-open`、`copy-up`、`non-free` | 行业术语 |
+| `btpanel.service` | 宝塔官方服务名 |
+
+### 5. 变量命名
+
+- **配置类**（`defaults.env` / compose / 构建 ARG）：大写下划线，后缀固定：
+
+| 后缀 | 含义 | 例 |
+|---|---|---|
+| `_ROOT` | 某个层的根 | `PERSIST_DATA_ROOT` |
+| `_DIR` / `_DIRS` | 单个目录 / 目录清单 | `STATE_DIR`、`PERSIST_SYSTEM_DIRS` |
+| `_FILE` | **文件路径** | `META_VERSION_FILE`、`META_BOOT_FILE` |
+| `_BIN` | 可执行文件路径 | `PANEL_PY_BIN` |
+| `_SUBDIRS` | 子目录清单 | `WWW_DATA_SUBDIRS` |
+| `_MIN` / `_MAX` | 阈值上下界 | 如告警线上下界（现由宝塔监控接管，镜像内不再单独定义） |
+| `_MB` / `_PCT` / `_KEEP` | 单位 / 保留份数 | `AUTO_SNAPSHOT_KEEP` |
+
+  前缀只有一个：`META_` = 持久化层元数据目录（`.baota/`）下的文件名
+  （`META_VERSION_FILE` / `META_BOOT_FILE`）。
+
+- **脚本内变量按作用域分两档，不要混着写**：
+  - **模块级常量**（文件顶部定义、跨函数使用）：大写下划线，与配置类共用同一套后缀
+    （`STATE_DIR` / `LOCK_FILE` / `EXCLUDES` / `OUTPUT_DIR`）；
+  - **函数内临时变量**：小写下划线；POSIX 脚本（`init.sh` 由 busybox 解释）没有 `local`，
+    统一用 `_` 前缀并在文件头注明。
+
+  ★ 判据是「这个变量跨不跨函数」，不是「它在不在脚本里」—— 全仓脚本顶部那批
+  常量跨函数使用，所以是大写。
+- **同一个概念只允许一个名字。** `BAOTA_STATE` 与 `STATE_DIR` 曾并存（同一目录两种叫法），
+  已统一为 `STATE_DIR` —— 再发现同义异名，按本文合并，不要「两个都留着」。
+- 变量名与它指向的路径要能对上：`PANEL_ORIGIN_DIR=/baota/origin`（不叫 `MIRROR_DIR`）、
+  标记文件 `/run/baota/critical` 对应变量 `CRITICAL`（不叫 `DEGRADED_CRITICAL`）。
+
+### 6. 仓库与镜像目录组织
+
+仓库结构树见本文开头「仓库结构」。本节只记跨文件的不变式：
+
+- **线的差异只写进 `image/lines.conf`**：新增一条线 = 加一行 + 一个
+  `versions/<主线号>/VERSION`（`image/versions/12/VERSION`）。
+  ★ 该表的列：`line` = 线标识（内部键）、`display` = 显示名（只给人看），
+  两列**不同义**，别互相代替；中文一律叫「线」，不另起英文 release channel 的中文译名。
+  目录名用**面板主线号**：
+  官方叫 12.x / 13.x，就取 `12` / `13`（§1 沿用官方叫法）；不写 `12_version` —— 那是
+  把两个词硬拼的自造名（§4），而它是排障时要手敲的路径，短比「信息完整」重要
+  （线标识 `12_version` 只作 lines.conf 的内部键，不与目录名绑定）。
+  线的差异不进 workflow、不进 Dockerfile。
+- **运行期脚本一律放 `/baota`**：它不属于任何持久化目录，永远跟随当前镜像。
+
+### 7. 文档、注释与术语
+
+- 文件头注释统一四段：一句话 / 为什么 / 红线 / 相关（写法见本文「注释与文档规范」）。
+- 正文注释只写「为什么」，不写「是什么」。
+- 文档分工（一个主题只有一处详解）：
+
+| 位置 | 放什么 |
+|---|---|
+| `README.md` | 入口：是什么、怎么跑、设计原则摘要、文档地图；细节一律给链接 |
+| `docs/quickstart.md` | 起容器与首次登录 |
+| `docs/persistence.md` | 持久化原理、data/ 目录模型、硬约束（唯一详解） |
+| `docs/configuration.md` | compose / 环境变量逐项配置（唯一详解） |
+| `docs/backup.md` | 备份、恢复、跨机器迁移（唯一详解） |
+| `docs/operations.md` | 运维、升级、回滚、重置、救援（唯一详解） |
+| `docs/faq.md` | 排障速查 |
+| `docs/development.md` | **本文**：开发流程、本地构建、门禁覆盖 + 末尾「命名与目录结构约定」附录 |
+| `docs/release.md` | 线声明表、发布流水线、每日巡检 |
+| `skills/baota-docker/` | 给 AI 助手的索引与红线，只引用 docs，不复述正文 |
+| `CHANGELOG.md` | 唯一变更记录；末尾附「开发期归档（未公开发布）」 |
+
+- 术语（统一叫法，避免同义混用）：
+
+| 术语 | 含义 |
+|---|---|
+| 线 | 一条跟进上游的发布流水线。**文档一律叫「线」**；`lines.conf` 里 `line` 是线标识（`12_version`）、`display` 是该线的显示名（`12.x`）—— 二者不同义，别互相代替 |
+| 数据层 | `data/` 整体（`PERSIST_DATA_ROOT`）：`www/` 业务与面板状态 + `overlay.img`（原生模式则是 `.system/`） |
+| 系统层 | 面板里装的组件（`www/server`）的 overlay **增量**；镜像模式真身是 `data/overlay.img`，原生模式 upper 在 `data/.system` |
+| 业务层 | `data/www` 下 bind 直通的用户数据（与容器 `/www` 同名） |
+| 面板状态 | `data/www/server/panel` 下 bind 的状态（`data plugin vhost ssl config`） |
+| 可选模块 | `data/www` 下**装了才出现**的目录（`vmail`、`dk_project`），不预建 |
+| 面板代码 | `/www/server/panel` 本体：**不持久化**，来自镜像 |
+| 守卫 / 垫片 | `shim.sh`：pyenv 解释器包装，内置执行入口守卫（两职责已合并为一个文件） |
+| 镜像副本 | `/baota/origin`：构建期生成的面板副本（排除 pyenv），守卫用它把代码换回镜像版本 |
+
+### 8. 变更检查清单
+
+| 你要做的事 | 必须同步改的地方 |
+|---|---|
+| 加一条线 | `lines.conf` 加一行 + `versions/<主线号>/VERSION`；**不动** workflow / Dockerfile |
+| 加 / 改一个持久化目录 | `defaults.env` 清单 → 本文 §2 → `persistence.md` → README 目录树 |
+| 加一个配置变量 | `defaults.env` → `.github/scripts/check.sh` 里 `run_config` 的 `VARS` → `configuration.md` |
+| 加一个元数据文件 | `defaults.env` 的 `META_*` → 本文 §4 |
+| 改标题或移动文档 | 目录与交叉链接（`make lint` 的 `check.sh lint links` 会拦死链） |
+| 新增文档 | 本文 §7 分工表 + README 文档地图 |
+| 加一项静态检查 | `check.sh` 加一个 `run_<名字>()` 并挂进 `lint` 的 `case` → 本文 §9 表格 |
+
+### 9. 自动化保障
+
+六项检查共用一份 `.github/scripts/check.sh lint`：`make lint` 逐项调子命令，排障时也能
+`bash .github/scripts/check.sh lint <子命令>` 单跑。每一项都守着本文的一条约定：
+
+| 子命令 | 守护的约定 |
+|---|---|
+| `config` | 配置真源唯一（§5）：受管变量只能在 `defaults.env` 有默认值 |
+| `naming` | 命名规范（§4、§5、§6、§7）：禁用标识符（自造拼法 / 已废弃旧名）、**自造缩写清单**（§4，白名单 `rc` / `pid` / `sha` / `tmp`；机器分不出缩写与完整短单词，故用清单，新踩到一个加一个）、容器名 `baota-` 前缀、卷名 `-data` / `-ro`、配置变量前后缀白名单、术语「线」、线声明表列 |
+| `links` | 文档链接与锚点有效、标题不缺空格、一篇只有一个 H1（§7） |
+| `workflow` | workflow 内嵌 `run:` 块是合法 bash |
+| `comments` | 注释体积：文件头 ≤16 行、注释块 ≤10 行（见「注释与文档规范」） |
+| `shellcheck` | 语法与常见误用；`bash -n` / `sh -n` / YAML / BT-Panel 字面量检查在 `Makefile` 里 |
+| BT-Panel 字面量检查（`Makefile`） | 非注释行不得出现 `BT-Panel`（会干扰上游的进程判定） |

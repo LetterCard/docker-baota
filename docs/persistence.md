@@ -25,7 +25,7 @@
 
 > ⚠️ 持久化是**两套独立机制**，不要从单一清单反推「某路径存不存在」：
 > - **系统层 overlay**（`PERSIST_SYSTEM_DIRS` = `www/server`）：
->   把整个 `/www/server` 盖成 overlay，增量落 `data/.system/www/server`；
+>   把整个 `/www/server` 盖成 overlay，增量落系统层 upper（口径见「data/ 的目录模型」）；
 >   面板里装的组件与环境库都在它下面，重建 / 换镜像后照样在。
 > - **/www 子目录 bind**（`WWW_DATA_SUBDIRS` / `PANEL_STATE_SUBDIRS` /
 >   `WWW_OPTIONAL_SUBDIRS`）：只覆盖 `/www` 下的面板状态与业务数据。
@@ -37,12 +37,12 @@
 ## data/ 的目录模型（与容器内路径一一对应）
 
 compose 只挂一个 `data`（`./data:/data`）。**规则只有一条：`data/www` 下的路径 =
-容器内的路径** —— 找什么按容器里的路径找，不需要记我们的分组：
+容器内的路径** —— 找什么按容器里的路径找，不需要记我们的分组。
+`www/` 这一棵树在两种模式下完全相同：
 
 ```
 data/                        （./data:/data）
 ├── www/                      业务与面板状态 —— bind 目录，宿主机可直接读写
-│                             （它就是容器 /www 的镜像）
 │   ├── wwwroot/       ↔ 容器 /www/wwwroot     （站点）
 │   ├── backup/        ↔ 容器 /www/backup      （备份）
 │   ├── server/data/   ↔ 容器 /www/server/data （MySQL）
@@ -52,36 +52,46 @@ data/                        （./data:/data）
 │   │   ├── vhost/     站点配置 / 证书 / 伪静态 / 反代
 │   │   ├── ssl/       面板自身 HTTPS 证书
 │   │   ├── config/    面板设置
-│   │   └── pyenv/     pyenv 覆盖层 upper（插件 pip 装的包）
-│   ├── vmail/         ↔ 容器 /www/vmail       （邮局：邮件与账号库，装了才出现）
-│   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块的项目目录，装了才出现）
-├── .system/                  系统层（隐藏：overlay upper 是「相对镜像的改动」）
-
-│   ├── www/server/    ← /www/server 的 overlay upper（面板里装的组件、
-│   │                     计划任务脚本 /www/server/cron、插件数据 total/btwaf…）
-│   └── .baota/        ← 项目元数据（锁、版本记录、启动历史 + 各 overlay workdir）
-└── .baota/                   ← 数据层状态（并发锁，隐藏）
+│   │   └── pyenv/     pyenv 覆盖层 upper（原生模式；插件 pip 装的包）
+│   ├── vmail/         ↔ 容器 /www/vmail       （邮局，装了才出现）
+│   └── dk_project/    ↔ 容器 /www/dk_project  （面板 Docker 模块，装了才出现）
+└── overlay.img               系统层 + pyenv 两层的差量（ext4 镜像文件）
+                              容器内 loop 挂载到 /run/baota/overlay（在 /data 之外）
 ```
+
+**镜像模式**是 compose 默认值（`PERSIST_SYSTEM_IMAGE: "true"`）：`data/` 只有
+`www/` 与 `overlay.img` 两项，没有隐藏的系统层目录。镜像内部才是
+`www/server/`（upper）、`pyenv/`（upper）与 `.baota/`（元数据 + workdir）。
+挂载点 `/run/baota/overlay` 在 `/data` **之外**，这正是 `data/` 能保持干净的原因。
+
+**原生模式**（`PERSIST_SYSTEM_IMAGE: "false"`，零开销）：不创建镜像文件，
+系统层 upper 直接落在宿主目录：
+
+```
+data/
+├── www/                      （同上，完全不变）
+└── .system/
+    ├── www/server/    ← /www/server 的 overlay upper（组件、cron、插件数据）
+    └── .baota/        ← 版本记录、代码指纹、启动历史、overlay workdir
+```
+
+> **下文统一口径**：凡写「系统层 upper」，镜像模式的物理真身是
+> `data/overlay.img`（容器内 `/run/baota/overlay/www/server`），原生模式是
+> `data/.system/www/server`。两者是同一个逻辑位置，下文不再逐处重复。
 
 容器内看到的路径与官方一致：面板在 `/www/server/panel`，站点在
 `/www/wwwroot`，MySQL 在 `/www/server/data`，备份在 `/www/backup`。
 唯一的不同是：**面板代码本身不在 `data/` 里** —— 它属于镜像。
 
-> 两棵树按**持久化机制**分，不按路径分：`data/www` 是 bind 直通（内容完整、
-> 宿主可直改），`data/.system` 是 overlay upper（相对镜像的增量）。两棵树内部都
-> 与容器路径同名，所以 `/www/wwwroot` → `data/www/wwwroot`、`/www/server` → `data/.system/www/server`。
+> **为什么 `/www/server` 不能走 `data/www` 下的整目录 bind**：只有 overlay 才能
+> 「没动过的组件跟新镜像更新、动过的留在 upper」；整目录 bind 会让镜像里更新过的
+> 组件永久被首启时的目录遮住（见[方案对比](../README.md#与常见方案的差异)）。
+> 另外它的 upper 若放进 `data/www/server`，MySQL 源（`server/data`）与面板状态源
+> （`server/panel/*`）就落进 upperdir 内部，形成「bind 源在 overlay upper 里」
+> 的自引用。所以 `data/www` 下只有 `server/data` 与 `server/panel/*`。
 >
-> **为什么 `/www/server` 在 `.system` 而不在 `data/www` 下**：它走 overlay —— 只有
-> overlay 才能「没动过的组件跟新镜像更新、动过的留在 upper」；改成整目录 bind 会让
-> 镜像里更新过的组件永久被首启时的目录遮住（正是[方案对比](../README.md#与常见方案的差异)
-> 里说的那种失效）。另外它的 upper 若放进 `data/www/server`，MySQL 源
-> （`server/data`）与面板状态源（`server/panel/*`）就落进 upperdir 内部，
-> 形成「bind 源在 overlay upper 里」的自引用。所以 `data/www` 下只有
-> `server/data` 与 `server/panel/*`，没有 `server` 整体。
->
-> 系统层收进隐藏目录 `.system`，是为了让顶层只剩 `www` 一个可见目录：它是
-> overlay 的 upper（增量），与「内容完整、可直接读写」的 `data/www` 不是一回事，
-> 不该拿来当文件浏览。注意系统目录（`/etc` `/usr` `/var` `/root`）不持久化、随镜像重建，没有对应的持久化路径；只有 `/www/server` 走 overlay（上层在 `data/.system/www/server`）。
+> 注意系统目录（`/etc` `/usr` `/var` `/root`）不持久化、随镜像重建，
+> 没有对应的持久化路径；只有 `/www/server` 走 overlay。
 
 ## 为什么这样分（不可变面板）
 
@@ -90,7 +100,7 @@ data/                        （./data:/data）
 | | 例子 | 处理方式 |
 |---|---|---|
 | 面板代码 / 可再生的东西 | `/www/server/panel`（代码）、`/www/wwwlogs`（站点日志）、`/www/.Recycle_bin`（回收站）、`/www/php_session`（PHP session） | **不持久化**：代码直接来自镜像层，换镜像整套换新；日志 / 回收站 / session 重建即空 |
-| 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在 `data/.system/www/server`），装什么都能留住，不用按组件列清单 |
+| 面板里装的组件 | `/www/server/php`、`nginx`、`mysql`、`redis`… | **overlay 持久化**：整层 `/www/server` 走 overlay（upper 在系统层），装什么都能留住，不用按组件列清单 |
 | 插件数据 / 计划任务脚本 | `/www/server/total`、`/www/server/btwaf`、`/www/server/cron` | **同上**：都在 `/www/server` 之下，自动跟着持久化 |
 | 面板 Python 环境 | `panel/pyenv`（解释器 + 站点包） | **独立 overlay**：lower = 镜像 pyenv、upper = `data/www/server/panel/pyenv` —— pip 包持久化，解释器随镜像更新（见[专节](#pyenv-覆盖层pip-包与解释器各得其所)） |
 | 面板运行产生的状态 | `panel/data`（配置 / SQLite）、`panel/plugin`（插件）、`panel/vhost`（站点配置与证书）、`panel/ssl`（面板证书）、`panel/config`（面板设置） | **bind 直通**：必须保留，否则等于重装面板 / 站点证书丢失 |
@@ -105,18 +115,18 @@ data/                        （./data:/data）
 
 所以：
 
-- `/www/server` 整层走 **overlay**：upper 在 `data/.system/www/server`，面板里装的
+- `/www/server` 整层走 **overlay**：upper 在系统层，面板里装的
   组件、计划任务脚本、插件数据都在这里；换镜像/重建后它们还在，**不用重装**
 - `/www/server/panel`（面板代码）在挂 overlay 之后由 `init.sh` 用镜像那份
   **bind 盖回**：代码始终来自镜像、写入不落持久化层，换镜像即升级面板
 - 面板状态（`data`、`plugin`、`vhost`、`ssl`、`config`）逐个 **bind** 到
   `data/www/server/panel/` 下 —— 与容器内的位置同名
 - 站点 / 备份 / MySQL 逐个 **bind** 到 `data/www/` 下
-- 系统目录当前只持久化 `/www/server` 一个 overlay（upper 在 `data/.system/www/server`）；原设计的 etc/usr 实测可丢已移除
+- 系统目录当前只持久化 `/www/server` 一个 overlay（upper 在系统层）；原设计的 etc/usr 实测可丢已移除
 
 > ✅ **面板里安装的组件（PHP / nginx / MySQL / redis…）会持久化。**
 > 它们落在 `/www/server/<组件>`，而 `/www/server` 整层是 overlay（upper =
-> `data/.system/www/server`），所以销毁重建、换镜像标签之后组件都还在，
+> 系统层 upper），所以销毁重建、换镜像标签之后组件都还在，
 > **不需要重新安装**；插件的运行数据（`total`、`btwaf`…）与计划任务脚本
 > （`/www/server/cron`）也在同一层里，自动跟着保住。
 >
@@ -130,13 +140,13 @@ data/                        （./data:/data）
 > 标签。这样也保证了面板的 `init_db` 永远由镜像版本代码执行，库不会「比代码新」。
 
 > `data/www/*`（含 `www/server/panel/*`）都是**内容完整**的目录（不是增量），
-> 可以直接拷贝、打包、迁移；`data/.system/<dir>` 是 overlay **增量**，
+> 可以直接拷贝、打包、迁移；系统层 upper 是 overlay **增量**，
 > 完整内容 = 镜像 lower 层 + 这里的增量。
 
 ### 挂载原理
 
 ```
-/www/server     ←overlay→  upper = data/.system/www/server，work = data/.system/.baota/www/server.work
+/www/server     ←overlay→  upper = 系统层/www/server，work = 系统层/.baota/www/server.work
 /www/wwwroot     ←bind→    源 = data/www/wwwroot
 /www/backup      ←bind→    源 = data/www/backup
 /www/server/data ←bind→    源 = data/www/server/data
@@ -149,7 +159,7 @@ data/                        （./data:/data）
 /www/server/panel/config ←bind→  源 = data/www/server/panel/config
 /www/server/panel/pyenv  ←overlay→ lower = 镜像 pyenv（经 /run/baota/panel 钉桩），
                                  upper = data/www/server/panel/pyenv（pip 装的包）
-/www/server              ←overlay→ upper = data/.system/www/server（组件 / cron 脚本 / 插件数据）
+/www/server              ←overlay→ upper = 系统层/www/server（组件 / cron 脚本 / 插件数据）
 /www/server/panel        ←bind→  源 = 镜像里的面板目录（挂 overlay 前先 bind 到 /run，
                                  挂完再 bind 回，保证面板代码不落持久化层）
 lowerdir = 镜像内的同名目录（随镜像升级而更新）
@@ -171,7 +181,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 |---|---|
 | 面板代码 / 默认配置 | 整体换成新镜像的版本 —— **升级面板就是这么发生的** |
 | 面板配置、插件、站点配置与证书、面板设置 | bind 目录（`data/www/server/panel/`），完全不受影响 |
-| 面板里装的组件（PHP / nginx / MySQL…）、插件数据、计划任务脚本 | overlay upper（`data/.system/www/server`），完全不受影响，**不用重装** |
+| 面板里装的组件（PHP / nginx / MySQL…）、插件数据、计划任务脚本 | overlay upper（系统层 upper），完全不受影响，**不用重装** |
 | 站点 / MySQL / 备份 | bind 目录（`data/www/`），完全不受影响 |
 | `/www/server`（组件） | overlay lower 换新，你改过的部分保留在 upper |
 
@@ -219,20 +229,21 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 
 ```
 /www/server/panel/pyenv  ←overlay→  lower = 镜像里的 pyenv（经 /run/baota/panel 钉桩）
-                                 upper = data/www/server/panel/pyenv
-                                 work  = data/.baota/pyenv.work
+                                 upper = 原生模式 data/www/server/panel/pyenv
+                                          镜像模式 /run/baota/overlay/pyenv
+                                 work  = 与 upper 同盘（.baota/pyenv.work）
 ```
 
 - **pip 包持久化**：插件在面板里装包写进 upper，销毁重建、换镜像后都在；
 - **解释器随镜像更新**：lower 换成新镜像的 pyenv，新解释器 / 新自带依赖照常生效；
-- **upper 放数据层而不是 `.system`**：镜像模式下 `.system` 是另一个文件系统，
-  而内核硬性要求 overlay 的 workdir 与 upperdir 同盘；
+- **upper / workdir 必须同盘**：原生模式两者都在 `data/`；镜像模式两者都在
+  `overlay.img` 挂载点内（内核硬性要求 overlay 的 workdir 与 upperdir 同盘）；
 - 开关是 `PANEL_PYENV_OVERLAY`（默认 `on`）；关掉后回到旧行为（pyenv 完全不
   持久化，插件 pip 包重建即丢）；
 - 之前把 `pyenv` 加进 `PANEL_STATE_SUBDIRS` 的用户：那份全量拷贝会自动变成
   本覆盖层的 upper（内容不丢），但它会遮住新镜像的 pyenv —— 要恢复「解释器
   随镜像更新」，停容器后删掉 `data/www/server/panel/pyenv` 再启动
-  （pip 包需重装，见[升级与迁移](upgrade.md)）。
+  （pip 包需重装，见[升级与迁移](operations.md)）。
 
 失败时的表现与其他挂载一致：写 `/run/baota/degraded` 与 `critical`
 （pip 包即将丢失，必须在容器状态里可见），容器仍可启动。
@@ -251,7 +262,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
 子卷是一次性宿主机动作（停容器后 `btrfs subvolume create data/www/server/panel/data`），
 任何时候不满足条件都自动回退 `cp -a`，快照失败不阻断启动。
 
-**指纹比版本号更准**：持久层同时记录面板代码指纹（`data/.system/.baota/digest`，
+**指纹比版本号更准**：持久层同时记录面板代码指纹（持久化层 `.baota/digest`，
 `/baota/origin` 内容的 sha256）。版本号相同但代码变了（同标签镜像被重新构建：
 换基础镜像、改构建脚本）时，只比版本号会漏过 —— 指纹变化同样触发升级前快照。
 
@@ -263,7 +274,7 @@ overlay 的 workdir 每次启动清理重建，与 upper 同盘。
   （默认为 `/www/server /www/wwwroot /www/server/data` 与
   `/www/server/panel/{data,plugin,vhost,ssl,config}`）额外写 `critical`，
   让 healthcheck 把容器判为 unhealthy
-- 降级记录追加到 `data/.system/.baota/boot.log`
+- 降级记录追加到持久化层 `.baota/boot.log`
 - 镜像版本记录（`.baota/version`）旁边多一份面板代码指纹（`.baota/digest`）：
   版本号相同但代码变了（同标签镜像被重新构建）也按升级处理，先快照再启动
 
@@ -286,38 +297,44 @@ chown）在 upper 落下**零数据的元数据副本**，而备份打包的是 
 
 ---
 
-## 系统层 ext4 镜像兜底（opt-in）
+## 镜像模式（单文件 overlay.img）
 
-`data/` 落在 SMB / NFS / exFAT / NTFS 上时，overlay 的 upper 会「挂载成功但只读」、
-写入静默失败 —— 这是本方案唯一的硬约束。设一个环境变量即可绕开：
+`data/` 落在 SMB / NFS / exFAT / NTFS / virtiofs 上时，overlay 的 upper 会
+「挂载成功但只读」、写入静默失败 —— 这是本方案唯一的硬约束。镜像模式把
+**系统层 + pyenv 两层**一起装进一个 ext4 镜像文件 `data/overlay.img`，容器内
+loop 挂载到 `/run/baota/overlay`（在 `/data` 之外），overlay 必可写；
+业务层 `data/www` 仍是普通 bind，任何文件系统上都能工作。
 
-```yaml
-    environment:
-      # 把系统层装进 data 卷里的一个 ext4 镜像（loop 挂载到 /data/.system）
-      PERSIST_SYSTEM_IMAGE: /data/.system.img
-      PERSIST_SYSTEM_IMAGE_SIZE_MB: '8192'
-```
+compose 默认已设 `PERSIST_SYSTEM_IMAGE: "true"`，即统一走这个形态：
 
-- 镜像文件是**稀疏文件**，mkfs 后按实际使用增长；不够用了停机
-  `truncate -s +<MB>M data/.system.img` 再启动（容器内 `resize2fs` 扩容）；
-- 业务层 `data/www` 仍是普通 bind，**任何文件系统上都能工作** —— 受影响的只有
-  系统层，而这正是唯一需要 ext4/btrfs/xfs 的那部分；
-- 每次启动先 `e2fsck -p` 再挂载：停机备份拷贝过来的脏镜像会被自动修复，
-  修不好则拒绝启动（带着损坏的文件系统跑，比起不来危险得多）；
-- 备份自动适配：系统层的真身变成镜像文件，`baota-backup` 改拿它当归档成员
-  （挂载点内容不打包，否则恢复后会被镜像挂载遮挡）；
+| 取值 | 行为 |
+|---|---|
+| `true` / `on` / `1` / `yes` | 强制镜像模式，默认落点 `data/overlay.img` |
+| `auto` / 不设 / 空 | 自动：原生 overlay 优先，失败才兜底镜像 |
+| `false` / `0` / `no` / `off` | 关闭镜像模式：走原生 overlay（零开销），不自动兜底 |
+| `data` 卷内的显式路径 | 强制镜像模式，用你自己的镜像文件（视为备份，损坏时不擅自重建） |
+
+- `data/` 因此只有 `www/` 与 `overlay.img` 两项：**重置 = 删一个文件**（两层同时
+  重置），**迁移 = 打包 `data/` 走人**；
+- 镜像文件是稀疏文件，mkfs 后按实际使用增长；不够用了停机
+  `truncate -s +<MB>M data/overlay.img` 再启动（容器内 `resize2fs` 扩容）；
+- 每次启动先 `e2fsck -p` 再挂载；自动/默认镜像修不好时直接重建（上层可由镜像
+  lower 再派生），显式指定的路径修不好则拒绝启动（避免误清你自己的备份）；
+- 备份自动适配：`baota-backup` 把 `overlay.img` 当归档成员，不打包挂载点内容；
 - `make reset-system` 在镜像模式下不可用（删镜像 = 删整个系统层），会给出提示；
-- **需要 loop 设备**：Docker Desktop 的虚拟机里通常没有，那条路用不了本兜底。
+- **需要 loop 设备**：Docker Desktop 的虚拟机里通常没有；OrbStack 完整虚拟机可用。
+
+> 从旧布局升级上来时，`data/` 里残留的 `.system/` / `.baota/` 会被新挂载点遮挡、
+> 不再生效。确认 `overlay.img` 已生成后，停容器删掉这两个隐藏目录即可。
 
 ## 硬约束
 
-- **`data/` 必须落在 ext4 / btrfs / xfs 上**。SMB/NFS/exFAT/NTFS/macOS 目录会
-  「挂载成功但只读」、写入静默失败（启动时会实测并告警）—— 唯一的绕法是上面的
-  [ext4 镜像兜底](#系统层-ext4-镜像兜底opt-in)
+- **`/data` 在不支持 overlay 的文件系统上时，必须保持镜像模式**。SMB / NFS /
+  exFAT / NTFS / virtiofs 会「挂载成功但只读」、写入静默失败（启动时会实测并告警）；
+  绕法就是上面的[镜像模式](#镜像模式单文件-overlayimg)
+- 走原生模式（`false`）时，`data/` 必须落在 ext4 / btrfs / xfs 上
 - 持久化根不能位于 overlay 之上
-- 容器必须 `privileged`（要 mount overlay、跑 systemd）
-
----
+- 容器必须 `privileged`（要 mount overlay 与 loop 设备、跑 systemd）
 
 ## 为什么用 overlay 而不是整目录 bind
 

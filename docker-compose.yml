@@ -66,19 +66,17 @@ services:
       # PANEL_PASSWORD: ""          # 不写/留空 → 随机 12 位，见首次启动日志
       # PANEL_SAFE_PATH: ""         # 不写/留空 → 随机 8 位，见面板地址
       # ROOT_PASSWORD: ""           # 不写/留空 → 随机 12 位，见首次启动日志
+      PERSIST_SYSTEM_IMAGE: "true"   # 镜像模式开关：true=强制系统层+pyenv 进 data/overlay.img（删它=两层重置）；false=关闭、走原生 overlay（无需注释掉本行）；auto/不设=自动（原生优先，失败兜底镜像）
 
-    # ---- 💾 持久化：只挂一个 data（宿主机目录 bind，方便整机迁移直接打包带走）----
-    #   data/www 业务与面板状态（bind；含 pyenv 覆盖层 upper —— pip 包持久化、
-    #   解释器随镜像更新）｜data/.system 系统层（隐藏，overlay upper）
-    #   ｜data/.baota 并发锁元数据（隐藏）。不持久化：面板代码（init.sh 用镜像绑定盖回，
-    #   面板内点「更新」不生效，由守卫兜住）与 /www/wwwlogs。面板组件/插件/cron 在
-    #   data/.system/www/server，重建后免重装。
+    # ---- 💾 持久化：只挂一个 data（宿主机目录 bind，打包 data/ 即整机迁移）----
+    #   data/www 业务与面板状态（bind；含 pyenv 覆盖层 upper）。面板代码不持久化
+    #   （init.sh 用镜像绑定盖回，面板内「更新」不生效，由守卫兜住）。
     #
-    #   ★ 底层文件系统若不支持 overlay 的 upperdir（virtiofs / SMB / NFS / exFAT / NTFS），
-    #     init.sh 会**自动**把系统层 + pyenv 两层兜进同一个 ext4 镜像
-    #     data/.baota/overlay.img（容器内 loop 挂载，仍是原生 ext4，overlay 必可写），
-    #     无需手工设 PERSIST_SYSTEM_IMAGE，也无需改用命名卷。
-    #     一个镜像兜两层 → 删该文件即两层同时重置；镜像文件在 data/ 内，随打包迁移。
+    #   ★ 单文件镜像模式（compose 默认 PERSIST_SYSTEM_IMAGE: "true"）：系统层 + pyenv
+    #     两层兜进 data/overlay.img（loop 挂载到 /run/baota/overlay，在 /data 之外），
+    #     data/ 因此只有 www/ 与 overlay.img：重置 = 删该文件，迁移 = 打包 data/ 走人。
+    #   ★ 改 "false" 走零开销原生 overlay（飞牛 ext4/btrfs 最优）；改 "auto" 或不设
+    #     则自动（原生优先，失败兜底镜像）。无需注释掉那行环境变量。
     volumes:
       - ./data:/data
 
@@ -119,6 +117,6 @@ services:
         max-file: "3"
 
 # 持久化层用宿主机目录 bind（./data），方便整机迁移时直接打包 data/ 带走。
-# 底层文件系统若不支持 overlay（virtiofs / SMB / NFS / exFAT / NTFS），
-# init.sh 会自动把系统层 + pyenv 两层兜进 data/.baota/overlay.img 这个 ext4 镜像，
-# 无需命名卷，也无需手工设 PERSIST_SYSTEM_IMAGE。
+# 默认 PERSIST_SYSTEM_IMAGE: "true" 直接走单文件镜像模式（data/overlay.img），
+# 系统层 + pyenv 两层都在里面；底层文件系统是否支持 overlay 不影响它。
+# 想用零开销原生 overlay 改 "false"；"auto" / 不设则原生优先、失败才兜底镜像。

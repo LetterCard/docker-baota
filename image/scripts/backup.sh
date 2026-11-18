@@ -20,6 +20,7 @@ set -euo pipefail
 # healthcheck.sh 共用同一份闸门）；log/warn/die 见 /baota/common.sh
 # ------------------------------------------------------------------------------
 LOG_PREFIX='📦 [backup]'
+# shellcheck source=image/scripts/common.sh
 . /baota/common.sh
 load_defaults || exit 1
 
@@ -36,29 +37,28 @@ NAME_PREFIX='baota-backup'
 
 # 打包时排除的路径（归档成员是 www/，排除项也带 www/ 前缀）。后三项必须排除，
 # 否则**自包含**：本次产物被下一次备份装进去，体积逐次翻倍。
-#   .baota                项目元数据，启动时自动重建
+#   <系统层>/.baota       项目元数据，启动时自动重建（镜像模式下在 overlay.img 内）
 #   www/backup/{auto,manual,database,rsync}   升级快照/本脚本产物/面板备份/--rsync 落点
 #   <系统层>/var/log/journal  历史残留排除项：journald 日志实际在容器可写层（/var/log/journal），
 #                         不进 data/，所以这条排除当前是 no-op；保留以防哪天系统层重新纳入 /var
 # 系统层那一项成员名从真源派生（basename PERSIST_SYSTEM_ROOT）：写死「system」
 # 会让排除静默失效 —— 表现为备份体积逐次翻倍
 SYSTEM_MEMBER=$(basename "${PERSIST_SYSTEM_ROOT}")
-# 系统层镜像模式标记：init.sh 在把系统层装进 ext4 镜像时写下（内容是镜像文件
-# 相对数据层的路径，如 .system.img）。默认布局下该文件不存在。
-# 镜像模式下系统层的真身是**镜像文件**，.system 只是它的挂载点 —— 备份必须改拿
-# 镜像文件当成员：漏掉它整个系统层就没了；而把挂载点内容打进去更危险
-# （恢复后会被镜像挂载遮挡，那份内容静默失效）
+# 是否镜像模式：看解析出的镜像文件是否真实存在（init.sh 不在宿主侧写标记，
+# 而是把系统层 + pyenv 兜进 data/overlay.img 这一个文件；删它即两层同时重置）。
+# 自动模式（PERSIST_SYSTEM_IMAGE 为空/auto）下，原生 overlay 成功则镜像文件不存在，
+# 只有兜底触发才会创建，故「文件存在」即等价于镜像模式。
 SYSTEM_IMAGE_REL=''
-if [ -f "${PERSIST_DATA_ROOT}/.baota/system-image" ]; then
-    SYSTEM_IMAGE_REL=$(tr -d '[:space:]' < "${PERSIST_DATA_ROOT}/.baota/system-image" 2> /dev/null || true)
+if [ -n "${PERSIST_SYSTEM_IMAGE_PATH}" ] && [ -f "${PERSIST_SYSTEM_IMAGE_PATH}" ]; then
+    SYSTEM_IMAGE_REL="${PERSIST_SYSTEM_IMAGE_PATH#${PERSIST_DATA_ROOT}/}"
 fi
 EXCLUDES=(
-    '.baota'
     'www/backup/auto'
     'www/backup/manual'
     'www/backup/database'
     'www/backup/rsync'
     "${SYSTEM_MEMBER}/var/log/journal"
+    "${SYSTEM_MEMBER}/.baota"
 )
 
 # 由 EXCLUDES 派生 tar 参数。排除项只在这里写一次，全量打包与 --rsync 共用，
@@ -158,12 +158,12 @@ show_sizes() {
     if [ -n "${SYSTEM_IMAGE_REL}" ]; then
         echo
         echo "系统层装在 ext4 镜像里：${PERSIST_DATA_ROOT}/${SYSTEM_IMAGE_REL}"
-        echo "  （$(du -sh "${PERSIST_DATA_ROOT}/${SYSTEM_IMAGE_REL}" 2> /dev/null | cut -f1 || echo 未知)，启动时自动挂载到 ${PERSIST_SYSTEM_ROOT}）"
+        echo "  （$(du -sh "${PERSIST_DATA_ROOT}/${SYSTEM_IMAGE_REL}" 2> /dev/null | cut -f1 || echo 未知)，启动时挂载到 ${PERSIST_SYSTEM_MOUNT_DIR}）"
     fi
 
     echo
     echo '可排除项体积：'
-    for d in "${PERSIST_DATA_ROOT}/.baota" "${PERSIST_SYSTEM_ROOT}/.baota" \
+    for d in "${PERSIST_SYSTEM_ROOT}/.baota" \
              "${PERSIST_DATA_ROOT}/www/backup/auto" "${PERSIST_DATA_ROOT}/www/backup/manual" \
              "${PERSIST_DATA_ROOT}/www/backup/database"; do
         [ -e "${d}" ] || continue
@@ -171,7 +171,10 @@ show_sizes() {
     done
     echo
     echo '磁盘水位：'
-    for _m in "${PERSIST_DATA_ROOT}" "${PERSIST_SYSTEM_ROOT}"; do
+    # 镜像模式 data/ 下没有 .system，df 要看 loop 挂载点才看得到镜像文件系统的水位
+    local _sys_df="${PERSIST_SYSTEM_ROOT}"
+    if [ -n "${SYSTEM_IMAGE_REL}" ]; then _sys_df="${PERSIST_SYSTEM_MOUNT_DIR}"; fi
+    for _m in "${PERSIST_DATA_ROOT}" "${_sys_df}"; do
         # || true：目录缺失 / df 失败时保持 --list 可用（这本来就是排障工具），
         # 而不是让 pipefail + set -e 把整条命令带崩
         df -Ph "${_m}" | awk -v r="${_m}" 'NR==1 || NR==2 {print "  "r": "$0}' || true
@@ -259,14 +262,15 @@ baota-backup 备份清单
 
 注意
 ----
-- 本包不含 .baota 元数据目录与升级自动快照，启动时会自动重建
+- 本包不含原生模式的 .baota 元数据目录与升级自动快照，启动时会自动重建
+  （镜像模式下 .baota 在 overlay.img 内，随镜像文件一起打包）
 - 持久化层必须落在 ext4 / btrfs / xfs 上，放到 SMB / NFS / exFAT 会导致
   持久化层只读、写入静默失败
 EOF
 }
 
 # ==============================================================================
-#  打包（-C 到数据层，包内路径相对 www/... 与 .system/...，恢复不受绝对路径影响）
+#  打包（-C 到数据层，包内成员为 www/ + overlay.img（镜像模式）或 www/ + 系统层目录（原生模式））
 #  --xattrs 是关键：overlay 把「整体替换过的目录」记成 trusted.overlay.opaque
 #    扩展属性，丢了它恢复后该目录会与镜像内容合并（被删镜像文件是 0:0 设备节点，
 #    默认就保留）。
@@ -275,12 +279,12 @@ EOF
 #    覆盖 PERSIST_SYSTEM_ROOT / PANEL_STATE_ROOT，写死会找不到）。
 # ==============================================================================
 collect_members() {
-    # 归档 data 卷内的顶层成员：业务与面板状态（www/）+ 系统层（.system/）。
+    # 归档 data 卷内的顶层成员：业务与面板状态（www/）+ 系统层（镜像模式 overlay.img，原生模式 .system/）。
     # 面板状态已归位在 www/server/panel 下（与容器内位置同名），不再独立顶层；
     # 面板代码不在 data 卷里 —— 它属于镜像，换镜像即升级，无需备份。
     # 用显式成员而非 '.'：'.' 让成员名带 ./ 前缀，EXCLUDES 里的 'www/backup/manual'
     # 匹配不上 → 边写边读自己的输出包 → tar 报错。
-    # 顶层 .baota 不进成员、内部 .baota 由 basename 排除，天然不打包。
+    # 顶层 .baota 不进成员；系统层内的 .baota 由 EXCLUDES 排除。
     # 系统层成员名从配置真源派生（defaults.env 允许覆盖 PERSIST_SYSTEM_ROOT），
     # 写死成员名在非默认布局下 tar 找不到成员，报错还指向不存在的路径。
     # 系统层若被指到 data 卷之外（tar 单一来源打不进来），在这里响亮拒绝；
@@ -299,7 +303,7 @@ collect_members() {
         # 是挂载点却没有镜像标记：有人手工挂了别的东西在系统层上。照常打进去
         # 会得到一份恢复后就被遮挡的内容，宁可拒绝产出
         if mountpoint -q "${PERSIST_SYSTEM_ROOT}" 2> /dev/null; then
-            die "系统层 ${PERSIST_SYSTEM_ROOT} 是独立挂载点，但找不到镜像标记 ${PERSIST_DATA_ROOT}/.baota/system-image：拒绝产出恢复后可能失效的备份"
+            die "系统层 ${PERSIST_SYSTEM_ROOT} 是独立挂载点，但找不到镜像文件 ${PERSIST_SYSTEM_IMAGE_PATH:-${PERSIST_DATA_ROOT}/overlay.img}：拒绝产出恢复后可能失效的备份"
         fi
         DATA_MEMBERS+=("${_system}")
     elif [ "${PERSIST_SYSTEM_ROOT}" = "${PERSIST_DATA_ROOT}/${_system}" ]; then
@@ -338,8 +342,8 @@ build_archive() {
     local -a extra=()
     [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
 
-    # 系统层已在数据层之内（data/.system），一次 -C 就够了；
-    # 包内路径仍为 www/... 与 .system/...，恢复时不受挂载方式影响
+    # 镜像模式打 www/ + overlay.img、原生模式打 www/ + 系统层目录，一次 -C 就够；
+    # 包内均为相对成员名，恢复时不受挂载方式影响
     #
     # 退出码不能直接 || die：热备份下 tar 常以 1（文件在读取期间被改写）结束，
     # 那是可接受的，包照样完整；只有 ≥2 才是真失败。详见 check_tar_rc。
@@ -437,7 +441,7 @@ prune_archives() {
 #  为什么值得有它：全量打包每次重读重压整份 data/，几十 GB 时非常慢；rsync 只传
 #    变化部分，后续从「几十分钟」降到「几分钟」。
 #  ★ 必须用 -aAX：-X 保留扩展属性（overlay 的 opaque 标记全靠它，与 --xattrs 等价），
-#    少了它恢复后被替换过的目录会与镜像内容合并。一条 rsync 带过 www/ 与 .system/。
+#    少了它恢复后被替换过的目录会与镜像内容合并。一条 rsync 带过 www/ 与系统层成员。
 #  安全护栏：--delete 让目标严格对齐源，指错位置等于当场删库，拦三种情况 ——
 #    ① 目标是 / 或持久化层自身 ② 目标是持久化层的上层目录 ③ 目标非空且不像同步产物
 # ==============================================================================
@@ -468,7 +472,7 @@ rsync_sync() {
     done
 
     # 目标非空时，必须是本工具之前的同步产物，否则拒绝用 --delete。
-    # 判据只看 data/：整份持久化层（含系统层 .system/）都同步进 dest/data 里。
+    # 判据只看 data/：整份持久化层（www/ + 镜像文件 / 原生系统层）都同步进 dest/data 里。
     if [ -n "$(ls -A "${dest}" 2> /dev/null)" ]; then
         if [ ! -d "${dest}/data" ]; then
             die "目标目录非空且不像本工具的同步产物（缺少 data/ 子目录）：${dest}
@@ -499,14 +503,14 @@ rsync_sync() {
     for _e in "${EXCLUDES[@]}"; do
         rargs+=( "--exclude=${_e}" )
     done
-    # 镜像模式下 .system 是挂载点：其内容会被镜像挂载遮挡，只同步镜像文件本身
-    # （不同步内容，恢复时以镜像文件为准）
+    # 镜像模式下 .system 不是成员（DATA_MEMBERS 已换成 overlay.img）；若 data/ 里
+    # 残留旧 .system 目录，也不同步它，免得把已被遮挡的旧内容带过去
     if [ -n "${SYSTEM_IMAGE_REL}" ]; then
         rargs+=( "--exclude=/${SYSTEM_MEMBER}" )
     fi
 
-    # --rsync 整层同步 data 卷（业务与面板状态 data/www + 系统层 data/.system/<dir>
-    # 都在里面），一条命令覆盖全部。
+    # --rsync 整层同步 data 卷（业务与面板状态 data/www + 系统层：镜像模式是
+    # data/overlay.img、原生模式是 data/.system/），一条命令覆盖全部。
     # 但用户把 PERSIST_SYSTEM_ROOT 指到 data 卷之外时（defaults.env 允许），
     # 这条 rsync 摸不到它 —— 会静默漏掉整个系统层，恢复后账号、环境全丢。
     # 对这种布局显式补第二条同步
@@ -592,7 +596,11 @@ main() {
     esac
 
     [ -d "${PERSIST_DATA_ROOT}" ] || die "数据层根目录不存在：${PERSIST_DATA_ROOT}（容器未挂载 data 卷？）"
-    [ -d "${PERSIST_SYSTEM_ROOT}" ] || die "系统层根目录不存在：${PERSIST_SYSTEM_ROOT}（容器未挂载 data 卷？）"
+    # 镜像模式的系统层真身是 data/overlay.img、挂载点在 /run，data/ 下没有 .system；
+    # collect_members 已改打镜像文件，再要求原生 upper 目录必然把默认备份判死
+    if [ -z "${SYSTEM_IMAGE_REL}" ]; then
+        [ -d "${PERSIST_SYSTEM_ROOT}" ] || die "系统层根目录不存在：${PERSIST_SYSTEM_ROOT}（容器未挂载 data 卷？）"
+    fi
 
     mkdir -p "${OUTPUT_DIR}" 2> /dev/null || die "无法创建输出目录：${OUTPUT_DIR}"
 
