@@ -264,7 +264,7 @@ jobs:
       - name: ✏️ 注入 README 并回写仓库
         run: |
           set -euo pipefail
-          bash .github/scripts/check.sh report "${REPORT}" DAILY-DRIFT-REPORT
+          python3 .github/scripts/report.py "${REPORT}" DAILY-DRIFT-REPORT
           git add "${REPORT}" "${BASELINE}" README.md
           if git diff --cached --quiet; then
             echo '报告与基线无变化，跳过提交。'

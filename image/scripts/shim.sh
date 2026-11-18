@@ -13,7 +13,7 @@
 #
 #  红线：① 必须放 /baota（面板更新不会覆盖它）；② 守卫一律 fail-open ——
 #  任何异常都放行并照常执行真解释器，绝不把面板卡死在启动路径上。
-#  原理：docs/persistence.md#执行入口守卫不可变面板的兜底
+#  相关：docs/persistence.md#执行入口守卫不可变面板的兜底
 # ==============================================================================
 set -u
 set -o pipefail
@@ -53,14 +53,11 @@ run_guard() {
     if [ -d "${PANEL_ORIGIN_DIR}" ]; then
         img_ver=$(panel_version "${PANEL_ORIGIN_DIR}/class/common.py")
     fi
-    [ -n "${img_ver}" ] \
-        || img_ver=$(cat "${IMAGE_VERSION_FILE}" 2> /dev/null | tr -d '[:space:]' || true)
+    [ -n "${img_ver}" ] || img_ver=$(image_version)
 
     # 只认 x.y.z 形态：dev / unknown 这类值无法比较，直接放行（fail-open）
-    case "${img_ver}" in
-        [0-9]*.[0-9]*.[0-9]*) ;;
-        *) log "镜像代码副本不可用或版本无法比较（'${img_ver}'），跳过守卫"; return 0 ;;
-    esac
+    is_semver "${img_ver}" \
+        || { log "镜像代码副本不可用或版本无法比较（'${img_ver}'），跳过守卫"; return 0; }
     [ -d "${PANEL_ORIGIN_DIR}" ] \
         || { log "镜像代码副本不存在（${PANEL_ORIGIN_DIR}），跳过守卫"; return 0; }
 

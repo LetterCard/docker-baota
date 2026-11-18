@@ -3,17 +3,15 @@
 #  🧰 共享运行期函数（POSIX sh）
 #
 #     init.sh / entrypoint.sh / backup.sh / shim.sh / healthcheck.sh 共同 source，
-#     消掉「每个脚本各写一份 defaults.env 闸门 + log/warn/die」的重复（抄 6 遍必漂移）
+#     消掉「每个脚本各写一份 defaults.env 闸门 + log/warn/die」的样板重复 ——
+#     抄 6 遍的必然结局是漂移，而漂移的表现是「运行期按旧值算路径」，离原因很远
 #
 #  红线：
 #    - 必须是 POSIX：init.sh / healthcheck.sh 用 /bin/sh（busybox）运行，
 #      混入 local / [[ ]] / 数组 / pipefail 会让容器在最早启动阶段崩
 #    - 只放工具，不放策略：各脚本的判据与流程仍留在自己文件里
 #
-#  用法（调用方先设 LOG_PREFIX，再 source）：
-#    LOG_PREFIX='⚙️ [init]'
-#    . /baota/common.sh
-#    load_defaults || exit 1
+#  用法：调用方先设 LOG_PREFIX 再 source（. /baota/common.sh），然后 load_defaults
 # ==============================================================================
 
 LOG_PREFIX=${LOG_PREFIX:-'[baota]'}
@@ -30,18 +28,6 @@ load_defaults() {
     . /baota/defaults.env
 }
 
-# 系统层持久化根：镜像模式下挂载在 PERSIST_SYSTEM_MOUNT_DIR（/run/baota/overlay，在 data/ 之外），
-# 原生模式下是宿主目录 PERSIST_SYSTEM_ROOT（/data/.system）。两者在 entrypoint 运行时
-# 均已就绪（init.sh 已完成挂载），据此统一解析，避免 init 与 entrypoint 各自按静态
-# 默认值算 STATE_DIR 而漂移（镜像模式下会出现 digest/启动历史写回宿主 .system 的 bug）。
-persist_system_root() {
-    if mountpoint -q "${PERSIST_SYSTEM_MOUNT_DIR}" 2>/dev/null; then
-        echo "${PERSIST_SYSTEM_MOUNT_DIR}"
-    else
-        echo "${PERSIST_SYSTEM_ROOT}"
-    fi
-}
-
 log()  { echo "${LOG_PREFIX} $*"; }
 warn() { echo "⚠️ ${LOG_PREFIX}[WARN] $*" >&2; }
 die()  { echo "❌ ${LOG_PREFIX}[ERROR] $*" >&2; exit 1; }
@@ -54,3 +40,7 @@ panel_version() {
     [ -f "$1" ] || return 0
     sed -n "s/.*g\.version[^0-9]*\([0-9][0-9.]*\).*/\1/p" "$1" 2> /dev/null | head -n1
 }
+
+# dev / unknown / 空不是可比较的版本号——调用方据此 fail-open，避免拿不可信值做版本护栏
+image_version() { tr -d '[:space:]' < "${IMAGE_VERSION_FILE:-/baota/VERSION}" 2> /dev/null || true; }
+is_semver() { case "$1" in [0-9]*.[0-9]*.[0-9]*) return 0 ;; *) return 1 ;; esac; }

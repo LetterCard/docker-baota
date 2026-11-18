@@ -1,18 +1,16 @@
 #!/busybox sh
 # shellcheck shell=sh  # 本文件必须保持 POSIX（busybox 解释），shebang 不被 shellcheck 识别，需显式声明方言
 # ==============================================================================
-#  [阶段 0] 早期初始化 —— 系统层镜像兜底 → 系统层 overlay → 面板代码隔离
-#    → pyenv 覆盖层 → 业务/面板子目录 bind → 移交阶段 1
+#  [阶段 0] 早期初始化 —— 系统层镜像兜底 → overlay → 面板代码隔离 → 移交阶段 1
 #
-#  红线一：解释器用 busybox 而非 bash —— 本脚本要给 /usr 挂 overlay，万一持久化
-#    层里的 /usr 被写坏，usrmerge（/bin -> usr/bin）会让 /bin/bash 一起消失。
-# 红线二：只能用 POSIX 语法 —— 不能用 local / [[ ]] / 数组 / 进程替换 / pipefail；
-#    函数内临时变量统一 `_` 前缀，避免覆盖调用方的循环变量。
+#  为什么：要在 /usr 挂载之前起来，因此自身不能依赖 /usr 里任何东西（连 bash 都可能随持久化层损坏）。
 #
-#  可用环境变量（真源见 /baota/defaults.env）：PERSIST_* / WWW_* / PANEL_*
-#    / CRITICAL_DIRS / STAGE1
+#  红线一：解释器用 busybox 而非 bash —— usrmerge 下 /usr 坏会让 /bin/bash 一起消失。
+# 红线二：只能用 POSIX 语法（无 local / [[ ]] / 数组 / pipefail）；临时变量统一 `_` 前缀。
 #
+#  可用环境变量（真源 /baota/defaults.env）：PERSIST_* / WWW_* / PANEL_* / CRITICAL_DIRS / STAGE1
 #  日志：[init] 普通信息，[init][WARN] 告警
+#  相关：docs/persistence.md#硬约束
 # ==============================================================================
 set -eu
 
@@ -54,7 +52,7 @@ PANEL_PIN_DIR="${PANEL_PIN_DIR:-/run/baota/panel}"
 # 业务数据与面板状态：逐个 bind 到 data 下（清单见 defaults.env）
 # 面板代码（/www/server/panel）刻意不持久化 —— 它直接来自镜像层
 
-# 可写性探测文件名（同时用于 lower 与 upper 两侧）
+# 探测文件在 lower/upper 两侧同名：overlay 挂载后才能靠它判断上层是否可写
 PROBE=.probe
 
 # 状态目录（系统层 overlay 的 .baota）：overlay workdir 在这里面。

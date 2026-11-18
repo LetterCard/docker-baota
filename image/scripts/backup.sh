@@ -3,7 +3,8 @@
 #  📦 baota-backup —— 持久化数据的备份 / 校验工具（在容器内执行）
 #
 #  为什么：手工 tar 有三个坑 —— 升级快照被打进包导致体积逐次翻倍、漏
-#    --xattrs 丢掉 overlay 的 opaque 标记、备份包把自己装进去。取舍见 docs/backup.md
+#    --xattrs 丢掉 overlay 的 opaque 标记、备份包把自己装进去。
+#  相关：docs/backup.md
 #
 #  用法（本块由 --help 原样打印）：
 #     baota-backup                 全量备份到 /www/backup/manual
@@ -221,11 +222,11 @@ dump_databases() {
     return 1
 }
 
-# 生成包内说明：版本号、时间、目录清单，以及恢复步骤
 write_manifest() {
     local file="$1" image_ver db_note sys_note
 
-    image_ver=$(cat /baota/VERSION 2> /dev/null || echo unknown)
+    image_ver=$(image_version)
+    [ -n "${image_ver}" ] || image_ver=unknown
     if [ -f "${TMP_DIR}/databases.sql" ]; then
         db_note='包含 MySQL 单事务转储 databases.sql'
     else
@@ -246,7 +247,7 @@ baota-backup 备份清单
 
 恢复步骤
 --------
-本包是整份 data 卷的镜像（业务与面板状态 data/www、${sys_note}
+本包是整份数据层的镜像（业务与面板状态 data/www、${sys_note}
 都在里面），直接整包解回 data 即可。
 面板代码不在包里 —— 它属于镜像，换镜像即升级：
 
@@ -279,16 +280,16 @@ EOF
 #    覆盖 PERSIST_SYSTEM_ROOT / PANEL_STATE_ROOT，写死会找不到）。
 # ==============================================================================
 collect_members() {
-    # 归档 data 卷内的顶层成员：业务与面板状态（www/）+ 系统层（镜像模式 overlay.img，原生模式 .system/）。
+    # 归档数据层内的顶层成员：业务与面板状态（www/）+ 系统层（镜像模式 overlay.img，原生模式 .system/）。
     # 面板状态已归位在 www/server/panel 下（与容器内位置同名），不再独立顶层；
-    # 面板代码不在 data 卷里 —— 它属于镜像，换镜像即升级，无需备份。
+    # 面板代码不在数据层里 —— 它属于镜像，换镜像即升级，无需备份。
     # 用显式成员而非 '.'：'.' 让成员名带 ./ 前缀，EXCLUDES 里的 'www/backup/manual'
     # 匹配不上 → 边写边读自己的输出包 → tar 报错。
     # 顶层 .baota 不进成员；系统层内的 .baota 由 EXCLUDES 排除。
     # 系统层成员名从配置真源派生（defaults.env 允许覆盖 PERSIST_SYSTEM_ROOT），
     # 写死成员名在非默认布局下 tar 找不到成员，报错还指向不存在的路径。
-    # 系统层若被指到 data 卷之外（tar 单一来源打不进来），在这里响亮拒绝；
-    # --rsync 分支没有这个限制，会对 data 卷外的系统层补第二条同步
+    # 系统层若被指到数据层之外（tar 单一来源打不进来），在这里响亮拒绝；
+    # --rsync 分支没有这个限制，会对数据层外的系统层补第二条同步
     local _mode="${1:-tar}" _system
     _system=$(basename "${PERSIST_SYSTEM_ROOT}")
     DATA_MEMBERS=('www')
@@ -311,11 +312,31 @@ collect_members() {
         # 明确告警而不是静默省略 —— 否则用户会误以为系统层已进包
         warn "系统层目录 ${PERSIST_SYSTEM_ROOT} 不存在：本次备份不含系统层"
     elif [ "${_mode}" = 'tar' ]; then
-        # 系统层被指到 data 卷之外：tar 单一来源覆盖不到 → 拒绝产出。
+        # 系统层被指到数据层之外：tar 单一来源覆盖不到 → 拒绝产出。
         # rsync 模式不在这里拒绝：rsync_sync 会对卷外的系统层补第二条同步
         die "PERSIST_SYSTEM_ROOT=${PERSIST_SYSTEM_ROOT} 不在数据层 ${PERSIST_DATA_ROOT} 内，tar 打包覆盖不到系统层（含面板账号、用户装的环境）；请改用 --rsync，或把系统层指回数据层内"
     fi
     return 0
+}
+
+# 打包：create 模式传 out 落盘；--stdout 模式不传，tar 流走 stdout。
+# 两模式共用这一份，避免排除项/成员/退出码判定漂移（历史上产物不一致就出在这里）。
+tar_payload() {
+    local out="${1:-}"
+    local rc=0
+    if [ -n "${out}" ]; then
+        tar --xattrs --xattrs-include='trusted.overlay.*' \
+            "${EXCLUDE_ARGS[@]}" \
+            -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${DATA_MEMBERS[@]}" \
+            -C "${TMP_DIR}" MANIFEST.txt "${EXTRA_MEMBERS[@]}" || rc=$?
+    else
+        tar --xattrs --xattrs-include='trusted.overlay.*' \
+            "${EXCLUDE_ARGS[@]}" \
+            -C "${PERSIST_DATA_ROOT}" -cz "${DATA_MEMBERS[@]}" \
+            -C "${TMP_DIR}" MANIFEST.txt "${EXTRA_MEMBERS[@]}" || rc=$?
+    fi
+    TAR_RC=${rc}
+    check_tar_rc "${rc}"
 }
 
 build_archive() {
@@ -339,25 +360,13 @@ build_archive() {
     #   而 MANIFEST.txt 正是恢复时的说明书（已踩过这个顺序坑）
     write_manifest "${TMP_DIR}/MANIFEST.txt"
 
-    local -a extra=()
-    [ -f "${TMP_DIR}/databases.sql" ] && extra+=(databases.sql)
+    EXTRA_MEMBERS=()
+    [ -f "${TMP_DIR}/databases.sql" ] && EXTRA_MEMBERS+=(databases.sql)
 
-    # 镜像模式打 www/ + overlay.img、原生模式打 www/ + 系统层目录，一次 -C 就够；
-    # 包内均为相对成员名，恢复时不受挂载方式影响
-    #
-    # 退出码不能直接 || die：热备份下 tar 常以 1（文件在读取期间被改写）结束，
-    # 那是可接受的，包照样完整；只有 ≥2 才是真失败。详见 check_tar_rc。
-    local rc=0
-    tar --xattrs --xattrs-include='trusted.overlay.*' \
-        "${EXCLUDE_ARGS[@]}" \
-        -C "${PERSIST_DATA_ROOT}" -czf "${out}" "${DATA_MEMBERS[@]}" \
-        -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
-        || rc=$?
-
-    if ! check_tar_rc "${rc}"; then
+    if ! tar_payload "${out}"; then
         # 失败的半成品必须清掉：留着会让用户误以为手里有回滚点
         rm -f "${out}" 2> /dev/null || true
-        die "打包失败（tar 退出码 ${rc}）：${out}"
+        die "打包失败（tar 退出码 ${TAR_RC}）：${out}"
     fi
 
     log "备份完成：${out}（$(du -mh "${out}" 2> /dev/null | cut -f1)）"
@@ -377,7 +386,7 @@ verify_archive() {
     log "正在校验：${file}"
     listing=$(tar tzf "${file}" 2> /dev/null) || die "无法读取备份包（文件损坏或不是 tar.gz）"
 
-    # 关键成员检查（整份 data 卷归档，结构与宿主机一致）：
+    # 关键成员检查（整份数据层归档，结构与宿主机一致）：
     #   www/wwwroot/          站点（业务 bind）
     #   <面板状态根>/data     面板配置 + 数据库（面板状态 bind）
     #   MANIFEST.txt          备份清单（由 backup.sh 自动生成）
@@ -463,7 +472,7 @@ rsync_sync() {
                 ;;
         esac
         # 反向同样要拦：目标在持久化层内部时，rsync 会把「包含目标的源」往
-        # 目标里同步，每跑一次体积近似翻倍，最终撑满 data 卷
+        # 目标里同步，每跑一次体积近似翻倍，最终撑满数据层
         case "${dest}" in
             "${_src}"/*)
                 die "拒绝同步到持久化层内部：${dest}（源包含目标，越同步越大）"
@@ -493,7 +502,7 @@ rsync_sync() {
         log '未附加 MySQL 转储（MySQL 未运行或未安装）'
     fi
 
-    # rsync 能同步 data 卷之外的路径，所以这里用 rsync 模式收集成员：
+    # rsync 能同步数据层之外的路径，所以这里用 rsync 模式收集成员：
     # 系统层在卷外时不拒绝，由下面补第二条同步
     collect_members rsync
     [ ${#DATA_MEMBERS[@]} -gt 0 ] || die "数据层 ${PERSIST_DATA_ROOT} 下没有任何持久化目录，无需备份"
@@ -509,9 +518,9 @@ rsync_sync() {
         rargs+=( "--exclude=/${SYSTEM_MEMBER}" )
     fi
 
-    # --rsync 整层同步 data 卷（业务与面板状态 data/www + 系统层：镜像模式是
+    # --rsync 整层同步数据层（业务与面板状态 data/www + 系统层：镜像模式是
     # data/overlay.img、原生模式是 data/.system/），一条命令覆盖全部。
-    # 但用户把 PERSIST_SYSTEM_ROOT 指到 data 卷之外时（defaults.env 允许），
+    # 但用户把 PERSIST_SYSTEM_ROOT 指到数据层之外时（defaults.env 允许），
     # 这条 rsync 摸不到它 —— 会静默漏掉整个系统层，恢复后账号、环境全丢。
     # 对这种布局显式补第二条同步
     log "增量同步 ${PERSIST_DATA_ROOT} -> ${dest}/data"
@@ -519,7 +528,7 @@ rsync_sync() {
         || die "同步失败：${dest}/data"
 
     case "${PERSIST_SYSTEM_ROOT}" in
-        "${PERSIST_DATA_ROOT}"/*) ;;   # 系统层在 data 卷内，上面那条已覆盖
+        "${PERSIST_DATA_ROOT}"/*) ;;   # 系统层在数据层内，上面那条已覆盖
         *)
             log "增量同步 ${PERSIST_SYSTEM_ROOT} -> ${dest}/system"
             mkdir -p "${dest}/system" 2> /dev/null \
@@ -559,7 +568,7 @@ main() {
             # ★ 本分支所有输出必须走 stderr：stdout 是 tar 流，混进文字会让备份包
             #   损坏（且解压时才发现）。所以这里用 echo ... >&2，不能用 log()（走 stdout）。
             #
-            # 产物必须与 create 一致，否则过不了自己的 --verify：整份 data 卷、
+            # 产物必须与 create 一致，否则过不了自己的 --verify：整份数据层、
             # 附 MANIFEST.txt 与 MySQL 转储、排除项共用 EXCLUDE_ARGS；唯一区别是
             # 流已吐出、无法生成后自校验
             collect_members
@@ -567,9 +576,9 @@ main() {
 
             TMP_DIR=$(mktemp -d)
 
-            local -a extra=()
+            EXTRA_MEMBERS=()
             if dump_databases "${TMP_DIR}/databases.sql"; then
-                extra+=( databases.sql )
+                EXTRA_MEMBERS+=( databases.sql )
                 echo '📦 [backup] 已附加 MySQL 一致性转储（databases.sql）' >&2
             else
                 echo '📦 [backup] 未附加 MySQL 转储（MySQL 未运行或未安装）' >&2
@@ -578,28 +587,17 @@ main() {
             # 同 create 模式：清单要在转储之后生成，否则「已转储」会被写成「未包含」
             write_manifest "${TMP_DIR}/MANIFEST.txt"
 
-            # 退出码处理与 create 模式一致（热备份下 tar 返回 1 可接受）。
-            # 这里无法清理半成品 —— 流已经吐出去了，读不回来。
-            # check_tar_rc 的告警走 stderr，不会污染 stdout 的 tar 流
-            local rc=0
-            tar --xattrs --xattrs-include='trusted.overlay.*' \
-                "${EXCLUDE_ARGS[@]}" \
-                -C "${PERSIST_DATA_ROOT}" -cz "${DATA_MEMBERS[@]}" \
-                -C "${TMP_DIR}" MANIFEST.txt "${extra[@]}" \
-                || rc=$?
-
-            if ! check_tar_rc "${rc}"; then
-                die "打包失败（tar 退出码 ${rc}）"
-            fi
+            # 流已吐出、无法清理半成品；tar_payload 内含同样的退出码判定
+            tar_payload || die "打包失败（tar 退出码 ${TAR_RC}）"
             return 0
             ;;
     esac
 
-    [ -d "${PERSIST_DATA_ROOT}" ] || die "数据层根目录不存在：${PERSIST_DATA_ROOT}（容器未挂载 data 卷？）"
+    [ -d "${PERSIST_DATA_ROOT}" ] || die "数据层根目录不存在：${PERSIST_DATA_ROOT}（容器未挂载数据层？）"
     # 镜像模式的系统层真身是 data/overlay.img、挂载点在 /run，data/ 下没有 .system；
     # collect_members 已改打镜像文件，再要求原生 upper 目录必然把默认备份判死
     if [ -z "${SYSTEM_IMAGE_REL}" ]; then
-        [ -d "${PERSIST_SYSTEM_ROOT}" ] || die "系统层根目录不存在：${PERSIST_SYSTEM_ROOT}（容器未挂载 data 卷？）"
+        [ -d "${PERSIST_SYSTEM_ROOT}" ] || die "系统层根目录不存在：${PERSIST_SYSTEM_ROOT}（容器未挂载数据层？）"
     fi
 
     mkdir -p "${OUTPUT_DIR}" 2> /dev/null || die "无法创建输出目录：${OUTPUT_DIR}"
@@ -613,7 +611,7 @@ main() {
     if [ "${QUIET}" = '1' ]; then
         echo "${out}"
     else
-        # 宿主机可见路径 = compose 目录（data 卷）下的相对路径，即去掉根斜杠。
+        # 宿主机可见路径 = compose 目录（数据层）下的相对路径，即去掉根斜杠。
         # 只有产物落在持久化层里才谈得上「宿主机位置」：用户用 -o 指到容器内
         # 其它地方时，那个路径在宿主机上并不存在，如实打印容器内路径，
         # 不要拼出一个看起来像、实际打不开的路径。

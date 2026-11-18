@@ -13,7 +13,7 @@ name: 📦 发布：构建并发布镜像
 #  🧪 dev 测试标签（勾选 dev 时，见下方 inputs）：
 #    忽略「构建线」输入，只构建编号最大的那条线（有 15_version 就它，否则 14…），
 #    标签固定发布 :dev（不随版本号、不发 latest），且**不回写版本记录** ——
-#    它是「先测后发」的测试标签，不影响正式发布线；正式发布 = 不勾选（默认）。
+#    它是「先测后发」的测试标签，不影响正式线；正式发布 = 不勾选（默认）。
 #  🔑 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
 # ==============================================================================
 
@@ -448,7 +448,7 @@ jobs:
             # 字面量静态标签：只发 :<tag>，不随版本号、也不发 latest
             tags=( -t "${REPO}:${{ matrix.tag }}" )
           fi
-          # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败
+          # DockerHub CDN 偶发 connection reset by peer，重试避免整条线因瞬时网络失败
           ok=0
           for i in 1 2 3; do
             if docker buildx imagetools create "${tags[@]}" "${REPO}@${AMD64}" "${REPO}@${ARM64}"; then

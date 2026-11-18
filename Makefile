@@ -164,7 +164,8 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	@for f in image/build/*.sh image/scripts/entrypoint.sh \
 	          image/scripts/backup.sh \
 	          image/scripts/shim.sh \
-	          .github/scripts/check.sh; do \
+	          .github/scripts/check.sh \
+	          .github/scripts/lint.sh; do \
 	    bash -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- sh -n (POSIX) ---'
@@ -173,9 +174,9 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	    sh -n "$$f" && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- shellcheck ---'
-	@bash .github/scripts/check.sh lint shellcheck
+	@bash .github/scripts/lint.sh shellcheck
 	@echo '--- BT-Panel 字面量（非注释行）检查 ---'
-	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check.sh 2>/dev/null \
+	@BAD=$$(grep -rn 'BT-Panel' image/build image/scripts .github/scripts/check.sh .github/scripts/lint.sh 2>/dev/null \
 	      | grep -vE ':[0-9]+:[[:space:]]*#' || true); \
 	 if [ -n "$$BAD" ]; then \
 	   echo '  FAIL 非注释行出现 BT-Panel 字面量：'; \
@@ -185,11 +186,11 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	 fi; \
 	 echo '  ok  无非注释的 BT-Panel 字面量'
 	@echo '--- 配置真源一致性（defaults.env vs 各脚本兜底）---'
-	@bash .github/scripts/check.sh lint config
+	@bash .github/scripts/lint.sh config
 	@echo '--- 命名规范（禁用标识符 / 容器名 / 卷名 / 变量前后缀 / 术语）---'
-	@bash .github/scripts/check.sh lint naming
+	@bash .github/scripts/lint.sh naming
 	@echo '--- 注释体积（文件头 ≤16 行、注释块 ≤10 行）---'
-	@bash .github/scripts/check.sh lint comments
+	@bash .github/scripts/lint.sh comments
 	@echo '--- YAML 语法 ---'
 	@for f in docker-compose.yml \
 	          .github/workflows/*.yml; do \
@@ -197,6 +198,6 @@ lint: ## 静态检查：shellcheck + bash -n + YAML 语法
 	        && echo "  ok  $$f" || { echo "  FAIL $$f"; exit 1; }; \
 	 done
 	@echo '--- workflow 内嵌脚本语法 ---'
-	@bash .github/scripts/check.sh lint workflow
+	@bash .github/scripts/lint.sh workflow
 	@echo '--- 文档链接与锚点 ---'
-	@bash .github/scripts/check.sh lint links
+	@bash .github/scripts/lint.sh links

@@ -204,7 +204,7 @@ jobs:
       - name: ✏️ 注入 README 并回写仓库
         run: |
           set -euo pipefail
-          bash .github/scripts/check.sh report "${REPORT}"
+          python3 .github/scripts/report.py "${REPORT}"
           git add "${REPORT}" README.md
 
           echo '--- 待提交变更 ---'

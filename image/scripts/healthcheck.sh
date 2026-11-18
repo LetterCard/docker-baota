@@ -36,16 +36,13 @@ if [ "${_shim}" != '/baota/shim.sh' ]; then
     exit 1
 fi
 
-_img=$(tr -d '[:space:]' < /baota/VERSION 2> /dev/null || true)
-case "${_img}" in
-    [0-9]*.[0-9]*.[0-9]*)
-        _cur=$(panel_version /www/server/panel/class/common.py)
-        if [ "${_cur}" != "${_img}" ]; then
-            warn "面板代码版本 ${_cur:-未知} ≠ 镜像版本 ${_img}（重建容器即回到镜像版本）"
-            exit 1
-        fi
-        ;;
-    *) : ;;   # dev / unknown：本地构建，无法比较，跳过
-esac
+_img=$(image_version)
+if is_semver "${_img}"; then
+    _cur=$(panel_version /www/server/panel/class/common.py)
+    if [ "${_cur}" != "${_img}" ]; then
+        warn "面板代码版本 ${_cur:-未知} ≠ 镜像版本 ${_img}（重建容器即回到镜像版本）"
+        exit 1
+    fi
+fi
 
 exit 0

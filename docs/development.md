@@ -48,7 +48,9 @@ baota-docker/
 └── .github/
     ├── reports/               CI 回写产物：两篇报告 + baseline.json（不要手改）
     ├── scripts/
-    │   └── check.sh           CI 统一入口：四套门禁 + 每日巡检 + 漂移检测 + 静态检查 + 报告注入（子命令）
+    │   ├── report.py          把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区
+    │   ├── check.sh           CI 检查统一入口：四套门禁 + 每日巡检 + 上游漂移检测
+    │   └── lint.sh            静态检查统一入口（make lint 逐项调子命令，见 §9）
     └── workflows/
         ├── build.yml          构建发布（一份流水线跑 12/13 所有线，矩阵从 lines.conf 生成）
         ├── build-pro.yml      pro 线专属构建（独立 Dockerfile / 授权补丁 / VERSION）
@@ -91,7 +93,7 @@ baota-docker/
 # 相关：docs/xxx.md#锚点
 ```
 
-★ **硬上限**（由 `make lint` 的 `check.sh lint comments` 强制，超了就红）：
+★ **硬上限**（由 `make lint` 的 `lint.sh comments` 强制，超了就红）：
 
 | 位置 | 上限 |
 |---|---|
@@ -117,7 +119,7 @@ baota-docker/
 
 **标题层级**：`#` 后**必须**有空格（`##标题` 会被 GitHub 当正文，目录里的锚点点了没反应）；
 一篇只允许一个 H1；README 的章节一律 H2，注入进来的报告由
-`.github/scripts/check.sh report` **整篇降 2 级**（H1→H3…），所以报告内部不会与章节标题同级。
+`.github/scripts/report.py` **整篇降 2 级**（H1→H3…），所以报告内部不会与章节标题同级。
 `make lint` 会检查前两项（标题缺空格、多个 H1）—— 这两类错误渲染不报错，只能靠工具拦。
 
 **命名、路径与目录结构**：唯一真源是 [命名与目录结构约定](#命名与目录结构约定维护者速查表)
@@ -208,7 +210,7 @@ docker build -f image/Dockerfile \
 ```
 
 > ⚠️ `make lint` 里的 shellcheck **warning 级别即判失败**。本地未安装时，
-> `.github/scripts/check.sh lint shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（该目录已 gitignore）；
+> `.github/scripts/lint.sh shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（该目录已 gitignore）；
 > 网络不通时才失败，不会静默跳过。
 
 想自己装也可以（在 `PATH` 里就直接用，不下载）：
@@ -225,7 +227,7 @@ pip 的 `--user` 位置不一定是 `~/.local/bin`（macOS 系统 Python 在
 PATH="$(dirname "$(find ~/Library/Python ~/.local -name shellcheck -type f 2>/dev/null | head -1)"):$PATH" make lint
 ```
 
-单独重跑某一项用子命令，例如 `bash .github/scripts/check.sh lint links`（清单见 §9）。
+单独重跑某一项用子命令，例如 `bash .github/scripts/lint.sh links`（清单见 §9）。
 
 ## 架构支持
 
@@ -314,7 +316,7 @@ core 门禁（A15 / A16）拦下发布，不会静默上线。完整根因分析
 - 持久化层的每一次写入都不可逆：**能不写就不写**。
   新增「每次启动都做的事」时，先判断结果是否真的需要变化，变化了才写
 - **shellcheck 的 warning 会让 CI 失败**（`make lint` 用 `-S warning`），本地没装时
-  `check.sh lint shellcheck` 会自动下载，别把这项从检查里摘掉。典型例子：未使用的循环计数器
+  `lint.sh shellcheck` 会自动下载，别把这项从检查里摘掉。典型例子：未使用的循环计数器
   （`for i in $(seq 1 60)` 但循环体没读到 `i`）会报 SC2034 —— 用不到就写成 `_`
 - **动 `image/conf/defaults.env` 的目录清单要连着发布一起做**：门禁（core / degrade /
   upgrade）读的是**仓库里**的清单，跑的是**镜像**；往 `WWW_DATA_SUBDIRS` 加一个目录
@@ -528,14 +530,14 @@ data/
 | 加 / 改一个持久化目录 | `defaults.env` 清单 → 本文 §2 → `persistence.md` → README 目录树 |
 | 加一个配置变量 | `defaults.env` → `.github/scripts/check.sh` 里 `run_config` 的 `VARS` → `configuration.md` |
 | 加一个元数据文件 | `defaults.env` 的 `META_*` → 本文 §4 |
-| 改标题或移动文档 | 目录与交叉链接（`make lint` 的 `check.sh lint links` 会拦死链） |
+| 改标题或移动文档 | 目录与交叉链接（`make lint` 的 `lint.sh links` 会拦死链） |
 | 新增文档 | 本文 §7 分工表 + README 文档地图 |
 | 加一项静态检查 | `check.sh` 加一个 `run_<名字>()` 并挂进 `lint` 的 `case` → 本文 §9 表格 |
 
 ### 9. 自动化保障
 
-六项检查共用一份 `.github/scripts/check.sh lint`：`make lint` 逐项调子命令，排障时也能
-`bash .github/scripts/check.sh lint <子命令>` 单跑。每一项都守着本文的一条约定：
+六项检查共用一份 `.github/scripts/lint.sh`：`make lint` 逐项调子命令，排障时也能
+`bash .github/scripts/lint.sh <子命令>` 单跑。每一项都守着本文的一条约定：
 
 | 子命令 | 守护的约定 |
 |---|---|

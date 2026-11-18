@@ -278,7 +278,7 @@ jobs:
           [ -n "${AMD64}" ] && [ -n "${ARM64}" ] || { echo '::error::缺少 digest'; exit 1; }
 
           tags=( -t "${REPO}:${{ env.PRO_TAG }}" )
-          # DockerHub CDN 偶发 connection reset by peer，重试避免整条发布线因瞬时网络失败
+          # DockerHub CDN 偶发 connection reset by peer，重试避免整条线因瞬时网络失败
           ok=0
           for i in 1 2 3; do
             if docker buildx imagetools create "${tags[@]}" "${REPO}@${AMD64}" "${REPO}@${ARM64}"; then

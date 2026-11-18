@@ -74,7 +74,7 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 11. **`.github/reports/report.md` / `.github/reports/drift.md` 与 README 的 `<!-- DAILY-VERIFY-REPORT:START/END -->`、`<!-- DAILY-DRIFT-REPORT:START/END -->` 标记区由 CI 维护**，
     不要手改 —— 下次巡检运行会被整体覆盖。
 12. **`make lint` 的 shellcheck 是 warning 即失败**；未安装时统一入口
-    `.github/scripts/check.sh lint shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（不要提交缓存，
+    `.github/scripts/lint.sh shellcheck` 会按 CPU 架构下载到 `.cache/shellcheck`（不要提交缓存，
     也别用异架构二进制硬跑）。典型的 SC2034 是未使用的循环计数器，用不到就写 `_`。
 13. **面板代码的执行入口只有一个：pyenv 解释器**。`services.sh` 的 `setup_guard`
     把 `pyenv/bin/{python,python3}` 指向 `/baota/shim.sh`，真解释器挪到
@@ -101,7 +101,8 @@ description: "Development and operations guide for this repo (baota-docker: 把�
 | `image/versions/<主线号>/VERSION` | 各线「已发布」版本（发布流水线回写） |
 | `.github/scripts/check.sh` | CI 检查统一入口：`core` / `degrade` / `upgrade` / `restore` 四套门禁 + `published` 每日巡检 + `drift` 上游漂移检测（一次性容器真装比对目录落点）；每套是独立子 shell 函数 |
 | `.github/reports/baseline.json` | 漂移检测基线（CI 回写，勿手改） |
-| `.github/scripts/check.sh` | 统一入口：`lint <子命令>` 静态检查、`report [报告] [标记]` 注入 README、`core/…` 门禁 |
+| `.github/scripts/report.py` | 把报告（.github/reports/report.md / .github/reports/drift.md）注入 README 对应标记区 |
+| `.github/scripts/lint.sh` | 静态检查统一入口；`make lint` 逐项调 `shellcheck/config/naming/comments/links/workflow` 子命令 |
 | `.github/workflows/build.yml` | 构建发布：一份流水线跑 12/13 所有线（矩阵从 lines.conf 生成；pro 线另有 build-pro.yml） |
 | `.github/workflows/check.yml` | 每日巡检：prep → 各线**并行**验证 → report 回写 |
 | `.github/workflows/drift.yml` | 每日漂移检测工作流：probe →（有变更时）drift → report 回写 |
@@ -118,7 +119,7 @@ make up                        # 起容器
 make logs                      # 看日志（首次登录凭据在这里）
 make ps                        # 健康状态
 make health                    # 跑发布前健康检查
-make lint                      # 统一入口 .github/scripts/check.sh lint（shellcheck 未装自动下载；CI 上 warning 即失败）
+make lint                      # 统一入口 .github/scripts/lint.sh（shellcheck 未装自动下载；CI 上 warning 即失败）
 
 docker exec baota baota-backup            # 备份
 docker exec baota baota-backup --list     # 体积分布 + 磁盘水位
