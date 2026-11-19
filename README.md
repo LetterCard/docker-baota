@@ -321,9 +321,9 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 <!-- DAILY-VERIFY-REPORT:START -->
 ### 📊 已发布镜像每日验证报告
 
-> 本文件由 `.github/workflows/check.yml` 自动生成，每次运行整体覆盖（不追加）。
+> 本报告由 `.github/workflows/check.yml` 生成并注入 README，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-11-18 01:13:49
+- 生成时间（UTC）：2026-11-19 00:41:58
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
 - 验证脚本：`.github/scripts/check.sh published`
@@ -333,7 +333,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 线 | 镜像 | 结果 |
 |---|---|---|
 | 12.x | `bugseeker/baota:12.0.0` | ✅ |
-| 13.x | `bugseeker/baota:13.1.0` | ✅ |
+| 13.x | `bugseeker/baota:13.2.0` | ✅ |
 
 ---
 
@@ -346,7 +346,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 202s |
+| 耗时 | 111s |
 
 ###### 检查项
 
@@ -364,10 +364,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ###### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 09:10:45 - 已获得系统层持久化层独占锁
-⚙️ [init] 09:10:48 - 已获得数据层持久化层独占锁
-⚙️ [init] 09:10:48 - 持久化层并发保护已就位
-⚙️ [init] 09:10:48 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
+⚙️ [init] pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
 💾 持久化层挂载
 ├─ 系统层  /data/.system
 │   └── www/server
@@ -375,31 +372,31 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ├─ 覆盖层  /data/www/server/panel/pyenv（pip 包持久化，解释器随镜像）
 └─ 面板状态  /data/www/server/panel
 📦 面板代码：来自镜像层 /www/server/panel（不落持久化层）
-🚀 [entrypoint] 09:10:48 - 首次使用这份持久化数据，记录镜像版本 12.0.0
-🚀 [entrypoint] 09:10:49 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+🚀 [entrypoint] 首次使用这份持久化数据，记录镜像版本 12.0.0
+🚀 [entrypoint] 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 09:10:49 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 09:10:49 - 面板用户：baota
-🚀 [entrypoint] 09:10:49 - 面板口令：***已脱敏***
-🚀 [entrypoint] 09:10:49 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 09:10:49 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 09:10:49 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 面板用户：baota
+🚀 [entrypoint] 面板口令：5666360c8ec9
+🚀 [entrypoint] root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 09:10:49 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 移交 systemd：/usr/sbin/init
 ```
 
 ---
 
-#### 13.x（13_version，13.1.0）
+#### 13.x（13_version，13.2.0）
 
-##### ✅ bugseeker/baota:13.1.0
+##### ✅ bugseeker/baota:13.2.0
 
 | 项 | 值 |
 |---|---|
-| 镜像 | `bugseeker/baota:13.1.0` |
-| 期望宝塔版本 | `13.1.0` |
+| 镜像 | `bugseeker/baota:13.2.0` |
+| 期望宝塔版本 | `13.2.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 154s |
+| 耗时 | 96s |
 
 ###### 检查项
 
@@ -417,10 +414,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ###### 首次启动日志（全新数据卷，已脱敏）
 
 ```text
-⚙️ [init] 09:10:39 - 已获得系统层持久化层独占锁
-⚙️ [init] 09:10:42 - 已获得数据层持久化层独占锁
-⚙️ [init] 09:10:42 - 持久化层并发保护已就位
-⚙️ [init] 09:10:42 - pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
+⚙️ [init] pyenv 覆盖层已挂载：pip 包持久化，解释器随镜像更新
 💾 持久化层挂载
 ├─ 系统层  /data/.system
 │   └── www/server
@@ -428,17 +422,17 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ├─ 覆盖层  /data/www/server/panel/pyenv（pip 包持久化，解释器随镜像）
 └─ 面板状态  /data/www/server/panel
 📦 面板代码：来自镜像层 /www/server/panel（不落持久化层）
-🚀 [entrypoint] 09:10:42 - 首次使用这份持久化数据，记录镜像版本 13.1.0
-🚀 [entrypoint] 09:10:43 - 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
+🚀 [entrypoint] 首次使用这份持久化数据，记录镜像版本 13.2.0
+🚀 [entrypoint] 首次启动，正在初始化面板端口、安全入口、面板账号与 root 口令
 ==================================================================
-🚀 [entrypoint] 09:10:43 - 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
-🚀 [entrypoint] 09:10:43 - 面板用户：baota
-🚀 [entrypoint] 09:10:43 - 面板口令：***已脱敏***
-🚀 [entrypoint] 09:10:43 - root 口令：***已脱敏***（容器内 SSH 用）
-🚀 [entrypoint] 09:10:43 - 以上凭据只在首次启动时打印，请登录后立即修改
-🚀 [entrypoint] 09:10:43 - 数据层：/data（站点目录在 /data/www/wwwroot）
+🚀 [entrypoint] 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
+🚀 [entrypoint] 面板用户：baota
+🚀 [entrypoint] 面板口令：b927e85c4451
+🚀 [entrypoint] root 口令：***已脱敏***（容器内 SSH 用）
+🚀 [entrypoint] 以上凭据只在首次启动时打印，请登录后立即修改
+🚀 [entrypoint] 数据层：/data（站点目录在 /data/www/wwwroot）
 ==================================================================
-🚀 [entrypoint] 09:10:43 - 移交 systemd：/usr/sbin/init
+🚀 [entrypoint] 移交 systemd：/usr/sbin/init
 ```
 
 ---
