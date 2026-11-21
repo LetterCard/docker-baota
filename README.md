@@ -323,7 +323,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 
 > 本报告由 `.github/workflows/check.yml` 生成并注入 README，每次运行整体覆盖（不追加）。
 
-- 生成时间（UTC）：2026-11-20 00:50:03
+- 生成时间（UTC）：2026-11-21 00:08:35
 - 触发方式：schedule
 - 验证平台：linux/amd64（GitHub-hosted runner；arm64 不在本报告覆盖范围，由构建工作流在原生 ARM runner 上负责）
 - 验证脚本：`.github/scripts/check.sh published`
@@ -346,7 +346,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 镜像 | `bugseeker/baota:12.0.0` |
 | 期望宝塔版本 | `12.0.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 109s |
+| 耗时 | 113s |
 
 ###### 检查项
 
@@ -377,7 +377,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ==================================================================
 🚀 [entrypoint] 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
 🚀 [entrypoint] 面板用户：baota
-🚀 [entrypoint] 面板口令：1ac1940c2a89
+🚀 [entrypoint] 面板口令：cec8a8fb5d36
 🚀 [entrypoint] root 口令：***已脱敏***（容器内 SSH 用）
 🚀 [entrypoint] 以上凭据只在首次启动时打印，请登录后立即修改
 🚀 [entrypoint] 数据层：/data（站点目录在 /data/www/wwwroot）
@@ -396,7 +396,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 | 镜像 | `bugseeker/baota:13.2.0` |
 | 期望宝塔版本 | `13.2.0` |
 | 结果 | ✅ 通过 7 / 失败 0 |
-| 耗时 | 117s |
+| 耗时 | 101s |
 
 ###### 检查项
 
@@ -427,7 +427,7 @@ README 只讲「是什么、怎么跑、设计核心的四条原则」；细节�
 ==================================================================
 🚀 [entrypoint] 面板地址：http://<宿主机IP>:8888/***已脱敏***/login
 🚀 [entrypoint] 面板用户：baota
-🚀 [entrypoint] 面板口令：a83f9a1c89b1
+🚀 [entrypoint] 面板口令：88c870d7a305
 🚀 [entrypoint] root 口令：***已脱敏***（容器内 SSH 用）
 🚀 [entrypoint] 以上凭据只在首次启动时打印，请登录后立即修改
 🚀 [entrypoint] 数据层：/data（站点目录在 /data/www/wwwroot）
